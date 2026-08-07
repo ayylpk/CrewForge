@@ -1,0 +1,102 @@
+/* ============================================================
+   CrewForge 全局样式 — 风格：现代科技极简 + 赛博朋克元素 + 扁平化
+   基准：src/views/LoginView.vue（用户已确认满意）
+   ============================================================ */
+
+:root {
+  /* ===== 色彩（深海科技蓝 Deep Ocean Tech Blue） ===== */
+  --bg: #06080f;            /* 主背景（深藏青/午夜蓝，偏深） */
+  --bg2: #0c1020;           /* 卡片背景 */
+  --bg3: #121829;           /* 次级卡片/输入框 */
+  --bg4: #181f36;           /* 悬浮/代码块 */
+
+  --border: #222a3e;        /* 默认边框 */
+  --border2: #2d3650;       /* hover 边框 */
+
+  --text: #c8d0e0;          /* 主文字 */
+  --text2: #8890a8;         /* 次级文字 */
+  --text3: #566072;         /* 弱文字/占位 */
+
+  --blue: #45b8ff;          /* 电光蓝 */
+  --purple: #a76bff;        /* 霓虹紫 */
+  --green: #5ecb8a;         /* 成功/执行中 */
+  --yellow: #f0c060;        /* 警告/澄清中 */
+  --red: #f26060;           /* 错误/失败 */
+  --cyan: #5ec8c0;          /* 信息 */
+  --orange: #f09050;        /* 次要状态 */
+  --pink: #f070a0;          /* 强调（光环） */
+
+  /* ===== 渐变（电光蓝 → 霓虹紫） ===== */
+  --grad1: linear-gradient(135deg, #45b8ff, #a76bff);  /* 主渐变（按钮/高亮） */
+
+  /* ===== 形状 ===== */
+  --radius-sm: 8px;
+  --radius: 12px;
+  --radius-lg: 16px;
+
+  /* ===== 毛玻璃 ===== */
+  --glass-bg: rgba(15, 19, 31, 0.6);
+  --glass-border: rgba(37, 43, 61, 0.45);
+  --glass-blur: 12px;
+
+  /* ===== 阴影 ===== */
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.25);
+  --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  --shadow-lg: 0 20px 60px rgba(0, 0, 0, 0.45);
+
+  /* ===== 动效 ===== */
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --dur: 0.2s;
+}
+
+/* ===== 重置 ===== */
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ===== 滚动条（暗色适配） ===== */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--border2);
+}
+
+/* ===== 渐变文字 ===== */
+.grad-text {
+  background: var(--grad1);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* ===== 页面容器通用 ===== */
+.page {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  padding: 32px 48px;
+}

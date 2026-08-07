@@ -1,0 +1,27 @@
+# ===== Java (Maven) =====
+**/target/
+*.class
+*.jar
+!**/.mvn/wrapper/maven-wrapper.jar
+
+# ===== Node (Vue) =====
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# ===== IDE =====
+.idea/
+*.iml
+.vscode/
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
+
+# ===== 日志/临时 =====
+*.log
+*.tmp
+
+# ===== 敏感配置（本地开发用，不提交；部署时参照 application.example.yml）=====
+**/application.yml

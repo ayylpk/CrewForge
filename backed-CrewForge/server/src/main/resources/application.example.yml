@@ -1,0 +1,50 @@
+# ============================================================
+# 配置模板（提交到仓库）
+# 使用方法: 复制本文件为 application.yml，把占位符换成自己的值
+#   cp application.example.yml application.yml
+# ============================================================
+
+server:
+  port: 8080
+
+spring:
+  application:
+    name: crewforge-server
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/crewforge?serverTimezone=Asia/Shanghai&useUnicode=true&characterEncoding=utf-8&allowPublicKeyRetrieval=true&useSSL=false
+    username: root
+    password: your_mysql_password   # ← 改成你的 MySQL 密码
+    type: com.alibaba.druid.pool.DruidDataSource
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      database: 0
+
+mybatis-plus:
+  mapper-locations: classpath:mapper/*.xml
+  type-aliases-package: com.hina.crewforge.pojo.entity
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    db-config:
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+logging:
+  level:
+    com.hina.crewforge:
+      mapper: debug
+      service: info
+      controller: info
+
+crewforge:
+  jwt:
+    admin-secret-key: your_admin_secret_key   # ← 换成随机 Base64 密钥（可用 openssl rand -base64 32 生成）
+    admin-ttl: 7200000
+    admin-token-name: Authorization
+    user-secret-key: your_user_secret_key     # ← 换成随机 Base64 密钥
+    user-ttl: 604800000
+    user-token-name: Authorization

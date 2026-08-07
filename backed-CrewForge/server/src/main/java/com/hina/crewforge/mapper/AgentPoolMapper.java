@@ -1,0 +1,23 @@
+package com.hina.crewforge.mapper;
+
+import com.hina.crewforge.pojo.QueryParam.AgentPoolQueryParam;
+import com.hina.crewforge.pojo.entity.AgentPool;
+import org.apache.ibatis.annotations.Mapper;
+import org.apache.ibatis.annotations.Param;
+
+import java.time.LocalDateTime;
+import java.util.List;
+
+@Mapper
+public interface AgentPoolMapper {
+    List<AgentPool> list(AgentPoolQueryParam agentQueryParam);
+
+    void insert(AgentPool entity);
+
+    void updateById(AgentPool entity);
+
+    AgentPool getById(Long id);
+
+    void deleteByIds(@Param("ids") List<Long> ids, @Param("userId") Long userId,
+                     @Param("updateTime") LocalDateTime updateTime);
+}
