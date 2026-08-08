@@ -25,7 +25,7 @@ public class UserTenant {
     /** 团队 ID */
     private Long tenantId;
 
-    /** 状态: 1-正常成员, 0-已退出/已移除 */
+    /** 状态: 1-正常成员, 0-已退出/已移除 2-申请中*/
     private Integer status;
 
     /** 加入时间 */

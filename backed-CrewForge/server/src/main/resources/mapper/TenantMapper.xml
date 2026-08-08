@@ -4,7 +4,6 @@
 
     <select id="list" parameterType="com.hina.crewforge.pojo.QueryParam.TenantQueryParam"
             resultType="com.hina.crewforge.pojo.entity.Tenant">
-        <bind name="offset" value="(page - 1) * pageSize"/>
         SELECT id, name, owner_id, contact, phone, status, invitation_code, max_members, create_time, update_time
         FROM sys_tenant
         WHERE deleted = 0
@@ -12,7 +11,6 @@
             AND name LIKE CONCAT('%', #{tenantName}, '%')
         </if>
         ORDER BY create_time DESC
-        LIMIT #{pageSize} OFFSET #{offset}
     </select>
 
 </mapper>

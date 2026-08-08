@@ -13,6 +13,8 @@ const router = createRouter({
     { path: '/agents', name: 'agent-repo', component: () => import('../views/AgentRepositoryView.vue') },
     // Agent 表单（新建仓库 Agent）
     { path: '/agents/new', name: 'agent-new', component: () => import('../views/AgentFormView.vue') },
+    // Agent 表单（编辑仓库 Agent，:id 即编辑回显模式）
+    { path: '/agents/:id', name: 'agent-edit', component: () => import('../views/AgentFormView.vue') },
     // 新建项目页（配置区 + AI 对话区）
     { path: '/projects/new', name: 'project-new', component: () => import('../views/CreateProjectView.vue') },
     // 需求对话（复用项目经理工作台：确认具体功能，带 :id 即澄清模式）

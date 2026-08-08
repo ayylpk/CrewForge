@@ -4,7 +4,6 @@
 
     <select id="list" parameterType="com.hina.crewforge.pojo.QueryParam.ProjectAgentQueryParam"
             resultType="com.hina.crewforge.pojo.entity.ProjectAgent">
-        <bind name="offset" value="(page - 1) * pageSize"/>
         SELECT id, project_id, user_id, name, role, system_prompt, tools, model, temperature, status, create_time, update_time
         FROM sys_project_agent
         WHERE deleted = 0
@@ -18,7 +17,6 @@
             AND (name LIKE CONCAT('%', #{keyword}, '%') OR role LIKE CONCAT('%', #{keyword}, '%'))
         </if>
         ORDER BY create_time DESC
-        LIMIT #{pageSize} OFFSET #{offset}
     </select>
 
     <!-- 查询某项目某用户的全部 Agent（无分页，团队配置页回显用） -->

@@ -3,8 +3,10 @@ import { ref, computed, nextTick, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import CardShell from '../components/CardShell.vue'
 import { fetchProjectById } from '../api/project'
-import { fetchAllProjectAgents, createProjectAgent, updateProjectAgent, deleteProjectAgents } from '../api/agent'
-import type { agentDTO, agentVO } from '../types/agent'
+import { fetchAllProjectAgents, deleteProjectAgents, copyFromPool } from '../api/agent'
+import { fetchAgentPool } from '../api/agentPools'
+import type { agentVO, agentPoolVO } from '../types/agent'
+import { ElMessage, ElMessageBox } from 'element-plus'
 
 /** 当前登录用户 ID（登录时存的 cf_user_info） */
 function currentUserId(): number {
@@ -122,18 +124,7 @@ function loadProviders(): ModelProvider[] {
 
 const providers = ref<ModelProvider[]>(loadProviders())
 
-/** 模型完整值 = "providerId/modelName"，如 "deepseek/deepseek-v4-flash"（空字符串 = 跟随全局） */
-
-/** 所有已启用 provider 的模型选项（分组） */
-const enabledModelOptions = computed(() =>
-  providers.value
-    .filter((p) => p.enabled)
-    .map((p) => ({ group: p.name, value: `${p.id}/${p.models}`, items: p.models.map((m) => `${p.id}/${m}`) }))
-)
-
-const globalDefaultModel = ref(localStorage.getItem('cf_default_model') || 'deepseek/deepseek-v4-flash')
-
-/** 模型显示名 */
+/** 模型显示名（模型完整值 = "providerId/modelName"，如 "deepseek/deepseek-v4-flash"；空 = 跟随全局） */
 function modelLabel(value: string): string {
   const [pid, ...rest] = value.split('/')
   const model = rest.join('/')
@@ -142,19 +133,14 @@ function modelLabel(value: string): string {
   return `${p.name} · ${model}`
 }
 
-// ===== 成员 =====
+// ===== 成员（已入库，增改删全部即时落库；表单复用 AgentFormView 页面） =====
 
 /** 已存在的成员（后端查询回显，有 id；修改走 PUT） */
 const existingAgents = ref<agentVO[]>([])
-/** 新增的成员（无 id；确认团队时批量 POST） */
-const newAgents = ref<agentDTO[]>([])
-/** 被删除成员的 id（确认团队时批量 DELETE） */
-const removedIds = ref<number[]>([])
 
-/** 页面展示用的统一成员结构（existing 在前 + new 在后） */
+/** 页面展示用成员结构 */
 interface MemberView {
-  tempId: number // existing: 正 id；new: 负索引（仅前端用，保证 key 唯一）
-  isNew: boolean
+  tempId: number
   name: string
   role: string
   systemPrompt: string
@@ -164,10 +150,9 @@ interface MemberView {
   status: number
 }
 
-const displayMembers = computed<MemberView[]>(() => [
-  ...existingAgents.value.map((vo) => ({
+const displayMembers = computed<MemberView[]>(() =>
+  existingAgents.value.map((vo) => ({
     tempId: vo.id,
-    isNew: false,
     name: vo.name,
     role: vo.role || '',
     systemPrompt: vo.systemPrompt || '',
@@ -175,19 +160,8 @@ const displayMembers = computed<MemberView[]>(() => [
     model: vo.model || '',
     temperature: vo.temperature ?? null,
     status: vo.status,
-  })),
-  ...newAgents.value.map((dto, i) => ({
-    tempId: -(i + 1),
-    isNew: true,
-    name: dto.name,
-    role: dto.role || '',
-    systemPrompt: dto.systemPrompt || '',
-    tools: dto.tools || '',
-    model: dto.model || '',
-    temperature: dto.temperature ?? null,
-    status: dto.status ?? 1,
-  })),
-])
+  }))
+)
 
 /** 是否已有成员配置了提示词 */
 const anyPromptSet = computed(() => displayMembers.value.some((m) => m.systemPrompt.trim().length > 0))
@@ -198,125 +172,112 @@ function roleMetaByLabel(label: string) {
   return hit ? ROLE_META[hit] : { label, color: '#8890a8', bg: 'rgba(136,144,168,.12)', icon: '' }
 }
 
-// ===== 删除成员 =====
-function removeMember(m: MemberView) {
-  if (m.isNew) {
-    // 新增未入库的：直接从数组移除，无需记录
-    newAgents.value.splice(-m.tempId - 1, 1)
-  } else {
-    // 已入库的：从列表移除 + 记录 id，确认团队时 DELETE
-    existingAgents.value = existingAgents.value.filter((x) => x.id !== m.tempId)
-    removedIds.value.push(m.tempId)
-  }
-  messages.value.push({
-    role: 'assistant',
-    content: `已移除「${m.name}」。其承担的职责将不再有人负责，如需补充可以重新添加。`,
-  })
-  scrollToBottom()
+// ===== 添加/编辑成员（复用 AgentFormView 页面，带 ?projectId= 即项目模式） =====
+
+/** 添加成员：跳新建表单（项目模式），保存后回到本页自动刷新 */
+function addMember() {
+  router.push({ path: '/agents/new', query: { projectId: String(route.params.id) } })
 }
 
-// ===== 添加/编辑成员 =====
-const showMemberModal = ref(false)
-const editingMember = ref<MemberView | null>(null)
-const memberForm = ref({
-  name: '',
-  role: '',
-  systemPrompt: '',
-  tools: '',
-  model: '', // 空 = 跟随全局（后端存 NULL）
-  temperature: 0.7 as number | null,
-})
-
-function emptyForm() {
-  return { name: '', role: '', systemPrompt: '', tools: '', model: '', temperature: 0.7 }
+/** 编辑成员：跳编辑表单（项目模式 + 项目 Agent id） */
+function editMember(m: MemberView) {
+  router.push({ path: `/agents/${m.tempId}`, query: { projectId: String(route.params.id) } })
 }
 
-function openAdd() {
-  editingMember.value = null
-  memberForm.value = emptyForm()
-  showMemberModal.value = true
-}
-function openEdit(m: MemberView) {
-  editingMember.value = m
-  memberForm.value = {
-    name: m.name,
-    role: m.role,
-    systemPrompt: m.systemPrompt,
-    tools: parseTools(m.tools),
-    model: m.model,
-    temperature: m.temperature ?? 0.7,
-  }
-  showMemberModal.value = true
-}
-function closeMemberModal() {
-  showMemberModal.value = false
-}
-
-/** tools JSON 字符串 → 逗号分隔文本（表单编辑用） */
-function parseTools(tools: string): string {
+/** 删除成员：确认后即时 DELETE 落库 */
+async function removeMember(m: MemberView) {
   try {
-    const arr = JSON.parse(tools)
-    return Array.isArray(arr) ? arr.join(', ') : ''
+    await ElMessageBox.confirm(`确定移除成员「${m.name}」吗？`, '移除确认', {
+      confirmButtonText: '移除',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
   } catch {
-    return tools
+    return // 用户取消
   }
-}
-
-/** 表单 → 工具列表 JSON 数组字符串 */
-function formToolsJson(): string {
-  return JSON.stringify(
-    memberForm.value.tools
-      .split(/[,，]/)
-      .map((s) => s.trim())
-      .filter(Boolean)
-  )
-}
-
-function saveMember() {
-  if (!memberForm.value.name.trim()) {
-    alert('请填写成员名称')
-    return
-  }
-  const base = {
-    name: memberForm.value.name.trim(),
-    role: memberForm.value.role.trim() || '通用成员',
-    systemPrompt: memberForm.value.systemPrompt,
-    tools: formToolsJson(),
-    model: memberForm.value.model || '',
-    temperature: memberForm.value.temperature ?? null,
-  }
-  const modelText = base.model
-    ? `模型：${modelLabel(base.model)}`
-    : `模型：${modelLabel(globalDefaultModel.value)}（跟随全局）`
-
-  if (editingMember.value) {
-    const m = editingMember.value
-    if (m.isNew) {
-      // 编辑新增未入库的：回写 newAgents 对应项
-      Object.assign(newAgents.value[-m.tempId - 1], base)
-    } else {
-      // 编辑已入库的：回写 existingAgents 对应项（确认时 PUT）
-      const vo = existingAgents.value.find((x) => x.id === m.tempId)
-      if (vo) Object.assign(vo, base)
-    }
+  try {
+    await deleteProjectAgents(Number(route.params.id), [m.tempId])
+    existingAgents.value = existingAgents.value.filter((x) => x.id !== m.tempId)
+    ElMessage.success(`已移除「${m.name}」`)
     messages.value.push({
       role: 'assistant',
-      content: `已更新「${base.name}」的配置：${base.role}；${modelText}。`,
+      content: `已移除「${m.name}」。其承担的职责将不再有人负责，如需补充可以重新添加。`,
     })
-  } else {
-    // 新增：推入 newAgents（无 id，确认团队时 POST）
-    newAgents.value.push({
-      projectId: Number(route.params.id),
+    scrollToBottom()
+  } catch {
+    /* 拦截器已提示 */
+  }
+}
+
+// ===== 从仓库拉取（勾选池 Agent → 批量复制为项目成员） =====
+const showPoolModal = ref(false)
+const poolAgents = ref<agentPoolVO[]>([])
+const poolTotal = ref(0)
+const poolPage = ref(1)
+const poolPageSize = 8
+const poolKeyword = ref('')
+const poolLoading = ref(false)
+const selectedIds = ref<number[]>([])
+const pulling = ref(false)
+
+const poolPages = computed(() => Math.max(1, Math.ceil(poolTotal.value / poolPageSize)))
+
+function openPoolModal() {
+  showPoolModal.value = true
+  poolPage.value = 1
+  poolKeyword.value = ''
+  selectedIds.value = []
+  loadPool()
+}
+
+function closePoolModal() {
+  showPoolModal.value = false
+}
+
+async function loadPool() {
+  poolLoading.value = true
+  try {
+    const res = await fetchAgentPool({
+      page: poolPage.value,
+      pageSize: poolPageSize,
       userId: currentUserId(),
-      ...base,
+      keyword: poolKeyword.value.trim() || undefined,
     })
-    messages.value.push({
-      role: 'assistant',
-      content: `已添加成员「${base.name}」，负责：${base.role}；${modelText}。确认团队后保存到项目。`,
-    })
+    poolAgents.value = res.records
+    poolTotal.value = res.total
+  } catch {
+    /* 拦截器已提示 */
+  } finally {
+    poolLoading.value = false
   }
-  showMemberModal.value = false
-  scrollToBottom()
+}
+
+function poolSearch() {
+  poolPage.value = 1
+  loadPool()
+}
+
+function toggleSelect(id: number) {
+  const i = selectedIds.value.indexOf(id)
+  if (i >= 0) selectedIds.value.splice(i, 1)
+  else selectedIds.value.push(id)
+}
+
+/** 拉取：一个事务批量复制，完成后刷新成员列表 */
+async function doCopy() {
+  if (selectedIds.value.length === 0) return
+  pulling.value = true
+  try {
+    const projectId = Number(route.params.id)
+    const n = await copyFromPool(projectId, currentUserId(), selectedIds.value)
+    ElMessage.success(`已拉取 ${n} 个成员到项目团队`)
+    showPoolModal.value = false
+    existingAgents.value = await fetchAllProjectAgents(projectId, currentUserId())
+  } catch {
+    /* 拦截器已提示 */
+  } finally {
+    pulling.value = false
+  }
 }
 
 // ===== 对话区 =====
@@ -385,48 +346,8 @@ function goBack() {
   router.push({ name: 'project-detail', params: { id: String(route.params.id) } })
 }
 
-/** agentVO → agentDTO（去掉 createTime/updateTime 等输出字段） */
-function toAgentDTO(vo: agentVO): agentDTO {
-  return {
-    projectId: vo.projectId,
-    userId: vo.userId,
-    name: vo.name,
-    role: vo.role,
-    systemPrompt: vo.systemPrompt,
-    tools: vo.tools,
-    model: vo.model,
-    temperature: vo.temperature,
-    status: vo.status,
-  }
-}
-
-/**
- * 保存团队配置到后端（sys_project_agent）
- * ① 新增的成员（newAgents，无 id）→ POST 批量创建
- * ② 已存在的成员（existingAgents，有 id）→ PUT 逐个更新
- * ③ 被删除的成员（removedIds）→ DELETE 批量移除
- */
-async function saveTeam() {
-  const projectId = Number(route.params.id)
-  // ① 新增的 → POST（agentDTO 无 id）
-  for (const dto of newAgents.value) {
-    await createProjectAgent(dto)
-  }
-  newAgents.value = []
-  // ② 已存在的 → PUT（id 走路径）
-  for (const vo of existingAgents.value) {
-    await updateProjectAgent(vo.id, toAgentDTO(vo))
-  }
-  // ③ 被删除的 → DELETE（ids 复合格式：projectId-id1-id2）
-  if (removedIds.value.length) {
-    await deleteProjectAgents(projectId, removedIds.value)
-    removedIds.value = []
-  }
-}
-
-/** 确认团队：保存修改 → 返回项目功能模块 */
-async function confirmTeam() {
-  await saveTeam()
+/** 确认团队：成员已即时落库，直接返回项目功能模块 */
+function confirmTeam() {
   router.push({ name: 'project-detail', params: { id: String(route.params.id) } })
 }
 </script>
@@ -528,17 +449,27 @@ async function confirmTeam() {
             <p class="member-prompt">{{ m.systemPrompt || '（未配置提示词）' }}</p>
 
             <div class="member-actions">
-              <button class="act-btn" @click="openEdit(m)">编辑</button>
+              <button class="act-btn" @click="editMember(m)">编辑</button>
             </div>
           </CardShell>
 
           <!-- 添加成员 -->
-          <button class="member-add" @click="openAdd">
+          <button class="member-add" @click="addMember">
             <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
               <line x1="12" y1="5" x2="12" y2="19" />
               <line x1="5" y1="12" x2="19" y2="12" />
             </svg>
             <span>添加成员</span>
+          </button>
+
+          <!-- 从仓库拉取 -->
+          <button class="member-add" @click="openPoolModal">
+            <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+            <span>从仓库拉取</span>
           </button>
         </div>
       </div>
@@ -586,63 +517,50 @@ async function confirmTeam() {
       </div>
     </main>
 
-    <!-- 添加/编辑成员弹窗 -->
-    <div v-if="showMemberModal" class="modal-mask" @click.self="closeMemberModal">
-      <div class="modal">
-        <h2>{{ editingMember ? '编辑成员' : '添加成员' }}</h2>
+    <!-- 从仓库拉取弹窗 -->
+    <div v-if="showPoolModal" class="pool-mask" @click.self="closePoolModal">
+      <div class="pool-modal">
+        <h2>从 Agent 仓库拉取</h2>
+        <p class="pool-desc">勾选后复制为项目成员（复制非引用，之后修改仓库不会影响已拉取的成员）</p>
 
-        <div class="modal-field">
-          <label>成员名称</label>
-          <input v-model="memberForm.name" class="input" type="text" placeholder="如：后端 Agent" />
-        </div>
-
-        <div class="modal-field">
-          <label>职位</label>
-          <select v-model="memberForm.role" class="select">
-            <option v-for="(meta, key) in ROLE_META" :key="key" :value="meta.label">{{ meta.label }}</option>
-          </select>
-        </div>
-
-        <div class="modal-field">
-          <label>System Prompt</label>
-          <textarea
-            v-model="memberForm.systemPrompt"
-            class="prompt-area"
-            rows="3"
-            placeholder="该 Agent 的角色设定与行为规则..."
-          ></textarea>
-        </div>
-
-        <div class="modal-field">
-          <label>可用工具 <span class="field-hint">逗号分隔，如：web_search, read_file</span></label>
-          <input v-model="memberForm.tools" class="input" type="text" placeholder="留空表示暂无工具" />
-        </div>
-
-        <div class="modal-field">
-          <label>大模型 <span class="field-hint">跟随全局 = 使用首页配置的默认模型</span></label>
-          <select v-model="memberForm.model" class="select">
-            <option value="">跟随全局（{{ modelLabel(globalDefaultModel) }}）</option>
-            <optgroup v-for="g in enabledModelOptions" :key="g.group" :label="g.group">
-              <option v-for="m in g.items" :key="m" :value="m">{{ m.split('/').slice(1).join('/') }}</option>
-            </optgroup>
-          </select>
-        </div>
-
-        <div class="modal-field">
-          <label>采样温度 <span class="field-hint">0.0-2.0，越大越随机</span></label>
+        <!-- 搜索 -->
+        <div class="pool-toolbar">
           <input
-            v-model.number="memberForm.temperature"
+            v-model="poolKeyword"
             class="input"
-            type="number"
-            min="0"
-            max="2"
-            step="0.1"
+            type="text"
+            placeholder="按名称/职位搜索..."
+            @keyup.enter="poolSearch"
           />
+          <button class="pool-btn" @click="poolSearch">搜索</button>
         </div>
 
-        <div class="modal-actions">
-          <button class="btn-cancel" @click="closeMemberModal">取消</button>
-          <button class="btn-save" @click="saveMember">保存</button>
+        <!-- 列表 -->
+        <div v-if="poolLoading && poolAgents.length === 0" class="pool-empty">加载中...</div>
+        <div v-else-if="poolAgents.length === 0" class="pool-empty">
+          仓库是空的，先去 Agent 仓库新建吧
+        </div>
+        <div v-else class="pool-list">
+          <label v-for="a in poolAgents" :key="a.id" class="pool-item" :class="{ checked: selectedIds.includes(a.id) }">
+            <input type="checkbox" :checked="selectedIds.includes(a.id)" @change="toggleSelect(a.id)" />
+            <span class="pool-item-name">{{ a.name }}</span>
+            <span class="pool-item-role">{{ a.role || '通用' }}</span>
+            <span class="pool-item-meta">{{ a.model ? modelLabel(a.model) : '跟随全局' }}</span>
+          </label>
+        </div>
+
+        <!-- 分页 -->
+        <div v-if="poolTotal > poolPageSize" class="pool-pager">
+          <button class="pool-btn" :disabled="poolPage <= 1" @click="poolPage--; loadPool()">上一页</button>
+          <span class="pool-page-num">{{ poolPage }} / {{ poolPages }}</span>
+          <button class="pool-btn" :disabled="poolPage >= poolPages" @click="poolPage++; loadPool()">下一页</button>
+        </div>
+
+        <div class="pool-actions">
+          <button class="btn-cancel" @click="closePoolModal">取消</button>
+          <button class="btn-pull" :disabled="selectedIds.length === 0 || pulling" @click="doCopy">
+            {{ pulling ? '拉取中...' : `拉取 ${selectedIds.length} 个成员` }}
+          </button>
         </div>
       </div>
     </div>
@@ -977,38 +895,6 @@ async function confirmTeam() {
   background: rgba(69, 184, 255, 0.04);
 }
 
-/* ===== 弹窗 ===== */
-.modal-mask {
-  position: fixed;
-  inset: 0;
-  z-index: 100;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(8, 11, 17, 0.7);
-  backdrop-filter: blur(4px);
-}
-.modal {
-  width: 440px;
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: 26px;
-}
-.modal h2 {
-  font-size: 17px;
-  font-weight: 700;
-  margin-bottom: 18px;
-}
-.modal-field {
-  margin-bottom: 14px;
-}
-.modal-field label {
-  display: block;
-  font-size: 12.5px;
-  color: var(--text2);
-  margin-bottom: 8px;
-}
 .input {
   width: 100%;
   height: 40px;
@@ -1294,28 +1180,6 @@ async function confirmTeam() {
   color: var(--blue);
   background: rgba(69, 184, 255, 0.08);
 }
-.modal-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-  margin-top: 20px;
-}
-.btn-cancel {
-  padding: 0 20px;
-  height: 40px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text2);
-  font-size: 14px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-.btn-cancel:hover {
-  border-color: var(--border2);
-  color: var(--text);
-}
-
 /* 渐变保存按钮（原生 button，不经过子组件事件链） */
 .btn-save {
   display: inline-flex;
@@ -1528,6 +1392,175 @@ async function confirmTeam() {
 }
 .btn-send:disabled {
   opacity: 0.4;
+  cursor: not-allowed;
+}
+
+/* ===== 从仓库拉取弹窗 ===== */
+.pool-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(8, 11, 17, 0.7);
+  backdrop-filter: blur(4px);
+}
+.pool-modal {
+  width: 640px;
+  max-height: 82vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 24px 26px;
+}
+.pool-modal h2 {
+  font-size: 17px;
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+.pool-desc {
+  font-size: 12.5px;
+  color: var(--text3);
+  margin-bottom: 16px;
+}
+.pool-toolbar {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.pool-toolbar .input {
+  flex: 1;
+}
+.pool-btn {
+  padding: 0 16px;
+  height: 40px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--bg3);
+  color: var(--text2);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.pool-btn:hover:not(:disabled) {
+  border-color: var(--blue);
+  color: var(--blue);
+}
+.pool-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.pool-list {
+  flex: 1;
+  min-height: 160px;
+  max-height: 300px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--bg3);
+}
+.pool-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg2);
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.pool-item:hover {
+  border-color: var(--blue);
+}
+.pool-item.checked {
+  border-color: var(--blue);
+  background: rgba(69, 184, 255, 0.06);
+}
+.pool-item input[type='checkbox'] {
+  accent-color: var(--blue);
+  width: 15px;
+  height: 15px;
+  cursor: pointer;
+  flex: none;
+}
+.pool-item-name {
+  font-size: 14px;
+  font-weight: 600;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pool-item-role {
+  flex: 1;
+  font-size: 12.5px;
+  color: var(--text3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pool-item-meta {
+  flex: none;
+  font-size: 12px;
+  color: var(--text2);
+}
+.pool-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  margin-top: 14px;
+}
+.pool-page-num {
+  font-size: 13px;
+  color: var(--text2);
+}
+.pool-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+.btn-cancel {
+  padding: 0 20px;
+  height: 40px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text2);
+  font-size: 13.5px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-cancel:hover {
+  border-color: var(--border2);
+  color: var(--text);
+}
+.btn-pull {
+  padding: 0 22px;
+  height: 40px;
+  border: none;
+  border-radius: 9px;
+  background: var(--grad1, linear-gradient(135deg, #45b8ff, #a76bff));
+  color: #fff;
+  font-size: 13.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+.btn-pull:hover:not(:disabled) {
+  opacity: 0.9;
+}
+.btn-pull:disabled {
+  opacity: 0.5;
   cursor: not-allowed;
 }
 </style>

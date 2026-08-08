@@ -33,3 +33,8 @@ export function updateProjectAgent(id: number, dto: agentDTO): Promise<void> {
 export function deleteProjectAgents(projectId: number, ids: number[]): Promise<void> {
   return request.delete(`/api/project-agent/${projectId}-${ids.join('-')}`) as Promise<void>
 }
+
+/** 从 Agent 池批量复制到项目（复制非引用，返回复制的数量） */
+export function copyFromPool(projectId: number, userId: number, agentIds: number[]): Promise<number> {
+  return request.post('/api/project-agent/copy', { projectId, userId, agentIds }) as Promise<number>
+}

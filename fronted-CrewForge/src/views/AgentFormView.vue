@@ -1,118 +1,56 @@
-<template>
-  <div class="agent-form">
-    <!-- 顶栏 -->
-    <header class="topbar">
-      <div class="topbar-left">
-        <div class="logo">
-          <img src="../assets/logo-crewforge.png" alt="CrewForge" />
-          <span>CrewForge</span>
-        </div>
-      </div>
-      <div class="topbar-right">
-        <button class="btn-back" @click="router.back()">← 返回</button>
-        <span class="avatar">K</span>
-      </div>
-    </header>
-
-    <main class="main">
-      <!-- 表单面板（全屏铺开，字段自适应栅格） -->
-      <div class="form-panel">
-        <div class="card-head">
-          <h1>新建 Agent</h1>
-          <p class="card-desc">保存到你的 Agent 仓库，之后在项目团队配置里可以一键复制使用</p>
-        </div>
-
-        <div class="form-grid">
-          <div class="form-field">
-            <label>名称 <span class="req">*</span></label>
-            <input
-              v-model="form.name"
-              class="input"
-              type="text"
-              placeholder="如：后端开发 Agent"
-            />
-            <p class="field-hint">同一仓库内不重名</p>
-          </div>
-
-          <div class="form-field">
-            <label>职位</label>
-            <select v-model="form.role" class="select">
-              <option v-for="(meta, key) in ROLE_META" :key="key" :value="meta.label">{{ meta.label }}</option>
-            </select>
-          </div>
-
-          <!-- Prompt(2/3) + 工具(1/3) 并排 -->
-          <div class="prompt-row">
-            <div class="form-field">
-              <label>System Prompt</label>
-              <textarea
-                v-model="form.systemPrompt"
-                class="prompt-area"
-                rows="5"
-                placeholder="该 Agent 的角色设定与行为规则..."
-                @input="autoResize($event.target)"
-              ></textarea>
-            </div>
-
-            <!-- 工具列表：函数名 + 作用，框内上下滚动 -->
-            <div class="form-field tools-panel">
-              <div class="tools-head">
-                <label>工具</label>
-                <button class="btn-add-tool" @click="addTool">+ 添加</button>
-              </div>
-              <div class="tools-list">
-                <div v-for="(t, i) in form.tools" :key="i" class="tool-row">
-                  <input v-model="t.name" class="input tool-name" type="text" placeholder="函数名" />
-                  <input v-model="t.desc" class="input tool-desc" type="text" placeholder="作用" />
-                  <button class="tool-del" title="删除" @click="removeTool(i)">✕</button>
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div class="form-field">
-            <label>大模型 <span class="field-hint">跟随全局 = 使用首页配置的默认模型</span></label>
-            <select v-model="form.model" class="select">
-              <option value="">跟随全局（{{ modelLabel(globalDefaultModel) }}）</option>
-              <optgroup v-for="g in enabledModelOptions" :key="g.group" :label="g.group">
-                <option v-for="m in g.items" :key="m" :value="m">{{ m.split('/').slice(1).join('/') }}</option>
-              </optgroup>
-            </select>
-          </div>
-
-          <div class="form-field">
-            <label>采样温度 <span class="field-hint">0.0-2.0，越大越随机</span></label>
-            <input
-              v-model.number="form.temperature"
-              class="input"
-              type="number"
-              min="0"
-              max="2"
-              step="0.1"
-            />
-          </div>
-        </div>
-
-        <div class="form-actions">
-          <button class="btn-cancel" @click="router.back()">取消</button>
-          <button class="btn-save" :disabled="saving" @click="save">保存</button>
-        </div>
-      </div>
-    </main>
-  </div>
-</template>
-
 <script setup lang="ts">
 /**
- * Agent 表单页（仓库模式 · 新建）
- * 保存到 Agent 池（sys_agent），userId 从登录存的 cf_user_info 解析
- * TODO: 保存时对接 createAgentPool（POST /api/agent）
+ * Agent 表单页（新建/编辑，双模式）
+ * - 池模式（默认）：保存到 Agent 池（sys_agent），POST/PUT /api/agent
+ * - 项目模式（?projectId=）：保存为项目团队成员（sys_project_agent），POST/PUT /api/project-agent
+ * userId 从登录存的 cf_user_info 解析
  */
-import { ref, computed } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed, onMounted } from 'vue'
+import { useRouter,useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
+import { createAgentPool, updateAgentPool, fetchAgentPoolById } from '../api/agentPools'
+import { createProjectAgent, updateProjectAgent, fetchProjectAgentById } from '../api/agent'
+import type { agentPoolDTO, agentPoolVO, agentDTO } from '../types/agent'
+
+/** 当前登录用户 ID（登录时存的 cf_user_info） */
+function currentUserId(): number {
+  const raw = localStorage.getItem('cf_user_info')
+  return raw ? (JSON.parse(raw) as { userId: number }).userId : 0
+}
 
 const router = useRouter()
+const route = useRoute()
+
+const isEdit = computed(() => !!route.params.id)
+const agentPoolId = Number(route.params.id || 0)
+
+/** 项目模式：带 ?projectId= 时保存到项目团队（sys_project_agent），否则保存到池（sys_agent） */
+const projectId = Number(route.query.projectId || 0)
+const isProjectMode = computed(() => projectId > 0)
+
+onMounted(async () => {
+  if (!isEdit.value) return
+  try {
+    // 项目模式回显项目 Agent（有 projectId），池模式回显池 Agent
+    const p = isProjectMode.value ? await fetchProjectAgentById(agentPoolId) : await fetchAgentPoolById(agentPoolId)
+    form.value.id = p.id ?? 0
+    form.value.userId = p.userId ?? null
+    form.value.name = p.name ?? ''
+    form.value.role = p.role ?? ''
+    form.value.systemPrompt = p.systemPrompt ?? ''
+    form.value.tools = p.tools ?? ''
+    form.value.model = p.model ?? ''
+    form.value.temperature = p.temperature ?? 0.7
+    form.value.status = p.status ?? 0
+    form.value.createTime = p.createTime ?? ''
+    form.value.updateTime = p.updateTime ?? ''
+  } catch {
+    /* 拦截器已提示 */
+  }
+
+  toolsArr.value = toolsParse(form.value.tools)
+})
+
 
 // ===== 职责预设（与 TeamView 一致） =====
 type AgentRole = 'manager' | 'architect' | 'backend' | 'frontend' | 'tester' | 'devops' | 'docs'
@@ -189,13 +127,58 @@ interface ToolItem {
   desc: string
 }
 
-const form = ref({
-  name: '',
-  role: '后端开发',
-  systemPrompt: '',
-  tools: [{ name: '', desc: '' }] as ToolItem[],
-  model: '', // 空 = 跟随全局
-  temperature: 0.7,
+/**
+ * tools（JSON 数组字符串，如 '["web_search:联网搜索","read_file"]'）→ 工具行
+ * 兼容旧格式：非 JSON（逗号分隔）时降级按逗号拆
+ */
+function toolsParse(tools: string): ToolItem[] {
+  if (!tools) return []
+  let arr: string[]
+  try {
+    const parsed = JSON.parse(tools)
+    arr = Array.isArray(parsed) ? parsed.map(String) : []
+  } catch {
+    arr = tools.split(',')
+  }
+  return arr
+    .map(s => s.trim())
+    .filter(s => s.length > 0)
+    .map(item => {
+      const [name, desc] = item.split(':').map(s => s.trim())
+      return {
+        name: name || item,
+        desc: desc || ''
+      }
+    })
+}
+
+/** 工具行 → tools JSON 数组字符串（元素格式 "函数名:作用"） */
+function toolsCombine(tools: ToolItem[]): string {
+  if (!tools || tools.length === 0) return ''
+  const arr = tools
+    .map(t => t.name.trim())
+    .filter(s => s.length > 0)
+    .map((name, i) => {
+      const desc = (tools[i].desc || '').trim()
+      return desc ? `${name}:${desc}` : name
+    })
+  return JSON.stringify(arr)
+}
+
+const toolsArr = ref<ToolItem[]>([])
+
+const form = ref<agentPoolVO>({
+    id: 0,
+    userId: 0,           // 数字可为 null
+    name: '',               // 字符串给空串
+    role: '',               // 字符串给空串
+    systemPrompt: '',       // 字符串给空串
+    tools: '',              // 工具是数组，给空数组
+    model: '',              // 字符串给空串
+    temperature: 0.7,       // 温度给默认值 0.7
+    status: 0,              // 状态给 0（待定）
+    createTime: '',         // 时间给空串
+    updateTime: ''          // 时间给空串
 })
 
 const saving = ref(false)
@@ -208,27 +191,70 @@ function autoResize(el: HTMLTextAreaElement) {
 
 /** 添加一个工具行 */
 function addTool() {
-  form.value.tools.push({ name: '', desc: '' })
+  toolsArr.value.push({ name: '', desc: '' })
 }
 
 /** 删除工具行 */
 function removeTool(i: number) {
-  form.value.tools.splice(i, 1)
+  toolsArr.value.splice(i, 1)
 }
 
-/** 保存（TODO: 对接 createAgentPool，POST /api/agent） */
+/** 保存：池模式 POST/PUT /api/agent；项目模式 POST/PUT /api/project-agent */
 async function save() {
   const name = form.value.name.trim()
   if (!name) {
     ElMessage.warning('请填写 Agent 名称')
     return
   }
+  const userId = currentUserId()
+  if (!userId) {
+    ElMessage.warning('登录信息失效，请重新登录')
+    return
+  }
   saving.value = true
   try {
-    // TODO: await createAgentPool({ userId, name, role, systemPrompt, tools: json, model, temperature })
-    await new Promise((r) => setTimeout(r, 300)) // mock 提交
-    ElMessage.success(`Agent「${name}」已保存到仓库`)
-    router.push('/agents')
+    if (isProjectMode.value) {
+      // 项目模式：团队成员（sys_project_agent）
+      const dto: agentDTO = {
+        projectId,
+        userId,
+        name,
+        role: form.value.role,
+        systemPrompt: form.value.systemPrompt,
+        tools: toolsCombine(toolsArr.value),
+        model: form.value.model,
+        temperature: form.value.temperature,
+        status: form.value.status ?? 1,
+      }
+      if (isEdit.value) {
+        await updateProjectAgent(agentPoolId, dto)
+        ElMessage.success(`成员「${name}」已更新`)
+      } else {
+        await createProjectAgent(dto)
+        ElMessage.success(`成员「${name}」已加入团队`)
+      }
+      router.push(`/projects/${projectId}/team`)
+    } else {
+      // 池模式：Agent 仓库（sys_agent）
+      const dto: agentPoolDTO = {
+        userId,
+        name,
+        role: form.value.role,
+        systemPrompt: form.value.systemPrompt,
+        tools: toolsCombine(toolsArr.value),
+        model: form.value.model,
+        temperature: form.value.temperature,
+        status: form.value.status ?? 1,
+      }
+      if (isEdit.value) {
+        await updateAgentPool(agentPoolId, dto)
+        ElMessage.success(`Agent「${name}」已更新`)
+      } else {
+        await createAgentPool(dto)
+        ElMessage.success(`Agent「${name}」已保存到仓库`)
+      }
+      router.push('/agents')
+    }
   } catch {
     ElMessage.error('保存失败，请重试')
   } finally {
@@ -236,6 +262,118 @@ async function save() {
   }
 }
 </script>
+
+<template>
+  <div class="agent-form">
+    <!-- 顶栏 -->
+    <header class="topbar">
+      <div class="topbar-left">
+        <div class="logo">
+          <img src="../assets/logo-crewforge.png" alt="CrewForge" />
+          <span>CrewForge</span>
+        </div>
+      </div>
+      <div class="topbar-right">
+        <button class="btn-back" @click="router.back()">← 返回</button>
+        <span class="avatar">K</span>
+      </div>
+    </header>
+
+    <main class="main">
+      <!-- 表单面板（全屏铺开，字段自适应栅格） -->
+      <div class="form-panel">
+        <div class="card-head">
+          <h1>
+            {{ isProjectMode ? (isEdit ? '编辑成员' : '新建成员') : isEdit ? '编辑 Agent' : '新建 Agent' }}
+          </h1>
+          <p class="card-desc">
+            {{
+              isProjectMode
+                ? '配置项目团队成员，保存后返回团队配置'
+                : '保存到你的 Agent 仓库，之后在项目团队配置里可以一键复制使用'
+            }}
+          </p>
+        </div>
+
+        <div class="form-grid">
+          <div class="form-field">
+            <label>名称 <span class="req">*</span></label>
+            <input
+              v-model="form.name"
+              class="input"
+              type="text"
+              placeholder="如：后端开发 Agent"
+            />
+            <p class="field-hint">同一仓库内不重名</p>
+          </div>
+
+          <div class="form-field">
+            <label>职位</label>
+            <select v-model="form.role" class="select">
+              <option v-for="(meta, key) in ROLE_META" :key="key" :value="meta.label">{{ meta.label }}</option>
+            </select>
+          </div>
+
+          <!-- Prompt(2/3) + 工具(1/3) 并排 -->
+          <div class="prompt-row">
+            <div class="form-field">
+              <label>System Prompt</label>
+              <textarea
+                v-model="form.systemPrompt"
+                class="prompt-area"
+                rows="5"
+                placeholder="该 Agent 的角色设定与行为规则..."
+                @input="autoResize($event.target as HTMLTextAreaElement)"
+              ></textarea>
+            </div>
+
+            <!-- 工具列表：函数名 + 作用，框内上下滚动 -->
+            <div class="form-field tools-panel">
+              <div class="tools-head">
+                <label>工具</label>
+                <button class="btn-add-tool" @click="addTool">+ 添加</button>
+              </div>
+              <div class="tools-list">
+                <div v-for="(t, i) in toolsArr" :key="i" class="tool-row">
+                  <input v-model="t.name" class="input tool-name" type="text" placeholder="函数名" />
+                  <input v-model="t.desc" class="input tool-desc" type="text" placeholder="作用" />
+                  <button class="tool-del" title="删除" @click="removeTool(i)">✕</button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="form-field">
+            <label>大模型 <span class="field-hint">跟随全局 = 使用首页配置的默认模型</span></label>
+            <select v-model="form.model" class="select">
+              <option value="">跟随全局（{{ modelLabel(globalDefaultModel) }}）</option>
+              <optgroup v-for="g in enabledModelOptions" :key="g.group" :label="g.group">
+                <option v-for="m in g.items" :key="m" :value="m">{{ m.split('/').slice(1).join('/') }}</option>
+              </optgroup>
+            </select>
+          </div>
+
+          <div class="form-field">
+            <label>采样温度 <span class="field-hint">0.0-2.0，越大越随机</span></label>
+            <input
+              v-model.number="form.temperature"
+              class="input"
+              type="number"
+              min="0"
+              max="2"
+              step="0.1"
+            />
+          </div>
+        </div>
+
+        <div class="form-actions">
+          <button class="btn-cancel" @click="router.back()">取消</button>
+          <button class="btn-save" :disabled="saving" @click="save">保存</button>
+        </div>
+      </div>
+    </main>
+  </div>
+</template>
 
 <style scoped>
 .agent-form {

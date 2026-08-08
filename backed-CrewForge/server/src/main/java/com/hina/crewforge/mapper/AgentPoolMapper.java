@@ -18,6 +18,9 @@ public interface AgentPoolMapper {
 
     AgentPool getById(Long id);
 
+    /** 批量查询（拉取到项目团队时用，按 ids 精确查） */
+    List<AgentPool> selectByIds(@Param("ids") List<Long> ids);
+
     void deleteByIds(@Param("ids") List<Long> ids, @Param("userId") Long userId,
                      @Param("updateTime") LocalDateTime updateTime);
 }

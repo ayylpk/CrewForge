@@ -35,10 +35,21 @@ public class AgentPoolServiceImpl implements AgentPoolService {
         return new PageResult<>(p.getTotal(),voList);
     }
 
+    /** 空字符串转 null：tools 是 JSON 列不能存 ''；model 空串=跟随全局（存 NULL） */
+    private void normalize(AgentPool entity) {
+        if (entity.getTools() != null && entity.getTools().trim().isEmpty()) {
+            entity.setTools(null);
+        }
+        if (entity.getModel() != null && entity.getModel().trim().isEmpty()) {
+            entity.setModel(null);
+        }
+    }
+
     @Override
     public void create(AgentPoolDTO dto) {
         AgentPool entity = new AgentPool();
         BeanUtils.copyProperties(dto, entity);
+        normalize(entity);
         LocalDateTime now = LocalDateTime.now();
         entity.setCreateTime(now);
         entity.setUpdateTime(now);
@@ -53,6 +64,7 @@ public class AgentPoolServiceImpl implements AgentPoolService {
     public void update(Long id, AgentPoolDTO dto) {
         AgentPool entity = new AgentPool();
         BeanUtils.copyProperties(dto, entity);
+        normalize(entity);
         entity.setId(id);
         entity.setUpdateTime(LocalDateTime.now());
         agentMapper.updateById(entity);

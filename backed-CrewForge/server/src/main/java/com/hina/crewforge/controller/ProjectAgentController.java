@@ -4,6 +4,7 @@ import com.hina.crewforge.common.result.PageResult;
 import com.hina.crewforge.common.result.Result;
 import java.util.List;
 import com.hina.crewforge.pojo.QueryParam.ProjectAgentQueryParam;
+import com.hina.crewforge.pojo.dto.ProjectAgentCopyDTO;
 import com.hina.crewforge.pojo.dto.ProjectAgentDTO;
 import com.hina.crewforge.pojo.vo.ProjectAgentVO;
 import com.hina.crewforge.service.ProjectAgentService;
@@ -60,6 +61,14 @@ public class ProjectAgentController {
         log.info("修改id = {}的项目agent为:{}", id, dto);
         projectAgentService.update(id, dto);
         return Result.success();
+    }
+
+    @Operation(summary = "从Agent池批量复制到项目")
+    @PostMapping("/copy")
+    public Result<Integer> copyFromPool(@RequestBody ProjectAgentCopyDTO dto) {
+        log.info("从Agent池复制到项目:{}", dto);
+        int count = projectAgentService.copyFromPool(dto);
+        return Result.success(count);
     }
 
     @Operation(summary = "查询单个")
