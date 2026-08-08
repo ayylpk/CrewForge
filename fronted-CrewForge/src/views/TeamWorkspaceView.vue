@@ -31,7 +31,18 @@
       <!-- 页头 -->
       <div class="page-head">
         <h1>团队</h1>
-        <GradientButton @click="openCreateModal">+ 创建团队</GradientButton>
+        <div class="head-ops">
+          <button class="btn-join" @click="openApplyModal">
+            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+              <circle cx="8.5" cy="7" r="4" />
+              <line x1="20" y1="8" x2="20" y2="14" />
+              <line x1="23" y1="11" x2="17" y2="11" />
+            </svg>
+            申请加入
+          </button>
+          <GradientButton @click="openCreateModal">+ 创建团队</GradientButton>
+        </div>
       </div>
 
       <!-- 团队列表（真实数据） -->
@@ -46,8 +57,7 @@
           :key="t.id"
           hoverable
           class="team-card"
-          :class="{ selected: activeTeam?.id === t.id }"
-          @click="selectTeam(t)"
+          @click="enterTeam(t)"
         >
           <div class="team-top">
             <div class="team-logo" :style="{ background: t.grad }">
@@ -81,51 +91,6 @@
           </div>
         </CardShell>
       </div>
-
-      <!-- 团队详情（选中团队后显示） -->
-      <template v-if="activeTeam">
-        <div class="detail-head">
-          <h2>{{ activeTeam.name }}</h2>
-          <span class="detail-hint">{{ activeTeam.role }}</span>
-        </div>
-
-        <div class="grid-2">
-          <!-- 成员 -->
-          <CardShell class="card">
-            <div class="card-head">
-              <h3 class="card-title">成员</h3>
-              <button class="btn-disabled small">+ 邀请</button>
-            </div>
-            <div class="member-empty">
-              成员列表开发中 · 当前 {{ activeTeam.members }} / {{ activeTeam.maxMembers }} 人
-            </div>
-          </CardShell>
-
-          <!-- 团队项目 -->
-          <CardShell class="card">
-            <div class="card-head">
-              <h3 class="card-title">团队项目</h3>
-              <button class="btn-disabled small">+ 新建项目</button>
-            </div>
-            <div v-if="teamProjectsLoading" class="member-empty">加载中...</div>
-            <div v-else-if="teamProjects.length === 0" class="member-empty">还没有团队项目</div>
-            <div v-else class="proj-list">
-              <div v-for="p in teamProjects" :key="p.id" class="proj-item" @click="openProject(p.id)">
-                <span class="proj-ico" :style="{ background: projGrad(p.status) }">
-                  <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                    <rect x="3" y="3" width="18" height="18" rx="3" />
-                    <path d="M3 9h18M9 21V9" />
-                  </svg>
-                </span>
-                <span class="proj-name">{{ p.name }}</span>
-                <span class="proj-state" :style="{ color: STATUS_COLOR[p.status] }">
-                  <span class="dot" :style="{ background: STATUS_COLOR[p.status] }"></span>{{ STATUS_LABEL[p.status] }}
-                </span>
-              </div>
-            </div>
-          </CardShell>
-        </div>
-      </template>
       </div>
     </main>
 
@@ -179,6 +144,37 @@
         </div>
       </div>
     </div>
+
+    <!-- 申请加入弹窗（凭邀请码） -->
+    <div v-if="showApplyModal" class="create-mask" @click.self="closeApplyModal">
+      <div class="apply-modal">
+        <div class="am-head">
+          <h2>申请加入团队</h2>
+          <button class="am-close" title="关闭" @click="closeApplyModal">✕</button>
+        </div>
+        <p class="am-desc">输入团队管理员提供的邀请码，提交后等待审核</p>
+        <div class="am-body">
+          <label class="cm-field">
+            <span class="cm-label">邀请码 <em>*</em></span>
+            <input
+              v-model.trim="applyCode"
+              class="cm-input"
+              type="text"
+              placeholder="请输入 20 位邀请码"
+              maxlength="20"
+              autofocus
+              @keyup.enter="doApply"
+            />
+          </label>
+        </div>
+        <div class="cm-actions">
+          <button class="btn-cancel" :disabled="applying" @click="closeApplyModal">取消</button>
+          <button class="btn-create" :disabled="applying || !applyCode" @click="doApply">
+            {{ applying ? '提交中...' : '确定' }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -189,14 +185,14 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import CardShell from '../components/CardShell.vue'
 import GradientButton from '../components/GradientButton.vue'
 import WorkspaceSwitcher from '../components/WorkspaceSwitcher.vue'
-import { createTenant, fetchTenantById, fetchMyTeams, updateTenant, deleteTenant, type TenantVO } from '../api/tenant'
-import { fetchTeamProjects } from '../api/project'
+import { createTenant, fetchTenantById, fetchMyTeams, updateTenant, deleteTenant, applyTenant, type TenantVO } from '../api/tenant'
 
 const router = useRouter()
 
-/** 工作区切换：团队 → 个人 */
+/** 工作区切换：团队 → 个人（清除团队上下文） */
 function switchWs(ws: 'personal' | 'team') {
   if (ws === 'personal') {
+    localStorage.removeItem('cf_active_tenant')
     router.push('/projects')
   }
 }
@@ -220,7 +216,6 @@ interface Team {
 
 const teams = ref<Team[]>([])
 const loadingTeams = ref(false)
-const activeTeam = ref<Team | null>(null)
 
 /** 我的角色：owner = 管理员，否则成员 */
 function myRole(t: TenantVO): string {
@@ -255,10 +250,6 @@ async function loadTeams() {
         projects: t.projectCount ?? 0,
       }
     })
-    // 选中的团队被删/刷新后，重置选中
-    if (activeTeam.value && !teams.value.some((t) => t.id === activeTeam.value!.id)) {
-      activeTeam.value = null
-    }
   } catch {
     /* 拦截器已提示 */
   } finally {
@@ -268,62 +259,10 @@ async function loadTeams() {
 
 onMounted(loadTeams)
 
-// ===== 团队详情（项目列表） =====
-const teamProjects = ref<{ id: number; name: string; status: string }[]>([])
-const teamProjectsLoading = ref(false)
-
-/** 项目状态颜色（与 ProjectsView 一致） */
-const STATUS_COLOR: Record<string, string> = {
-  draft: '#8a94a6',
-  clarifying: '#f0c060',
-  planning: '#45b8ff',
-  executing: '#5ecb8a',
-  paused: '#f09050',
-  done: '#a76bff',
-  failed: '#ff6b6b',
-}
-const STATUS_LABEL: Record<string, string> = {
-  draft: '草稿',
-  clarifying: '澄清中',
-  planning: '规划中',
-  executing: '执行中',
-  paused: '已暂停',
-  done: '已完成',
-  failed: '失败',
-}
-
-function projGrad(status: string): string {
-  const map: Record<string, string> = {
-    draft: 'linear-gradient(135deg,#8a94a6,#a7b0c0)',
-    clarifying: 'linear-gradient(135deg,#f0c060,#f09050)',
-    planning: 'linear-gradient(135deg,#45b8ff,#a76bff)',
-    executing: 'linear-gradient(135deg,#5ecb8a,#5ec8c0)',
-    paused: 'linear-gradient(135deg,#f09050,#f070a0)',
-    done: 'linear-gradient(135deg,#a76bff,#f070a0)',
-    failed: 'linear-gradient(135deg,#ff6b6b,#f09050)',
-  }
-  return map[status] || 'linear-gradient(135deg,#45b8ff,#a76bff)'
-}
-
-function selectTeam(t: Team) {
-  activeTeam.value = t
-  loadTeamProjects(t.id)
-}
-
-async function loadTeamProjects(tenantId: number) {
-  teamProjectsLoading.value = true
-  try {
-    const { records } = await fetchTeamProjects(tenantId)
-    teamProjects.value = records.map((p) => ({ id: p.id, name: p.name, status: p.status }))
-  } catch {
-    teamProjects.value = []
-  } finally {
-    teamProjectsLoading.value = false
-  }
-}
-
-function openProject(id: number) {
-  router.push(`/projects/${id}`)
+/** 进入团队：记录团队上下文（X-Tenant-Id 由 request 拦截器自动带）→ 跳转团队详情页 */
+function enterTeam(t: Team) {
+  localStorage.setItem('cf_active_tenant', String(t.id))
+  router.push(`/teams/${t.id}`)
 }
 
 // ===== 创建 / 编辑团队 =====
@@ -379,30 +318,58 @@ async function doSave() {
   }
   creating.value = true
   try {
-    let keepId: number | null = null
     if (editingTeam.value) {
-      // 编辑模式：PUT 更新后保持选中
-      keepId = editingTeam.value.id
-      await updateTenant(keepId, payload)
+      // 编辑模式：PUT 更新
+      await updateTenant(editingTeam.value.id, payload)
       showCreateModal.value = false
       ElMessage.success(`团队「${name}」已更新`)
     } else {
       // 创建模式：POST + 回查邀请码
       const id = await createTenant(payload)
       const t = await fetchTenantById(id)
-      keepId = id
       showCreateModal.value = false
       await ElMessageBox.alert(`邀请码：${t.invitationCode}`, `团队「${t.name}」创建成功`, {
         confirmButtonText: '知道了',
       })
     }
-    // 刷新列表并保持选中
+    // 刷新列表
     await loadTeams()
-    activeTeam.value = teams.value.find((x) => x.id === keepId) ?? null
   } catch {
     /* 拦截器已提示 */
   } finally {
     creating.value = false
+  }
+}
+
+// ===== 申请加入团队（凭邀请码） =====
+const showApplyModal = ref(false)
+const applying = ref(false)
+const applyCode = ref('')
+
+function openApplyModal() {
+  applyCode.value = ''
+  showApplyModal.value = true
+}
+
+function closeApplyModal() {
+  if (!applying.value) showApplyModal.value = false
+}
+
+async function doApply() {
+  const code = applyCode.value.trim()
+  if (!code) {
+    ElMessage.warning('请输入邀请码')
+    return
+  }
+  applying.value = true
+  try {
+    await applyTenant(code)
+    showApplyModal.value = false
+    ElMessage.success('已提交申请，等待管理员审核')
+  } catch {
+    /* 拦截器已提示（邀请码无效/已是成员/已有待审核申请） */
+  } finally {
+    applying.value = false
   }
 }
 
@@ -428,6 +395,7 @@ async function removeTeam(t: Team) {
 
 function logout() {
   localStorage.removeItem('cf_token')
+  localStorage.removeItem('cf_active_tenant')
   router.push('/login')
 }
 </script>
@@ -543,21 +511,29 @@ function logout() {
   font-size: 24px;
   font-weight: 700;
 }
-.btn-disabled {
-  padding: 9px 20px;
-  border-radius: 8px;
-  border: 1px dashed var(--border2);
-  background: transparent;
-  color: var(--text3);
+.head-ops {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.btn-join {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 18px;
+  border-radius: 9px;
+  border: 1px solid var(--border);
+  background: var(--bg3);
+  color: var(--text2);
   font-size: 14px;
   font-weight: 500;
-  cursor: not-allowed;
+  cursor: pointer;
+  transition: all 0.2s;
 }
-.btn-disabled.small {
-  padding: 5px 12px;
-  font-size: 12px;
+.btn-join:hover {
+  border-color: var(--blue);
+  color: var(--blue);
 }
-
 /* ===== 团队卡片 ===== */
 .team-empty {
   padding: 48px 0;
@@ -579,10 +555,6 @@ function logout() {
 }
 .team-card {
   padding: 20px;
-}
-.team-card.selected {
-  border-color: var(--blue);
-  box-shadow: 0 0 0 1px rgba(69, 184, 255, 0.3);
 }
 .team-top {
   display: flex;
@@ -675,93 +647,6 @@ function logout() {
 .ts-label {
   font-size: 11px;
   color: var(--text3);
-}
-
-/* ===== 详情 ===== */
-.detail-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 16px;
-}
-.detail-head h2 {
-  font-size: 18px;
-  font-weight: 700;
-}
-.detail-hint {
-  font-size: 12px;
-  color: var(--text3);
-}
-.grid-2 {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
-}
-.card {
-  padding: 20px;
-}
-.card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 14px;
-}
-.card-title {
-  font-size: 14px;
-  font-weight: 600;
-}
-
-/* 成员（占位，成员列表接口开发中） */
-.member-empty {
-  padding: 28px 0;
-  text-align: center;
-  color: var(--text3);
-  font-size: 13px;
-}
-
-/* 团队项目 */
-.proj-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.proj-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 9px 12px;
-  border-radius: 9px;
-  background: var(--bg3);
-  font-size: 13px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-.proj-item:hover {
-  background: var(--bg4);
-  border-color: var(--border2);
-}
-.proj-ico {
-  width: 26px;
-  height: 26px;
-  border-radius: 8px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-.proj-name {
-  flex: 1;
-}
-.proj-state {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11.5px;
-}
-.proj-state .dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
 }
 
 /* ===== 创建团队弹窗 ===== */
@@ -944,5 +829,49 @@ function logout() {
 .btn-create:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* ===== 申请加入弹窗 ===== */
+.apply-modal {
+  width: 420px;
+  box-sizing: border-box;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 26px 30px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+}
+.am-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.am-head h2 {
+  font-size: 17px;
+  font-weight: 700;
+}
+.am-close {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text3);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.am-close:hover {
+  border-color: var(--red);
+  color: var(--red);
+}
+.am-desc {
+  font-size: 12.5px;
+  color: var(--text3);
+  margin-bottom: 20px;
+}
+.am-body {
+  margin-bottom: 26px;
 }
 </style>

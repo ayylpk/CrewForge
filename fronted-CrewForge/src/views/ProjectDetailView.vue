@@ -2,7 +2,7 @@
   <div class="overview">
     <!-- 顶栏 -->
     <header class="topbar">
-      <button class="btn-back" @click="router.push('/projects')">← 项目列表</button>
+      <button class="btn-back" @click="goBack">← {{ backLabel }}</button>
       <div class="topbar-title">
         <span class="dim">项目 ·</span>
         <span>{{ projectName }}</span>
@@ -201,6 +201,18 @@ const STATUS_META: Record<ProjectStatus, { label: string; color: string }> = {
 const statusLabel = computed(() => STATUS_META[project.value?.status || 'draft'].label)
 const statusColor = computed(() => STATUS_META[project.value?.status || 'draft'].color)
 const projectName = computed(() => project.value?.name || '项目 #' + route.params.id)
+
+/** 团队项目：返回团队详情页；个人项目：返回项目列表 */
+const isTeamProject = computed(() => !!project.value?.tenantId)
+const backLabel = computed(() => (isTeamProject.value ? '团队空间' : '项目列表'))
+
+function goBack() {
+  if (isTeamProject.value) {
+    router.push(`/teams/${project.value!.tenantId}`)
+  } else {
+    router.push('/projects')
+  }
+}
 
 onMounted(async () => {
   try {

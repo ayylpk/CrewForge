@@ -11,6 +11,10 @@ public class TenantApplyVO {
     private Long id;
     private Long tenantId;
     private Long userId;
+    /** 申请人用户名（联查 sys_user） */
+    private String username;
+    /** 申请人真实姓名（联查 sys_user） */
+    private String realName;
     /** 填写的邀请码 */
     private String invitationCode;
     /** 状态: 0-待审核, 1-已同意, 2-已拒绝 */

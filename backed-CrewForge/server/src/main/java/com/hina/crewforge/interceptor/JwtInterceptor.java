@@ -1,9 +1,12 @@
 package com.hina.crewforge.interceptor;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.hina.crewforge.common.constant.JwtClaimsConstant;
 import com.hina.crewforge.common.context.BaseContext;
 import com.hina.crewforge.common.properties.JwtProperties;
 import com.hina.crewforge.common.utils.JwtUtil;
+import com.hina.crewforge.mapper.UserTenantMapper;
+import com.hina.crewforge.pojo.entity.UserTenant;
 import io.jsonwebtoken.Claims;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
@@ -31,6 +34,9 @@ public class JwtInterceptor implements HandlerInterceptor {
 
     private final JwtProperties jwtProperties;
 
+    /** 成员关系表（校验 X-Tenant-Id 归属用） */
+    private final UserTenantMapper userTenantMapper;
+
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
         // 非 Controller 方法（静态资源等）直接放行
@@ -42,9 +48,10 @@ public class JwtInterceptor implements HandlerInterceptor {
         String token = request.getHeader(jwtProperties.getUserTokenName());
 
         // 2. 解析 token（先 user 密钥，再 admin 密钥）
+        Long userId = null;
         try {
             Claims claims = parseWithFallback(token);
-            Long userId = Long.valueOf(claims.get(JwtClaimsConstant.USER_ID).toString());
+            userId = Long.valueOf(claims.get(JwtClaimsConstant.USER_ID).toString());
             BaseContext.setCurrentUserId(userId);
             log.debug("JWT 校验通过: userId={}", userId);
         } catch (Exception ex) {
@@ -56,10 +63,23 @@ public class JwtInterceptor implements HandlerInterceptor {
         }
 
         // 3. 团队 ID 从请求头读取（多团队切换，无需重新签发 token）
+        // ⚠️ 传了就必须属于该团队（sys_user_tenant 正常成员），防伪造头越权
         String tenantIdHeader = request.getHeader(TENANT_HEADER);
         if (tenantIdHeader != null && !tenantIdHeader.isEmpty()) {
             try {
-                BaseContext.setCurrentTenantId(Long.valueOf(tenantIdHeader));
+                Long tenantId = Long.valueOf(tenantIdHeader);
+                Long memberCount = userTenantMapper.selectCount(new LambdaQueryWrapper<UserTenant>()
+                        .eq(UserTenant::getUserId, userId)
+                        .eq(UserTenant::getTenantId, tenantId)
+                        .eq(UserTenant::getStatus, 1));
+                if (memberCount == null || memberCount == 0) {
+                    log.warn("X-Tenant-Id 越权拦截: userId={}, tenantId={}", userId, tenantId);
+                    response.setStatus(403);
+                    response.setContentType("application/json;charset=UTF-8");
+                    response.getWriter().write("{\"code\":0,\"msg\":\"你不属于该团队\"}");
+                    return false;
+                }
+                BaseContext.setCurrentTenantId(tenantId);
             } catch (NumberFormatException e) {
                 log.warn("X-Tenant-Id 格式错误: {}", tenantIdHeader);
             }

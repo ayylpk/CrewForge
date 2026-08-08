@@ -12,6 +12,8 @@ import com.hina.crewforge.common.exception.BaseException;
 import com.hina.crewforge.common.result.PageResult;
 import com.hina.crewforge.mapper.ProjectFileMapper;
 import com.hina.crewforge.mapper.ProjectMapper;
+import com.hina.crewforge.mapper.UserTenantMapper;
+import com.hina.crewforge.pojo.entity.UserTenant;
 import com.hina.crewforge.pojo.QueryParam.ProjectQueryParam;
 import com.hina.crewforge.pojo.dto.ProjectDTO;
 import com.hina.crewforge.pojo.entity.Project;
@@ -38,7 +40,31 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
     @Autowired
     private ProjectFileMapper projectFileMapper;
     @Autowired
+    private UserTenantMapper userTenantMapper;
+    @Autowired
     private ObjectMapper objectMapper;
+
+    /**
+     * 所有权校验（防 API 越权，与是否带 X-Tenant-Id 无关）：
+     * · 个人项目: 只能操作自己创建的
+     * · 团队项目: 必须是项目所属团队的成员(sys_user_tenant status=1)
+     */
+    private void checkOwnership(Project existing, String action) {
+        Long currentUserId = BaseContext.getCurrentUserId();
+        if (Project.PROJECT_TYPE_PERSONAL.equals(existing.getProjectType())) {
+            if (!existing.getCreateUser().equals(currentUserId)) {
+                throw new BaseException("无权" + action + "他人项目");
+            }
+            return;
+        }
+        Long cnt = userTenantMapper.selectCount(new LambdaQueryWrapper<UserTenant>()
+                .eq(UserTenant::getUserId, currentUserId)
+                .eq(UserTenant::getTenantId, existing.getTenantId())
+                .eq(UserTenant::getStatus, 1));
+        if (cnt == null || cnt == 0) {
+            throw new BaseException("你不属于该项目所属团队，无权" + action);
+        }
+    }
 
     @Override
     public PageResult<ProjectVO> page(ProjectQueryParam projectQueryParam) {
@@ -78,6 +104,16 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
 
     @Override
     public void create(ProjectDTO dto) {
+        // 团队项目: 必须属于该团队才能往里建（防往任意团队塞项目）
+        if (Project.PROJECT_TYPE_TEAM.equals(dto.getProjectType())) {
+            Long cnt = userTenantMapper.selectCount(new LambdaQueryWrapper<UserTenant>()
+                    .eq(UserTenant::getUserId, BaseContext.getCurrentUserId())
+                    .eq(UserTenant::getTenantId, dto.getTenantId())
+                    .eq(UserTenant::getStatus, 1));
+            if (cnt == null || cnt == 0) {
+                throw new BaseException("你不属于该团队，无法创建团队项目");
+            }
+        }
         Project project = new Project();
         BeanUtils.copyProperties(dto, project);
         LocalDateTime now = LocalDateTime.now();
@@ -110,11 +146,8 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
         if (existing == null) {
             throw new BaseException("项目不存在: " + id);
         }
-        // 1.1 所有权校验: 个人项目只能改自己的（团队项目后续由 X-Tenant-Id 归属校验兜底）
-        if (Project.PROJECT_TYPE_PERSONAL.equals(existing.getProjectType())
-                && !existing.getCreateUser().equals(BaseContext.getCurrentUserId())) {
-            throw new BaseException("无权修改他人项目");
-        }
+        // 1.1 所有权校验: 个人项目只能改自己的; 团队项目必须是所属团队成员
+        checkOwnership(existing, "修改");
         // 2. status 传了必须是合法值（防脏状态落库）
         if (StringUtils.hasText(dto.getStatus()) && !VALID_STATUS.contains(dto.getStatus())) {
             throw new BaseException("非法项目状态: " + dto.getStatus());
@@ -158,11 +191,8 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
         if (existing == null) {
             throw new BaseException("项目不存在: " + id);
         }
-        // 2. 所有权校验: 个人项目只能删自己的（团队项目后续由 X-Tenant-Id 归属校验兜底）
-        if (Project.PROJECT_TYPE_PERSONAL.equals(existing.getProjectType())
-                && !existing.getCreateUser().equals(BaseContext.getCurrentUserId())) {
-            throw new BaseException("无权删除他人项目");
-        }
+        // 2. 所有权校验: 个人项目只能删自己的; 团队项目必须是所属团队成员
+        checkOwnership(existing, "删除");
         // 3. 逻辑删除 (@TableLogic 自动转 deleted=1)
         baseMapper.deleteById(id);
     }

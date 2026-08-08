@@ -344,6 +344,7 @@ function goProject(p: Project) {
 // ===== 退出 =====
 function logout() {
   localStorage.removeItem('cf_token')
+  localStorage.removeItem('cf_active_tenant')
   router.push('/login')
 }
 </script>

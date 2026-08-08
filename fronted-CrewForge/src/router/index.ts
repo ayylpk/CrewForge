@@ -9,6 +9,8 @@ const router = createRouter({
     { path: '/projects', name: 'projects', component: ProjectsView },
     // 团队空间（与个人空间平级）
     { path: '/teams', name: 'teams', component: () => import('../views/TeamWorkspaceView.vue') },
+    // 团队详情（进入团队后的工作区）
+    { path: '/teams/:id', name: 'team-detail', component: () => import('../views/TeamDetailView.vue') },
     // Agent 仓库（自定义 Agent 池管理）
     { path: '/agents', name: 'agent-repo', component: () => import('../views/AgentRepositoryView.vue') },
     // Agent 表单（新建仓库 Agent）

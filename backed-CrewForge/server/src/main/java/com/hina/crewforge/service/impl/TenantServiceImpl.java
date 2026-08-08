@@ -10,12 +10,14 @@ import com.hina.crewforge.common.result.PageResult;
 import com.hina.crewforge.mapper.ProjectMapper;
 import com.hina.crewforge.mapper.TenantApplyMapper;
 import com.hina.crewforge.mapper.TenantMapper;
+import com.hina.crewforge.mapper.UserMapper;
 import com.hina.crewforge.mapper.UserTenantMapper;
 import com.hina.crewforge.pojo.QueryParam.TenantQueryParam;
 import com.hina.crewforge.pojo.dto.TenantDTO;
 import com.hina.crewforge.pojo.entity.Project;
 import com.hina.crewforge.pojo.entity.Tenant;
 import com.hina.crewforge.pojo.entity.TenantApply;
+import com.hina.crewforge.pojo.entity.User;
 import com.hina.crewforge.pojo.entity.UserTenant;
 import com.hina.crewforge.pojo.vo.TenantApplyVO;
 import com.hina.crewforge.pojo.vo.TenantVO;
@@ -47,6 +49,9 @@ public class TenantServiceImpl implements TenantService {
 
     @Autowired
     private ProjectMapper projectMapper;
+
+    @Autowired
+    private UserMapper userMapper;
 
     @Override
     public PageResult<TenantVO> page(TenantQueryParam tenantQueryParam) {
@@ -203,8 +208,12 @@ public class TenantServiceImpl implements TenantService {
         if (apply == null || !Integer.valueOf(0).equals(apply.getStatus())) {
             throw new BaseException("申请不存在或已处理");
         }
-        // 1. 校验容量上限(max_members 为软限制, 允许超出 MAX_MEMBERS_BUFFER 人; 超出后提醒)
+        // 0. 仅团队创建者(管理员)可审批
         Tenant tenant = tenantMapper.selectById(apply.getTenantId());
+        if (!tenant.getOwnerId().equals(BaseContext.getCurrentUserId())) {
+            throw new BaseException("无权审批他人团队的申请");
+        }
+        // 1. 校验容量上限(max_members 为软限制, 允许超出 MAX_MEMBERS_BUFFER 人; 超出后提醒)
         Long memberCount = userTenantMapper.selectCount(new LambdaQueryWrapper<UserTenant>()
                 .eq(UserTenant::getTenantId, apply.getTenantId())
                 .eq(UserTenant::getStatus, 1));
@@ -244,6 +253,11 @@ public class TenantServiceImpl implements TenantService {
         if (apply == null || !Integer.valueOf(0).equals(apply.getStatus())) {
             throw new BaseException("申请不存在或已处理");
         }
+        // 0. 仅团队创建者(管理员)可审批
+        Tenant tenant = tenantMapper.selectById(apply.getTenantId());
+        if (!tenant.getOwnerId().equals(BaseContext.getCurrentUserId())) {
+            throw new BaseException("无权审批他人团队的申请");
+        }
         // 申请状态 → 已拒绝(用户可重新申请)
         apply.setStatus(2);
         tenantApplyMapper.updateById(apply);
@@ -251,16 +265,34 @@ public class TenantServiceImpl implements TenantService {
 
     @Override
     public List<TenantApplyVO> listApply(Long tenantId) {
-        return tenantApplyMapper.selectList(new LambdaQueryWrapper<TenantApply>()
-                        .eq(TenantApply::getTenantId, tenantId)
-                        .orderByDesc(TenantApply::getCreateTime))
-                .stream().map(this::toApplyVO).collect(Collectors.toList());
-    }
-
-    private TenantApplyVO toApplyVO(TenantApply apply) {
-        TenantApplyVO vo = new TenantApplyVO();
-        BeanUtils.copyProperties(apply, vo);
-        return vo;
+        // 仅团队创建者(管理员)可查看申请列表
+        Tenant tenant = tenantMapper.selectById(tenantId);
+        if (tenant == null) {
+            throw new BaseException("团队不存在: " + tenantId);
+        }
+        if (!tenant.getOwnerId().equals(BaseContext.getCurrentUserId())) {
+            throw new BaseException("无权查看他人团队的申请");
+        }
+        List<TenantApply> applies = tenantApplyMapper.selectList(new LambdaQueryWrapper<TenantApply>()
+                .eq(TenantApply::getTenantId, tenantId)
+                .orderByDesc(TenantApply::getCreateTime));
+        if (applies.isEmpty()) {
+            return Collections.emptyList();
+        }
+        // 联查申请人姓名（一次批量查，避免 N+1）
+        List<Long> userIds = applies.stream().map(TenantApply::getUserId).distinct().collect(Collectors.toList());
+        Map<Long, User> userMap = userMapper.selectBatchIds(userIds).stream()
+                .collect(Collectors.toMap(User::getId, u -> u));
+        return applies.stream().map(a -> {
+            TenantApplyVO vo = new TenantApplyVO();
+            BeanUtils.copyProperties(a, vo);
+            User u = userMap.get(a.getUserId());
+            if (u != null) {
+                vo.setUsername(u.getUsername());
+                vo.setRealName(u.getRealName());
+            }
+            return vo;
+        }).collect(Collectors.toList());
     }
 
     private TenantVO toVO(Tenant tenant, Map<Long, Long> projectCounts) {

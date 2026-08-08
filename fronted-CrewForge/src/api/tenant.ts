@@ -52,6 +52,41 @@ export function deleteTenant(id: number): Promise<void> {
   return request.delete(`/api/tenant/${id}`) as Promise<void>
 }
 
+/** 加入申请（对应后端 TenantApplyVO） */
+export interface TenantApplyVO {
+  id: number
+  tenantId: number
+  userId: number
+  /** 申请人用户名（后端联查 sys_user） */
+  username: string
+  realName: string
+  invitationCode: string
+  /** 状态: 0-待审核, 1-已同意, 2-已拒绝 */
+  status: number
+  applyMsg: string
+  createTime: string
+}
+
+/** 申请加入团队（凭邀请码，提交后等管理员审核） */
+export function applyTenant(code: string): Promise<void> {
+  return request.post(`/api/tenant/apply/${code}`) as Promise<void>
+}
+
+/** 申请列表（仅管理员） */
+export function fetchApplyList(tenantId: number): Promise<TenantApplyVO[]> {
+  return request.get('/api/tenant/apply/list', { params: { tenantId } }) as Promise<TenantApplyVO[]>
+}
+
+/** 同意申请（申请人正式成为成员） */
+export function approveApply(id: number): Promise<void> {
+  return request.put(`/api/tenant/apply/approve/${id}`) as Promise<void>
+}
+
+/** 拒绝申请 */
+export function rejectApply(id: number): Promise<void> {
+  return request.put(`/api/tenant/apply/reject/${id}`) as Promise<void>
+}
+
 /** 我的团队（后端默认只返回当前用户加入的团队，userId 从 JWT 取） */
 export function fetchMyTeams(): Promise<PageResult<TenantVO>> {
   return request.get('/api/tenant', {
