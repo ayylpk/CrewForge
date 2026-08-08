@@ -3,7 +3,7 @@
  * Agent 表单页（新建/编辑，双模式）
  * - 池模式（默认）：保存到 Agent 池（sys_agent），POST/PUT /api/agent
  * - 项目模式（?projectId=）：保存为项目团队成员（sys_project_agent），POST/PUT /api/project-agent
- * userId 从登录存的 cf_user_info 解析
+ * userId 后端从 JWT 取，前端不传
  */
 import { ref, computed, onMounted } from 'vue'
 import { useRouter,useRoute } from 'vue-router'
@@ -11,12 +11,6 @@ import { ElMessage } from 'element-plus'
 import { createAgentPool, updateAgentPool, fetchAgentPoolById } from '../api/agentPools'
 import { createProjectAgent, updateProjectAgent, fetchProjectAgentById } from '../api/agent'
 import type { agentPoolDTO, agentPoolVO, agentDTO } from '../types/agent'
-
-/** 当前登录用户 ID（登录时存的 cf_user_info） */
-function currentUserId(): number {
-  const raw = localStorage.getItem('cf_user_info')
-  return raw ? (JSON.parse(raw) as { userId: number }).userId : 0
-}
 
 const router = useRouter()
 const route = useRoute()
@@ -206,18 +200,12 @@ async function save() {
     ElMessage.warning('请填写 Agent 名称')
     return
   }
-  const userId = currentUserId()
-  if (!userId) {
-    ElMessage.warning('登录信息失效，请重新登录')
-    return
-  }
   saving.value = true
   try {
     if (isProjectMode.value) {
       // 项目模式：团队成员（sys_project_agent）
       const dto: agentDTO = {
         projectId,
-        userId,
         name,
         role: form.value.role,
         systemPrompt: form.value.systemPrompt,
@@ -237,7 +225,6 @@ async function save() {
     } else {
       // 池模式：Agent 仓库（sys_agent）
       const dto: agentPoolDTO = {
-        userId,
         name,
         role: form.value.role,
         systemPrompt: form.value.systemPrompt,

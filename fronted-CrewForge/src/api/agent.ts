@@ -5,12 +5,13 @@ import type { agentDTO, agentVO } from '../types/agent'
  * 项目 Agent 接口（sys_project_agent）
  * 团队配置页：查询回显 / 新增 / 修改 / 删除
  * 删除 ids 走复合字符串格式："projectId-id1-id2"
+ * userId 一律后端从 JWT 取，前端不传
  */
 
-/** 查询某项目某用户的全部 Agent（无分页，团队配置页回显用） */
-export function fetchAllProjectAgents(projectId: number, userId: number): Promise<agentVO[]> {
+/** 查询某项目当前用户的全部 Agent（无分页，团队配置页回显用） */
+export function fetchAllProjectAgents(projectId: number): Promise<agentVO[]> {
   return request.get('/api/project-agent/all', {
-    params: { projectId, userId },
+    params: { projectId },
   }) as Promise<agentVO[]>
 }
 
@@ -34,7 +35,7 @@ export function deleteProjectAgents(projectId: number, ids: number[]): Promise<v
   return request.delete(`/api/project-agent/${projectId}-${ids.join('-')}`) as Promise<void>
 }
 
-/** 从 Agent 池批量复制到项目（复制非引用，返回复制的数量） */
-export function copyFromPool(projectId: number, userId: number, agentIds: number[]): Promise<number> {
-  return request.post('/api/project-agent/copy', { projectId, userId, agentIds }) as Promise<number>
+/** 从 Agent 池批量复制到项目（复制非引用，返回复制的数量；userId 后端从 JWT 取） */
+export function copyFromPool(projectId: number, agentIds: number[]): Promise<number> {
+  return request.post('/api/project-agent/copy', { projectId, agentIds }) as Promise<number>
 }

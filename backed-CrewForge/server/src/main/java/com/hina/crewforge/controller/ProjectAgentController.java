@@ -31,11 +31,11 @@ public class ProjectAgentController {
         return Result.success(pageResult);
     }
 
-    @Operation(summary = "查询全部(按项目+用户, 无分页)")
+    @Operation(summary = "查询全部(按项目, 无分页; userId 从 JWT 取)")
     @GetMapping("/all")
-    public Result<List<ProjectAgentVO>> listAll(@RequestParam Long projectId, @RequestParam Long userId) {
-        log.info("查询项目全部agent projectId = {}, userId = {}", projectId, userId);
-        List<ProjectAgentVO> list = projectAgentService.listAll(projectId, userId);
+    public Result<List<ProjectAgentVO>> listAll(@RequestParam Long projectId) {
+        log.info("查询项目全部agent projectId = {}", projectId);
+        List<ProjectAgentVO> list = projectAgentService.listAll(projectId);
         return Result.success(list);
     }
 

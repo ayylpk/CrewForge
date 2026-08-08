@@ -18,6 +18,9 @@
     </header>
 
     <main class="main">
+      <!-- 横幅背景层（透明，内容覆盖其上） -->
+      <div class="main-banner"></div>
+
       <!-- 页头 -->
       <div class="page-head">
         <h1>Agent 仓库</h1>
@@ -94,14 +97,7 @@ import type { agentPoolVO } from '../types/agent'
 import WorkspaceSwitcher from '../components/WorkspaceSwitcher.vue'
 import EmptyState from '../components/EmptyState.vue'
 
-/** 当前登录用户 ID（登录时存的 cf_user_info） */
-function currentUserId(): number {
-  const raw = localStorage.getItem('cf_user_info')
-  return raw ? (JSON.parse(raw) as { userId: number }).userId : 0
-}
-
 const router = useRouter()
-const userId = currentUserId()
 
 // ===== 职责配色（与 TeamView/AgentFormView 一致） =====
 const ROLE_COLOR: Record<string, { color: string; bg: string }> = {
@@ -155,7 +151,6 @@ async function load() {
     const res = await fetchAgentPool({
       page: page.value,
       pageSize,
-      userId,
       keyword: keyword.value.trim() || undefined,
     })
     agents.value = res.records
@@ -192,7 +187,7 @@ async function remove(a: agentPoolVO) {
     return // 用户取消
   }
   try {
-    await deleteAgentPool(userId, [a.id])
+    await deleteAgentPool([a.id])
     ElMessage.success(`已删除「${a.name}」`)
     load()
   } catch {
@@ -286,8 +281,31 @@ function switchWs(ws: 'personal' | 'team') {
 
 /* ===== 主体 ===== */
 .main {
+  position: relative;
   width: 100%;
-  padding: 32px 48px;
+  padding: 32px 48px 460px;
+}
+/* 横幅背景层（完整图放大显示，底部对齐页面底部） */
+.main-banner {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 400px;
+  background-image: url('../assets/banner-agents.png');
+  /* 完整显示，不裁切 */
+  background-size: contain;
+  background-repeat: no-repeat;
+  background-position: center bottom;
+  opacity: 0.3;
+  pointer-events: none;
+  mask-image: linear-gradient(to top, rgba(0, 0, 0, 0.95), transparent 88%);
+  -webkit-mask-image: linear-gradient(to top, rgba(0, 0, 0, 0.95), transparent 88%);
+}
+/* 内容层浮在横幅上方 */
+.main > :not(.main-banner) {
+  position: relative;
+  z-index: 1;
 }
 .page-head {
   display: flex;

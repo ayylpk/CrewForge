@@ -12,8 +12,8 @@ public interface ProjectAgentService {
 
     PageResult<ProjectAgentVO> page(ProjectAgentQueryParam projectAgentQueryParam);
 
-    /** 查询某项目某用户的全部 Agent（无分页，团队配置页回显用） */
-    List<ProjectAgentVO> listAll(Long projectId, Long userId);
+    /** 查询某项目当前用户的全部 Agent（无分页，团队配置页回显用；userId 从 JWT 取） */
+    List<ProjectAgentVO> listAll(Long projectId);
 
     void create(ProjectAgentDTO dto);
 

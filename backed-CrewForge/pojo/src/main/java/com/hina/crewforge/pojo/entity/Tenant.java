@@ -25,12 +25,14 @@ public class Tenant {
     private Long ownerId;
     /** 联系人 */
     private String contact;
-    /** 联系电话 */
-    private String phone;
+    /** 描述 */
+    private String description;
     /** 状态: 1-启用, 0-禁用 */
     private Integer status;
     /** 邀请码 */
     private String invitationCode;
+
+    private Integer members;
     /** 团队人数上限（软限制，校验时允许超出 {@link #MAX_MEMBERS_BUFFER} 人） */
     private Integer maxMembers;
     @TableField(fill = FieldFill.INSERT)

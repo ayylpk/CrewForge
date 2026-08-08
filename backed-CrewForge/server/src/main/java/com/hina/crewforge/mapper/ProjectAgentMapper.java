@@ -22,5 +22,5 @@ public interface ProjectAgentMapper {
     ProjectAgent getById(Long id);
 
     void deleteByIds(@Param("ids") List<Long> ids, @Param("projectId") Long projectId,
-                     @Param("updateTime") LocalDateTime updateTime);
+                     @Param("userId") Long userId, @Param("updateTime") LocalDateTime updateTime);
 }

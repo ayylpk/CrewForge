@@ -15,7 +15,8 @@ public interface TenantService {
      */
     PageResult<TenantVO> page(TenantQueryParam tenantQueryParam);
 
-    void create(TenantDTO dto);
+    /** 新增团队，返回新团队 id（前端拿邀请码用） */
+    Long create(TenantDTO dto);
 
     void update(Long id, TenantDTO dto);
 

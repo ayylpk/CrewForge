@@ -9,6 +9,9 @@ import lombok.NoArgsConstructor;
 public class TenantDTO {
     private String name;
     private String contact;
-    private String phone;
+    /** 团队描述 */
+    private String description;
+    /** 容量上限（创建时设置，默认 DEFAULT_MAX_MEMBERS） */
+    private Integer maxMembers;
     private Integer status;
 }

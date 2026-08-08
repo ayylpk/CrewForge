@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.github.pagehelper.Page;
 import com.github.pagehelper.PageHelper;
+import com.hina.crewforge.common.context.BaseContext;
 import com.hina.crewforge.common.exception.BaseException;
 import com.hina.crewforge.common.result.PageResult;
 import com.hina.crewforge.mapper.ProjectFileMapper;
@@ -44,13 +45,12 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
         // 1. PageHelper 分页（只对紧接着的第一次查询生效）
         PageHelper.startPage(projectQueryParam.getPage(), projectQueryParam.getPageSize());
 
-        // 2. 按查询类型拼过滤条件: 个人项目按 create_user, 团队项目按 tenant_id
+        // 2. 按查询类型拼过滤条件: 个人项目按 create_user(JWT 身份), 团队项目按 tenant_id
         LambdaQueryWrapper<Project> wrapper = new LambdaQueryWrapper<>();
         if (Project.PROJECT_TYPE_PERSONAL.equals(projectQueryParam.getProjectType())) {
             wrapper.eq(Project::getProjectType, Project.PROJECT_TYPE_PERSONAL);
-            if (projectQueryParam.getUserId() != null) {
-                wrapper.eq(Project::getCreateUser, projectQueryParam.getUserId());
-            }
+            // ⚠️ 不信任前端传的 userId, 从 JWT 解析当前登录用户
+            wrapper.eq(Project::getCreateUser, BaseContext.getCurrentUserId());
         } else if (Project.PROJECT_TYPE_TEAM.equals(projectQueryParam.getProjectType())) {
             wrapper.eq(Project::getProjectType, Project.PROJECT_TYPE_TEAM);
             if (projectQueryParam.getTenantId() != null) {
@@ -83,6 +83,8 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
         LocalDateTime now = LocalDateTime.now();
         project.setCreateTime(now);
         project.setUpdateTime(now);
+        // ⚠️ 不信任前端传的 createUser, 从 JWT 解析当前登录用户
+        project.setCreateUser(BaseContext.getCurrentUserId());
         // 默认值: 个人项目 + 草稿状态 + 混合确认模式
         if (project.getProjectType() == null) {
             project.setProjectType(Project.PROJECT_TYPE_PERSONAL);
@@ -104,8 +106,14 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
     @Override
     public void update(Long id, ProjectDTO dto) {
         // 1. 项目必须存在（防前端传错 id 静默失败）
-        if (baseMapper.selectById(id) == null) {
+        Project existing = baseMapper.selectById(id);
+        if (existing == null) {
             throw new BaseException("项目不存在: " + id);
+        }
+        // 1.1 所有权校验: 个人项目只能改自己的（团队项目后续由 X-Tenant-Id 归属校验兜底）
+        if (Project.PROJECT_TYPE_PERSONAL.equals(existing.getProjectType())
+                && !existing.getCreateUser().equals(BaseContext.getCurrentUserId())) {
+            throw new BaseException("无权修改他人项目");
         }
         // 2. status 传了必须是合法值（防脏状态落库）
         if (StringUtils.hasText(dto.getStatus()) && !VALID_STATUS.contains(dto.getStatus())) {
@@ -141,6 +149,22 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
             }
             throw new BaseException(field + " 不是合法 JSON");
         }
+    }
+
+    @Override
+    public void delete(Long id) {
+        // 1. 项目必须存在
+        Project existing = baseMapper.selectById(id);
+        if (existing == null) {
+            throw new BaseException("项目不存在: " + id);
+        }
+        // 2. 所有权校验: 个人项目只能删自己的（团队项目后续由 X-Tenant-Id 归属校验兜底）
+        if (Project.PROJECT_TYPE_PERSONAL.equals(existing.getProjectType())
+                && !existing.getCreateUser().equals(BaseContext.getCurrentUserId())) {
+            throw new BaseException("无权删除他人项目");
+        }
+        // 3. 逻辑删除 (@TableLogic 自动转 deleted=1)
+        baseMapper.deleteById(id);
     }
 
     @Override

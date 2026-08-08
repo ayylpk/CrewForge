@@ -71,8 +71,6 @@ export interface ProjectCreateDTO {
   tenantId?: number
   /** 项目类型: 1-个人项目, 2-团队项目（api 函数内部自动填） */
   projectType?: number
-  /** 创建人用户 ID（api 函数内部从登录信息取） */
-  createUser?: number
   /** 需求澄清后的结构化文档(Markdown) */
   clarifiedReq?: string
   /** 业务模块/功能列表(JSON 数组字符串)，如 '["客户管理","跟进记录"]' */

@@ -40,7 +40,7 @@ public class ProjectController {
     @DeleteMapping("/{id}")
     public Result<Void> delete(@PathVariable Long id) {
         log.info("删除项目 id = {}", id);
-        projectService.removeById(id);
+        projectService.delete(id);
         return Result.success();
     }
 

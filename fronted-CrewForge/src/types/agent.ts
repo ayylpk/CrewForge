@@ -47,8 +47,6 @@ export interface agentVO {
 export interface agentDTO {
   /** 所属项目 ID（必传） */
   projectId: number
-  /** 所属用户 ID（必传，数据隔离用） */
-  userId: number
   /** Agent 名称 */
   name: string
   /** 职位描述 */
@@ -92,10 +90,8 @@ export interface agentPoolVO {
   updateTime: string
 }
 
-/** 新建/更新 Agent 池请求（对应后端 AgentPoolDTO，userId 必须前端传） */
+/** 新建/更新 Agent 池请求（对应后端 AgentPoolDTO；userId 后端从 JWT 取，前端不传） */
 export interface agentPoolDTO {
-  /** 所属用户 ID（必传，后端不取 token） */
-  userId: number
   /** Agent 名称（同一用户下不重名） */
   name: string
   /** 职位描述 */
@@ -112,12 +108,10 @@ export interface agentPoolDTO {
   status?: number
 }
 
-/** Agent 池分页查询参数（对应后端 AgentPoolQueryParam，GET 请求体） */
+/** Agent 池分页查询参数（对应后端 AgentPoolQueryParam，GET 请求体；userId 后端从 JWT 取） */
 export interface agentPoolQueryParam {
   page?: number
   pageSize?: number
-  /** 用户 ID（按 userId 隔离） */
-  userId: number
   /** 模糊匹配 name/role */
   keyword?: string
 }

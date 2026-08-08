@@ -8,12 +8,6 @@ import { fetchAgentPool } from '../api/agentPools'
 import type { agentVO, agentPoolVO } from '../types/agent'
 import { ElMessage, ElMessageBox } from 'element-plus'
 
-/** 当前登录用户 ID（登录时存的 cf_user_info） */
-function currentUserId(): number {
-  const raw = localStorage.getItem('cf_user_info')
-  return raw ? (JSON.parse(raw) as { userId: number }).userId : 0
-}
-
 const router = useRouter()
 const route = useRoute()
 const projectName = ref('')
@@ -24,8 +18,8 @@ onMounted(async () => {
   try {
     const p = await fetchProjectById(id)
     projectName.value = p.name
-    // 查询该项目已保存的 Agent 团队（按 projectId + userId 双条件，回显到 existingAgents）
-    existingAgents.value = await fetchAllProjectAgents(id, currentUserId())
+    // 查询该项目已保存的 Agent 团队（userId 后端从 JWT 取，回显到 existingAgents）
+    existingAgents.value = await fetchAllProjectAgents(id)
   } catch {
     projectName.value = '项目 #' + route.params.id
   }
@@ -240,7 +234,6 @@ async function loadPool() {
     const res = await fetchAgentPool({
       page: poolPage.value,
       pageSize: poolPageSize,
-      userId: currentUserId(),
       keyword: poolKeyword.value.trim() || undefined,
     })
     poolAgents.value = res.records
@@ -269,10 +262,10 @@ async function doCopy() {
   pulling.value = true
   try {
     const projectId = Number(route.params.id)
-    const n = await copyFromPool(projectId, currentUserId(), selectedIds.value)
+    const n = await copyFromPool(projectId, selectedIds.value)
     ElMessage.success(`已拉取 ${n} 个成员到项目团队`)
     showPoolModal.value = false
-    existingAgents.value = await fetchAllProjectAgents(projectId, currentUserId())
+    existingAgents.value = await fetchAllProjectAgents(projectId)
   } catch {
     /* 拦截器已提示 */
   } finally {
@@ -418,7 +411,6 @@ function confirmTeam() {
                   <svg v-if="roleMetaByLabel(m.role).icon" v-html="roleMetaByLabel(m.role).icon" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></svg>
                   <span v-else>{{ m.role.slice(0, 1) }}</span>
                 </span>
-                <span v-if="m.isNew" class="member-new-badge">新</span>
               </div>
               <button class="member-remove" @click="removeMember(m)">✕</button>
             </div>
@@ -774,15 +766,6 @@ function confirmTeam() {
   flex-shrink: 0;
   font-size: 12px;
   font-weight: 600;
-}
-/* 新增未入库成员标记 */
-.member-new-badge {
-  font-size: 10px;
-  color: var(--green);
-  border: 1px solid rgba(94, 203, 138, 0.4);
-  border-radius: 6px;
-  padding: 0 5px;
-  line-height: 14px;
 }
 .member-remove {
   border: none;

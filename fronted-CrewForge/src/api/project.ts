@@ -10,12 +10,9 @@ export interface PageResult<T> {
 }
 
 export function fetchProjects(): Promise<PageResult<Project>> {
-  // userId 从登录时存的 cf_user_info 里解析（LoginResult.userId）
-  const raw = localStorage.getItem('cf_user_info')
-  const userId = raw ? (JSON.parse(raw) as { userId: number }).userId : 0
-  // 参数放 URL query（后端 GET 接口用 @ModelAttribute 绑定，不用 @RequestBody）
+  // userId 后端从 JWT 取，前端不传
   return request.get('/api/project', {
-    params: { page: 1, pageSize: 20, projectType: 1, userId },
+    params: { page: 1, pageSize: 20, projectType: 1 },
   }) as Promise<PageResult<Project>>
 }
 
@@ -45,26 +42,19 @@ export function updateProject(id: number, dto: Partial<ProjectCreateDTO>): Promi
 }
 
 export function createProject(dto: ProjectCreateDTO): Promise<void> {
-  // createUser 从登录信息取（后端 DTO 注释：前端传当前登录用户）
-  const raw = localStorage.getItem('cf_user_info')
-  const createUser = raw ? (JSON.parse(raw) as { userId: number }).userId : 0
-  // 展开 dto 传全部字段，confirmMode 转数字，projectType/createUser 强制覆盖为个人项目
+  // createUser 后端从 JWT 取，前端不传
   return request.post('/api/project', {
     ...dto,
     confirmMode: CONFIRM_MAP[dto.confirmMode],
     projectType: 1,
-    createUser,
   }) as Promise<void>
 }
 
 export function createTeamProject(dto: ProjectCreateDTO, tenantId: number): Promise<void> {
-  const raw = localStorage.getItem('cf_user_info')
-  const createUser = raw ? (JSON.parse(raw) as { userId: number }).userId : 0
   return request.post('/api/project', {
     ...dto,
     confirmMode: CONFIRM_MAP[dto.confirmMode],
     projectType: 2,
     tenantId,
-    createUser,
   }) as Promise<void>
 }

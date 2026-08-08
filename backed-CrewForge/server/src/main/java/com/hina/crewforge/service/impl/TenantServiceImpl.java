@@ -1,16 +1,19 @@
 package com.hina.crewforge.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.github.pagehelper.Page;
 import com.github.pagehelper.PageHelper;
 import com.hina.crewforge.common.context.BaseContext;
 import com.hina.crewforge.common.exception.BaseException;
 import com.hina.crewforge.common.result.PageResult;
+import com.hina.crewforge.mapper.ProjectMapper;
 import com.hina.crewforge.mapper.TenantApplyMapper;
 import com.hina.crewforge.mapper.TenantMapper;
 import com.hina.crewforge.mapper.UserTenantMapper;
 import com.hina.crewforge.pojo.QueryParam.TenantQueryParam;
 import com.hina.crewforge.pojo.dto.TenantDTO;
+import com.hina.crewforge.pojo.entity.Project;
 import com.hina.crewforge.pojo.entity.Tenant;
 import com.hina.crewforge.pojo.entity.TenantApply;
 import com.hina.crewforge.pojo.entity.UserTenant;
@@ -23,7 +26,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.stream.Collectors;
 
@@ -39,34 +45,96 @@ public class TenantServiceImpl implements TenantService {
     @Autowired
     private UserTenantMapper userTenantMapper;
 
+    @Autowired
+    private ProjectMapper projectMapper;
+
     @Override
     public PageResult<TenantVO> page(TenantQueryParam tenantQueryParam) {
+        // 我的团队: 以 sys_user_tenant 为唯一权威来源, 按 JWT userId 查我加入的团队 id
+        Long userId = BaseContext.getCurrentUserId();
+        List<Long> tenantIds = userTenantMapper.selectList(new LambdaQueryWrapper<UserTenant>()
+                        .eq(UserTenant::getUserId, userId)
+                        .eq(UserTenant::getStatus, 1))
+                .stream().map(UserTenant::getTenantId).collect(Collectors.toList());
+        if (tenantIds.isEmpty()) {
+            return new PageResult<>(0L, Collections.emptyList());
+        }
+
         PageHelper.startPage(tenantQueryParam.getPage(), tenantQueryParam.getPageSize());
 
-        List<Tenant> list = tenantMapper.list(tenantQueryParam);
+        List<Tenant> list = tenantMapper.list(tenantQueryParam, tenantIds);
         Page<Tenant> p = (Page<Tenant>)list;
 
-        List<TenantVO> voList = p.getResult().stream().map(this::toVO).collect(Collectors.toList());
+        // 项目数: 一次分组查本页所有团队的团队项目数, 避免 N+1
+        Map<Long, Long> projectCounts = countTeamProjects(p.getResult().stream()
+                .map(Tenant::getId).collect(Collectors.toList()));
+
+        List<TenantVO> voList = p.getResult().stream()
+                .map(t -> toVO(t, projectCounts)).collect(Collectors.toList());
 
         return new PageResult<>(p.getTotal(), voList);
     }
 
+    /** 一次分组查询出多个团队的项目数(COUNT + GROUP BY tenant_id) */
+    private Map<Long, Long> countTeamProjects(List<Long> tenantIds) {
+        Map<Long, Long> counts = new HashMap<>();
+        if (tenantIds.isEmpty()) {
+            return counts;
+        }
+        QueryWrapper<Project> wrapper = new QueryWrapper<>();
+        wrapper.select("tenant_id", "COUNT(*) AS cnt")
+                .in("tenant_id", tenantIds)
+                .groupBy("tenant_id");
+        for (Map<String, Object> row : projectMapper.selectMaps(wrapper)) {
+            Long tenantId = ((Number) row.get("tenant_id")).longValue();
+            Long cnt = ((Number) row.get("cnt")).longValue();
+            counts.put(tenantId, cnt);
+        }
+        return counts;
+    }
+
     @Override
-    public void create(TenantDTO dto) {
+    public Long create(TenantDTO dto) {
         Tenant entity = new Tenant();
         BeanUtils.copyProperties(dto, entity);
         LocalDateTime now = LocalDateTime.now();
         entity.setCreateTime(now);
         entity.setUpdateTime(now);
         entity.setOwnerId(BaseContext.getCurrentUserId());
-        entity.setMaxMembers(Tenant.DEFAULT_MAX_MEMBERS);
+        // 当前成员数 = 1（创建者自己）
+        entity.setMembers(1);
+        // 容量上限: 不传默认 DEFAULT_MAX_MEMBERS
+        if (entity.getMaxMembers() == null) {
+            entity.setMaxMembers(Tenant.DEFAULT_MAX_MEMBERS);
+        }
+        // 状态默认启用（防前端不传导致 status=null 落库）
+        if (entity.getStatus() == null) {
+            entity.setStatus(1);
+        }
         // 生成 20 位邀请码(UUID 截取), 万一撞了唯一索引就让用户重试
         entity.setInvitationCode(UUID.randomUUID().toString().replace("-", "").substring(0, 20));
         tenantMapper.insert(entity);
+        // 创建者自动成为成员（sys_user_tenant 是"我的团队"查询的权威来源）
+        UserTenant ut = new UserTenant();
+        ut.setUserId(entity.getOwnerId());
+        ut.setTenantId(entity.getId());
+        ut.setStatus(1);
+        ut.setCreateTime(now);
+        userTenantMapper.insert(ut);
+        return entity.getId();
     }
 
     @Override
     public void update(Long id, TenantDTO dto) {
+        // 1. 存在 + 仅创建者(管理员)可改
+        Tenant existing = tenantMapper.selectById(id);
+        if (existing == null) {
+            throw new BaseException("团队不存在: " + id);
+        }
+        if (!existing.getOwnerId().equals(BaseContext.getCurrentUserId())) {
+            throw new BaseException("无权修改他人团队");
+        }
+        // 2. 更新（MP updateById 只更新非 null 字段; members 当前数 DTO 没有, 不会被改）
         Tenant entity = new Tenant();
         BeanUtils.copyProperties(dto, entity);
         entity.setId(id);
@@ -82,7 +150,15 @@ public class TenantServiceImpl implements TenantService {
 
     @Override
     public void deleteById(Long id) {
-        // BaseMapper 自带: @TableLogic 自动转逻辑删除(deleted=1)
+        // 1. 存在 + 仅创建者(管理员)可删
+        Tenant existing = tenantMapper.selectById(id);
+        if (existing == null) {
+            throw new BaseException("团队不存在: " + id);
+        }
+        if (!existing.getOwnerId().equals(BaseContext.getCurrentUserId())) {
+            throw new BaseException("无权删除他人团队");
+        }
+        // 2. BaseMapper 自带: @TableLogic 自动转逻辑删除(deleted=1)
         tenantMapper.deleteById(id);
     }
 
@@ -127,12 +203,13 @@ public class TenantServiceImpl implements TenantService {
         if (apply == null || !Integer.valueOf(0).equals(apply.getStatus())) {
             throw new BaseException("申请不存在或已处理");
         }
-        // 1. 校验团队人数上限(max_members 为软限制, 允许超出 MAX_MEMBERS_BUFFER 人)
+        // 1. 校验容量上限(max_members 为软限制, 允许超出 MAX_MEMBERS_BUFFER 人; 超出后提醒)
         Tenant tenant = tenantMapper.selectById(apply.getTenantId());
         Long memberCount = userTenantMapper.selectCount(new LambdaQueryWrapper<UserTenant>()
                 .eq(UserTenant::getTenantId, apply.getTenantId())
                 .eq(UserTenant::getStatus, 1));
-        int limit = tenant.getMaxMembers() + Tenant.MAX_MEMBERS_BUFFER;
+        int limit = (tenant.getMaxMembers() != null ? tenant.getMaxMembers() : Tenant.DEFAULT_MAX_MEMBERS)
+                + Tenant.MAX_MEMBERS_BUFFER;
         if (memberCount != null && memberCount >= limit) {
             throw new BaseException("团队人数已满(上限 " + limit + " 人)");
         }
@@ -150,6 +227,12 @@ public class TenantServiceImpl implements TenantService {
         ut.setTenantId(apply.getTenantId());
         ut.setStatus(1);
         userTenantMapper.insert(ut);
+        // 3.1 当前成员数 +1（与实体 members 字段同步）
+        Tenant update = new Tenant();
+        update.setId(tenant.getId());
+        update.setMembers(tenant.getMembers() + 1);
+        update.setUpdateTime(LocalDateTime.now());
+        tenantMapper.updateById(update);
         // 4. 申请状态 → 已同意
         apply.setStatus(1);
         tenantApplyMapper.updateById(apply);
@@ -180,9 +263,14 @@ public class TenantServiceImpl implements TenantService {
         return vo;
     }
 
-    private TenantVO toVO(Tenant tenant) {
+    private TenantVO toVO(Tenant tenant, Map<Long, Long> projectCounts) {
         TenantVO vo = new TenantVO();
         BeanUtils.copyProperties(tenant, vo);
+        vo.setProjectCount(projectCounts.getOrDefault(tenant.getId(), 0L));
         return vo;
+    }
+
+    private TenantVO toVO(Tenant tenant) {
+        return toVO(tenant, Collections.emptyMap());
     }
 }

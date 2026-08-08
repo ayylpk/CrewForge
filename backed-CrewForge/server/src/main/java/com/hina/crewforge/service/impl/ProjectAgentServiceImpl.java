@@ -2,6 +2,8 @@ package com.hina.crewforge.service.impl;
 
 import com.github.pagehelper.Page;
 import com.github.pagehelper.PageHelper;
+import com.hina.crewforge.common.context.BaseContext;
+import com.hina.crewforge.common.exception.BaseException;
 import com.hina.crewforge.common.result.PageResult;
 import com.hina.crewforge.mapper.AgentPoolMapper;
 import com.hina.crewforge.mapper.ProjectAgentMapper;
@@ -32,6 +34,8 @@ public class ProjectAgentServiceImpl implements ProjectAgentService {
 
     @Override
     public PageResult<ProjectAgentVO> page(ProjectAgentQueryParam projectAgentQueryParam) {
+        // ⚠️ 不信任前端传的 userId, 从 JWT 解析当前登录用户
+        projectAgentQueryParam.setUserId(BaseContext.getCurrentUserId());
         PageHelper.startPage(projectAgentQueryParam.getPage(),projectAgentQueryParam.getPageSize());
 
         List<ProjectAgent> list = projectAgentMapper.list(projectAgentQueryParam);
@@ -43,7 +47,9 @@ public class ProjectAgentServiceImpl implements ProjectAgentService {
     }
 
     @Override
-    public List<ProjectAgentVO> listAll(Long projectId, Long userId) {
+    public List<ProjectAgentVO> listAll(Long projectId) {
+        // ⚠️ 不信任前端传的 userId, 从 JWT 解析当前登录用户
+        Long userId = BaseContext.getCurrentUserId();
         List<ProjectAgent> list = projectAgentMapper.listAll(projectId, userId);
         return list.stream().map(this::toVO).collect(Collectors.toList());
     }
@@ -66,6 +72,8 @@ public class ProjectAgentServiceImpl implements ProjectAgentService {
         LocalDateTime now = LocalDateTime.now();
         entity.setCreateTime(now);
         entity.setUpdateTime(now);
+        // ⚠️ 不信任前端传的 userId, 从 JWT 解析当前登录用户
+        entity.setUserId(BaseContext.getCurrentUserId());
         // 加入项目默认参与
         if (entity.getStatus() == null) {
             entity.setStatus(1);
@@ -75,10 +83,20 @@ public class ProjectAgentServiceImpl implements ProjectAgentService {
 
     @Override
     public void update(Long id, ProjectAgentDTO dto) {
+        // 1. 存在 + 所有权校验（项目 Agent 按用户隔离, 只能改自己的）
+        ProjectAgent existing = projectAgentMapper.getById(id);
+        if (existing == null) {
+            throw new BaseException("项目 Agent 不存在: " + id);
+        }
+        if (!existing.getUserId().equals(BaseContext.getCurrentUserId())) {
+            throw new BaseException("无权修改他人的项目 Agent");
+        }
+        // 2. 更新（userId 不允许改, 覆盖为原值）
         ProjectAgent entity = new ProjectAgent();
         BeanUtils.copyProperties(dto, entity);
         normalize(entity);
         entity.setId(id);
+        entity.setUserId(existing.getUserId());
         entity.setUpdateTime(LocalDateTime.now());
         projectAgentMapper.updateById(entity);
     }
@@ -91,14 +109,14 @@ public class ProjectAgentServiceImpl implements ProjectAgentService {
 
     @Override
     public void deleteByIds(String ids) {
-        // 格式: "projectId-id1-id2-id3"
+        // 格式: "projectId-id1-id2-id3" —— projectId 仅作过滤, userId 从 JWT 取(防删别人的)
         String[] parts = ids.split("-");
         Long projectId = Long.parseLong(parts[0]);
         List<Long> idList = new ArrayList<>();
         for (int i = 1; i < parts.length; i++) {
             idList.add(Long.parseLong(parts[i]));
         }
-        projectAgentMapper.deleteByIds(idList, projectId, LocalDateTime.now());
+        projectAgentMapper.deleteByIds(idList, projectId, BaseContext.getCurrentUserId(), LocalDateTime.now());
     }
 
     /**
@@ -111,13 +129,18 @@ public class ProjectAgentServiceImpl implements ProjectAgentService {
         if (dto.getAgentIds() == null || dto.getAgentIds().isEmpty()) {
             return 0;
         }
-        List<AgentPool> pool = agentPoolMapper.selectByIds(dto.getAgentIds());
+        // ⚠️ 不信任前端传的 userId, 从 JWT 解析当前登录用户
+        Long currentUserId = BaseContext.getCurrentUserId();
+        // 池里的 Agent 只允许复制自己的（防拿别人的池模板）
+        List<AgentPool> pool = agentPoolMapper.selectByIds(dto.getAgentIds()).stream()
+                .filter(p -> p.getUserId().equals(currentUserId))
+                .collect(Collectors.toList());
         LocalDateTime now = LocalDateTime.now();
         int count = 0;
         for (AgentPool p : pool) {
             ProjectAgent entity = new ProjectAgent();
             entity.setProjectId(dto.getProjectId());
-            entity.setUserId(dto.getUserId());
+            entity.setUserId(currentUserId);
             entity.setName(p.getName());
             entity.setRole(p.getRole());
             entity.setSystemPrompt(p.getSystemPrompt());

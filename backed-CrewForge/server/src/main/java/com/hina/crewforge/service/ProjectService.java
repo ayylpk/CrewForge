@@ -30,4 +30,9 @@ public interface ProjectService extends IService<Project> {
      * 查询单个项目
      */
     ProjectVO getById(Long id);
+
+    /**
+     * 删除项目（含所有权校验，个人项目只能删自己的）
+     */
+    void delete(Long id);
 }

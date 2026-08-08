@@ -27,7 +27,6 @@ const form = ref<ProjectCreateDTO>({
   // 以下可选字段：页面有输入/加载到值才赋值；undefined = 不发送 = 后端不修改
   tenantId: undefined,
   projectType: undefined,
-  createUser: undefined,
   clarifiedReq: undefined,
   businessModules: undefined,
   techStack: undefined,

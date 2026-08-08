@@ -3,13 +3,13 @@ import type { agentPoolDTO, agentPoolQueryParam, agentPoolVO, PageResult } from 
 
 /**
  * Agent 池接口（sys_agent，自定义 Agent 仓库）
- * 按 userId 隔离；删除 ids 走复合字符串格式："userId-id1-id2"
+ * 按 userId 隔离（userId 后端从 JWT 取）；删除 ids 走连字符格式："id1-id2"
  */
 
-/** 分页查询 Agent 池（query params 绑定） */
+/** 分页查询 Agent 池（query params 绑定；userId 后端从 JWT 取） */
 export function fetchAgentPool(query: agentPoolQueryParam): Promise<PageResult<agentPoolVO>> {
   return request.get('/api/agent', {
-    params: { page: query.page ?? 1, pageSize: query.pageSize ?? 20, userId: query.userId, keyword: query.keyword },
+    params: { page: query.page ?? 1, pageSize: query.pageSize ?? 20, keyword: query.keyword },
   }) as Promise<PageResult<agentPoolVO>>
 }
 
@@ -28,7 +28,7 @@ export function updateAgentPool(id: number, dto: agentPoolDTO): Promise<void> {
   return request.put(`/api/agent/${id}`, dto) as Promise<void>
 }
 
-/** 删除池 Agent（ids 复合格式：userId-id1-id2） */
-export function deleteAgentPool(userId: number, ids: number[]): Promise<void> {
-  return request.delete(`/api/agent/${userId}-${ids.join('-')}`) as Promise<void>
+/** 删除池 Agent（ids 连字符格式：id1-id2；userId 后端从 JWT 取） */
+export function deleteAgentPool(ids: number[]): Promise<void> {
+  return request.delete(`/api/agent/${ids.join('-')}`) as Promise<void>
 }

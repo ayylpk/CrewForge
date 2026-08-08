@@ -2,6 +2,8 @@ package com.hina.crewforge.service.impl;
 
 import com.github.pagehelper.Page;
 import com.github.pagehelper.PageHelper;
+import com.hina.crewforge.common.context.BaseContext;
+import com.hina.crewforge.common.exception.BaseException;
 import com.hina.crewforge.common.result.PageResult;
 import com.hina.crewforge.mapper.AgentPoolMapper;
 import com.hina.crewforge.pojo.QueryParam.AgentPoolQueryParam;
@@ -25,6 +27,8 @@ public class AgentPoolServiceImpl implements AgentPoolService {
 
     @Override
     public PageResult<AgentPoolVO> page(AgentPoolQueryParam agentQueryParam) {
+        // ⚠️ 不信任前端传的 userId, 从 JWT 解析当前登录用户
+        agentQueryParam.setUserId(BaseContext.getCurrentUserId());
         PageHelper.startPage(agentQueryParam.getPage(),agentQueryParam.getPageSize());
 
         List<AgentPool> list = agentMapper.list(agentQueryParam);
@@ -53,6 +57,8 @@ public class AgentPoolServiceImpl implements AgentPoolService {
         LocalDateTime now = LocalDateTime.now();
         entity.setCreateTime(now);
         entity.setUpdateTime(now);
+        // ⚠️ 不信任前端传的 userId, 从 JWT 解析当前登录用户
+        entity.setUserId(BaseContext.getCurrentUserId());
         // 新增默认启用
         if (entity.getStatus() == null) {
             entity.setStatus(1);
@@ -62,10 +68,20 @@ public class AgentPoolServiceImpl implements AgentPoolService {
 
     @Override
     public void update(Long id, AgentPoolDTO dto) {
+        // 1. 存在 + 所有权校验（池按用户隔离，只能改自己的）
+        AgentPool existing = agentMapper.getById(id);
+        if (existing == null) {
+            throw new BaseException("Agent 不存在: " + id);
+        }
+        if (!existing.getUserId().equals(BaseContext.getCurrentUserId())) {
+            throw new BaseException("无权修改他人的 Agent");
+        }
+        // 2. 更新（userId 不允许改, 从实体里去不掉则覆盖为原值）
         AgentPool entity = new AgentPool();
         BeanUtils.copyProperties(dto, entity);
         normalize(entity);
         entity.setId(id);
+        entity.setUserId(existing.getUserId());
         entity.setUpdateTime(LocalDateTime.now());
         agentMapper.updateById(entity);
     }
@@ -78,12 +94,12 @@ public class AgentPoolServiceImpl implements AgentPoolService {
 
     @Override
     public void deleteByIds(String ids) {
-        // 格式: "userId-id1-id2-id3"
+        // 格式: "id1-id2-id3"（userId 不拼在路径里了, 从 JWT 取当前登录用户）
         String[] parts = ids.split("-");
-        Long userId = Long.parseLong(parts[0]);
+        Long userId = BaseContext.getCurrentUserId();
         List<Long> idList = new ArrayList<>();
-        for (int i = 1; i < parts.length; i++) {
-            idList.add(Long.parseLong(parts[i]));
+        for (String part : parts) {
+            idList.add(Long.parseLong(part));
         }
         agentMapper.deleteByIds(idList, userId, LocalDateTime.now());
     }

@@ -34,10 +34,10 @@ public class TenantController {
 
     @Operation(summary = "新增")
     @PostMapping
-    public Result<Void> create(@RequestBody TenantDTO dto) {
+    public Result<Long> create(@RequestBody TenantDTO dto) {
         log.info("新增团队:{}", dto);
-        tenantService.create(dto);
-        return Result.success();
+        Long id = tenantService.create(dto);
+        return Result.success(id);
     }
 
     @Operation(summary = "删除")
