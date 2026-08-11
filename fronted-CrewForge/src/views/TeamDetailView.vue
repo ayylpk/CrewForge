@@ -75,7 +75,21 @@
             </div>
           </div>
           <CardShell class="member-panel">
-            <div class="member-empty">成员列表开发中 · 当前 {{ team?.members ?? 0 }} / {{ team?.maxMembers ?? 0 }} 人</div>
+            <div v-if="membersLoading" class="member-empty">加载中...</div>
+            <div v-else-if="members.length === 0" class="member-empty">暂无成员</div>
+            <div v-else class="member-list">
+              <div v-for="m in members" :key="m.id" class="member-item">
+                <span class="member-avatar" :style="{ color: m.role === '管理员' ? '#5ecb8a' : '#45b8ff' }">
+                  {{ ((m.realName || m.username || '?')[0] || '?').toUpperCase() }}
+                </span>
+                <div class="member-info">
+                  <span class="member-name">{{ m.realName || m.username }}</span>
+                  <span class="member-role" :style="{ color: m.role === '管理员' ? '#5ecb8a' : 'var(--text3)' }">
+                    {{ m.role }}
+                  </span>
+                </div>
+              </div>
+            </div>
           </CardShell>
         </div>
 
@@ -157,7 +171,7 @@ import GradientButton from '../components/GradientButton.vue'
 import StatusDot from '../components/StatusDot.vue'
 import EmptyState from '../components/EmptyState.vue'
 import WorkspaceSwitcher from '../components/WorkspaceSwitcher.vue'
-import { fetchTenantById, fetchApplyList, approveApply, rejectApply, type TenantVO, type TenantApplyVO } from '../api/tenant'
+import { fetchTenantById, fetchApplyList, approveApply, rejectApply, fetchTeamMembers, type TenantVO, type TenantApplyVO, type MemberVO } from '../api/tenant'
 import { fetchTeamProjects } from '../api/project'
 import type { Project, ProjectStatus } from '../types/project'
 
@@ -168,6 +182,8 @@ const teamId = Number(route.params.id)
 const team = ref<TenantVO | null>(null)
 const projects = ref<Project[]>([])
 const projectsLoading = ref(false)
+const members = ref<MemberVO[]>([])
+const membersLoading = ref(false)
 
 /** 是否管理员（owner） */
 const isManager = computed(() => {
@@ -276,7 +292,20 @@ onMounted(async () => {
     /* 拦截器已提示 */
   }
   loadProjects()
+  loadMembers()
 })
+
+/** 成员列表（join sys_user，管理员/成员角色标记） */
+async function loadMembers() {
+  membersLoading.value = true
+  try {
+    members.value = await fetchTeamMembers(teamId)
+  } catch {
+    members.value = []
+  } finally {
+    membersLoading.value = false
+  }
+}
 
 async function loadProjects() {
   projectsLoading.value = true
@@ -581,17 +610,57 @@ function logout() {
 
 /* 成员面板 */
 .member-panel {
-  padding: 28px 20px;
+  padding: 14px;
   min-height: 260px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
 }
 .member-empty {
+  padding: 60px 0;
   text-align: center;
   color: var(--text3);
   font-size: 13px;
   line-height: 1.8;
+}
+.member-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.member-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 12px;
+  border-radius: 9px;
+  background: var(--bg3);
+}
+.member-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: rgba(69, 184, 255, 0.12);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.member-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.member-name {
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.member-role {
+  font-size: 11px;
 }
 
 /* ===== 团队项目（复用个人空间卡片） ===== */

@@ -72,6 +72,22 @@ export function applyTenant(code: string): Promise<void> {
   return request.post(`/api/tenant/apply/${code}`) as Promise<void>
 }
 
+/** 团队成员（对应后端 MemberVO） */
+export interface MemberVO {
+  /** 用户 ID */
+  id: number
+  username: string
+  realName: string
+  /** 管理员 / 成员 */
+  role: string
+  createTime: string
+}
+
+/** 团队成员列表（仅团队成员可查看） */
+export function fetchTeamMembers(tenantId: number): Promise<MemberVO[]> {
+  return request.get('/api/tenant/members', { params: { tenantId } }) as Promise<MemberVO[]>
+}
+
 /** 申请列表（仅管理员） */
 export function fetchApplyList(tenantId: number): Promise<TenantApplyVO[]> {
   return request.get('/api/tenant/apply/list', { params: { tenantId } }) as Promise<TenantApplyVO[]>

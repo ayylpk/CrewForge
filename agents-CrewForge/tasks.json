@@ -1,0 +1,41 @@
+[
+  {
+    "id": "T1",
+    "layer": "backend",
+    "method": "POST",
+    "path": "/api/tasks",
+    "title": "POST /api/tasks：创建任务并返回包含新任务的任务列表",
+    "description": "模块：任务创建模块\n业务：任务创建\n技术：Node.js + Express + pg\n中间件：express-validator（在任务创建接口中校验标题非空、截止时间格式合法、优先级为允许的枚举值）、cors（允许任务创建页面所在的前端服务跨域访问后端 API）、error-handling middleware（统一捕获校验失败和服务器异常，返回规范的 JSON 错误响应）\n数据库：PostgreSQL（关系型数据库能保证任务数据的一致性；使用 CHECK 约束确保优先级合法；时间类型规范，便于截止时间和创建时间的比较、排序和后续筛选）\n入参：title(string)、priority(string)、due_time(string)\n返回：返回包含新任务的任务列表，任务字段包括 id、title、priority、due_time、created_at、status，确保字段完整",
+    "parameters": [
+      {
+        "name": "title",
+        "type": "string",
+        "required": true,
+        "description": "任务标题，不可为空"
+      },
+      {
+        "name": "priority",
+        "type": "string",
+        "required": true,
+        "description": "任务优先级，合法枚举值：high/mid/low"
+      },
+      {
+        "name": "due_time",
+        "type": "string",
+        "required": true,
+        "description": "任务截止时间，格式如 YYYY-MM-DD HH:mm:ss"
+      }
+    ],
+    "acceptance": "创建后列表出现且字段完整"
+  },
+  {
+    "id": "T1-F",
+    "layer": "frontend",
+    "method": "",
+    "path": "",
+    "title": "任务创建页面：用户填写任务标题、优先级、截止时间并提交；提交前校验标题非空、截止时间格式正确、优先级为合法枚举值；调用接口创建任务；成功后刷新任务列表并展示新创建任务，确保字段完整显示",
+    "description": "模块：任务创建模块\n业务：任务创建\n技术：React + Ant Design + Axios\n页面：任务创建页面\n交互：用户填写任务标题、优先级、截止时间并提交；提交前校验标题非空、截止时间格式正确、优先级为合法枚举值；调用接口创建任务；成功后刷新任务列表并展示新创建任务，确保字段完整显示\n调用接口：POST /api/tasks",
+    "parameters": [],
+    "acceptance": "创建后列表出现且字段完整"
+  }
+]

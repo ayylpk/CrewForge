@@ -4,6 +4,7 @@ import com.hina.crewforge.common.result.PageResult;
 import com.hina.crewforge.common.result.Result;
 import com.hina.crewforge.pojo.QueryParam.TenantQueryParam;
 import com.hina.crewforge.pojo.dto.TenantDTO;
+import com.hina.crewforge.pojo.vo.MemberVO;
 import com.hina.crewforge.pojo.vo.TenantApplyVO;
 import com.hina.crewforge.pojo.vo.TenantVO;
 import com.hina.crewforge.service.TenantService;
@@ -92,6 +93,13 @@ public class TenantController {
         log.info("拒绝申请 applyId = {}", id);
         tenantService.reject(id);
         return Result.success();
+    }
+
+    @Operation(summary = "团队成员列表(仅团队成员可查看)")
+    @GetMapping("/members")
+    public Result<List<MemberVO>> members(@RequestParam Long tenantId) {
+        log.info("团队成员列表 tenantId = {}", tenantId);
+        return Result.success(tenantService.listMembers(tenantId));
     }
 
 }

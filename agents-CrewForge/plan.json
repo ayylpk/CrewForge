@@ -1,0 +1,15 @@
+{
+  "project": "团队任务管理小程序",
+  "features": [
+    { "name": "任务创建", "description": "用户输入标题、优先级、截止时间创建任务", "priority": "高", "acceptance": "创建后列表出现且字段完整" },
+    { "name": "任务列表", "description": "按状态、优先级分页展示任务", "priority": "高", "acceptance": "分页正确、排序生效" },
+    { "name": "状态流转", "description": "待办→进行中→完成，可回退", "priority": "中", "acceptance": "状态变更落库且可回退" },
+    { "name": "提醒", "description": "截止前推送提醒", "priority": "低", "acceptance": "截止前 1 小时触发提醒" }
+  ],
+  "phases": [
+    { "phase": 1, "name": "任务基础功能", "goal": "能建任务、列表展示", "features": ["任务创建", "任务列表"], "dependencies": [], "relative_effort": "中", "risk": "低" },
+    { "phase": 2, "name": "协作与状态", "goal": "任务流转与提醒", "features": ["状态流转", "提醒"], "dependencies": ["任务基础功能"], "relative_effort": "中", "risk": "中" }
+  ],
+  "mvp_scope": ["任务创建", "任务列表"],
+  "risks": ["提醒依赖推送通道，需提前接入"]
+}

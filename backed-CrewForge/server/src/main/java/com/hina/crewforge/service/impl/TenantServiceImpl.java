@@ -19,6 +19,7 @@ import com.hina.crewforge.pojo.entity.Tenant;
 import com.hina.crewforge.pojo.entity.TenantApply;
 import com.hina.crewforge.pojo.entity.User;
 import com.hina.crewforge.pojo.entity.UserTenant;
+import com.hina.crewforge.pojo.vo.MemberVO;
 import com.hina.crewforge.pojo.vo.TenantApplyVO;
 import com.hina.crewforge.pojo.vo.TenantVO;
 import com.hina.crewforge.service.TenantService;
@@ -291,6 +292,47 @@ public class TenantServiceImpl implements TenantService {
                 vo.setUsername(u.getUsername());
                 vo.setRealName(u.getRealName());
             }
+            return vo;
+        }).collect(Collectors.toList());
+    }
+
+    @Override
+    public List<MemberVO> listMembers(Long tenantId) {
+        // 1. 仅团队成员可查看（owner 或 sys_user_tenant 正常成员）
+        Tenant tenant = tenantMapper.selectById(tenantId);
+        if (tenant == null) {
+            throw new BaseException("团队不存在: " + tenantId);
+        }
+        Long myId = BaseContext.getCurrentUserId();
+        Long cnt = userTenantMapper.selectCount(new LambdaQueryWrapper<UserTenant>()
+                .eq(UserTenant::getUserId, myId)
+                .eq(UserTenant::getTenantId, tenantId)
+                .eq(UserTenant::getStatus, 1));
+        if (cnt == null || cnt == 0) {
+            throw new BaseException("你不是该团队成员");
+        }
+        // 2. 查成员关系(正常成员) → 批量查用户
+        List<UserTenant> uts = userTenantMapper.selectList(new LambdaQueryWrapper<UserTenant>()
+                .eq(UserTenant::getTenantId, tenantId)
+                .eq(UserTenant::getStatus, 1)
+                .orderByAsc(UserTenant::getCreateTime));
+        if (uts.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<Long> userIds = uts.stream().map(UserTenant::getUserId).collect(Collectors.toList());
+        Map<Long, User> userMap = userMapper.selectBatchIds(userIds).stream()
+                .collect(Collectors.toMap(User::getId, u -> u));
+        // 3. 组装（管理员 = ownerId 标记）
+        return uts.stream().map(ut -> {
+            MemberVO vo = new MemberVO();
+            vo.setId(ut.getUserId());
+            User u = userMap.get(ut.getUserId());
+            if (u != null) {
+                vo.setUsername(u.getUsername());
+                vo.setRealName(u.getRealName());
+            }
+            vo.setRole(ut.getUserId().equals(tenant.getOwnerId()) ? "管理员" : "成员");
+            vo.setCreateTime(ut.getCreateTime());
             return vo;
         }).collect(Collectors.toList());
     }

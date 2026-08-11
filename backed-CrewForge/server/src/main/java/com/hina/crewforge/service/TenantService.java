@@ -3,6 +3,7 @@ package com.hina.crewforge.service;
 import com.hina.crewforge.common.result.PageResult;
 import com.hina.crewforge.pojo.QueryParam.TenantQueryParam;
 import com.hina.crewforge.pojo.dto.TenantDTO;
+import com.hina.crewforge.pojo.vo.MemberVO;
 import com.hina.crewforge.pojo.vo.TenantApplyVO;
 import com.hina.crewforge.pojo.vo.TenantVO;
 
@@ -43,4 +44,9 @@ public interface TenantService {
      * 查看某团队的申请列表(管理员审核用, 按时间倒序)
      */
     List<TenantApplyVO> listApply(Long tenantId);
+
+    /**
+     * 团队成员列表(仅团队成员可查看; 管理员由 owner 标记)
+     */
+    List<MemberVO> listMembers(Long tenantId);
 }

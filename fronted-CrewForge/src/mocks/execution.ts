@@ -42,7 +42,7 @@ spring:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://localhost:3306/demo?serverTimezone=Asia/Shanghai
     username: root
-    password: 123456
+    password: xxxxxx
   data:
     redis:
       host: localhost
