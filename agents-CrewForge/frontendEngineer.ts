@@ -3,6 +3,7 @@ import { SystemMessage } from "@langchain/core/messages";
 import * as z from "zod";
 import { Annotation, StateGraph, START, END, MemorySaver, type GraphNode } from "@langchain/langgraph";
 import fs from "node:fs";
+import path from "node:path";
 
 const model = new ChatDeepSeek({
     model: "deepseek-v4-flash",
@@ -27,6 +28,7 @@ interface ExecTask {
   layer: "backend" | "frontend";  // 归属层（frontendEngineer 只处理 frontend）
   method: string;        // GET/POST/PUT/DELETE（前端任务为空串）
   path: string;          // 接口路径（前端任务为空串）
+  files: string[];       // 架构师指定的文件清单（只写这些文件，不得另起）
   title: string;         // 页面/组件任务标题
   description: string;   // 任务描述（含页面/交互/调用接口，自包含）
   parameters: {
@@ -77,6 +79,10 @@ const MessageState = Annotation.Root({
         default: () => [],
         reducer: contentReducer,   // 逻辑节点产出（完整组件）
     }),
+    existingFiles: Annotation<{ filePath: string; code: string }[]>({
+        default: () => [],
+        reducer: (_, u) => u,   // 追加语义：同文件已由前面任务产出的内容，注入提示词（read→看懂→追加→保存）
+    }),
     llmCalls: Annotation<number>({
         default: () => 0,
         reducer: (x, y) => x + y,
@@ -122,6 +128,7 @@ const structure_prompt: string = `
 
 ## 工作目标
 产出页面组件文件（模板 + 样式）：
+0. filePath：**只用任务 files 字段里列出的路径**（架构师指定的文件清单，照做不探索）；files 里每个文件都要产出，不得遗漏、不得另起文件
 1. 模板：按任务描述的页面和交互搭结构（表单/列表/按钮等），组件库标签优先
 2. 样式：引用主题变量（var(--primary) 等），禁止写死颜色值
 3. 给关键元素命名（ref/class/handler 名），逻辑节点会按名字补脚本
@@ -130,6 +137,7 @@ const structure_prompt: string = `
 ## 边界（严格遵守）
 - 只写静态部分（模板+样式），不写脚本逻辑（那是逻辑节点的活）
 - handler 名用语义化命名（如 submitForm/loadList），逻辑节点按名绑定
+- 如果任务描述里带【后端契约】：提交/筛选/渲染的字段名、格式、枚举值**必须照抄契约**，不得自己改名或换格式（如契约是 dueTime 就不能写 deadline，契约要 ISO 8601 就不能发 YYYY-MM-DD）
 
 ## 输出格式（必须遵守）
 只输出一段 JSON，不要夹带讨论：
@@ -208,20 +216,28 @@ const LogicNode: GraphNode<typeof MessageState.State> = async (state) => {
     const currentStructure = state.structures[0];
     if (!currentStructure) return {};  // 无待实现结构组件
 
+    // 追加语义：只把本次结构产出涉及文件（路径相同）的已有内容注入，避免无关文件刷屏
+    const existingContent = state.existingFiles.length > 0
+        ? `\n\n## 已存在的文件（追加语义：先读懂原内容，同路径文件在原有代码基础上追加/修改，保留已有代码和风格）\n${state.existingFiles.map(f => `--- ${f.filePath} ---\n${f.code}`).join("\n")}`
+        : "";
+
     const response = await contentModel.invoke([
         new SystemMessage(
             logic_prompt +
-            `\n\n## 结构组件\n${JSON.stringify(currentStructure, null, 2)}`
+            `\n\n## 结构组件\n${JSON.stringify(currentStructure, null, 2)}` +
+            existingContent
         ),
     ]);
 
     // 删除逻辑：有产出才输出出队；空产出留在队首（下次 invoke 重试）
     if (response.files.length > 0) {
-        // 演示版：组件输出到控制台（正式版改为按 filePath 写盘）
+        // 正式版：按 filePath 写盘到工作区（替换控制台输出）；路径净化防 .. 逃逸
         for (const f of response.files) {
-            console.log(`\n===== 文件：${f.filePath} =====`);
-            console.log(f.code);
-            console.log("===== 文件结束 =====\n");
+            const safePath = f.filePath.replace(/^[/\\]+/, "").replace(/\.\./g, "");
+            const full = path.join("workspace", safePath);
+            fs.mkdirSync(path.dirname(full), { recursive: true });
+            fs.writeFileSync(full, f.code, "utf-8");
+            console.log(`✓ 已写入 ${full}`);
         }
         return { logicCodes: [response], structures: state.structures.slice(1), llmCalls: 1 };
     }
@@ -257,19 +273,39 @@ async function main() {
     console.log(`读取 ${all.length} 个任务，其中前端 ${tasks.length} 个，流水线开工\n`);
 
     const queue: CodeContent[] = [];   // 传送带（结构 → 逻辑）
+    const failed: string[] = [];       // 重试耗尽的任务 id（标记失败，不阻塞流水线）
     let structureDone = false;
 
     // 结构工位：每任务 invoke 一次结构图
+    // 防卡死：LLM 空产出/解析失败（抛异常）都算失败，重试 ≤3 次，耗尽标记失败跳过
     async function stationStructure() {
         for (const t of tasks) {
-            const state = await structureGraph.invoke(
-                { execTasks: [t], project: "workspace" },
-                { configurable: { thread_id: `fs-${t.id}` } }   // 每任务独立断点
-            );
-            queue.push(state.structures[0]!);                  // 取图上传送带（图跑完必然出货）
+            let state: typeof MessageState.State | undefined;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                    state = await structureGraph.invoke(
+                        { execTasks: [t], project: "workspace" },
+                        { configurable: { thread_id: `fs-${t.id}` } }   // 每任务独立断点
+                    );
+                } catch (e) {
+                    console.log(`⚠️ ${t.id} LLM 调用失败（第 ${attempt} 次）：${(e as Error).message.slice(0, 80)}`);
+                    state = undefined;
+                    continue;
+                }
+                if (state.structures.length > 0) break;
+                console.log(`⚠️ ${t.id} 结构产出为空，重试 ${attempt}/3`);
+            }
+            if (state && state.structures.length > 0) {
+                queue.push(state.structures[0]!);               // 取图上传送带（图跑完必然出货）
+            } else {
+                failed.push(t.id);
+                console.log(`❌ ${t.id} 连续 3 次失败，标记失败跳过`);
+            }
         }
         structureDone = true;
     }
+
+    const writtenFiles = new Map<string, string>();   // 追加语义：filePath → 最新代码（本流水线已产出）
 
     // 逻辑工位：从传送带取货，invoke 逻辑图（输出组件在 LogicNode 里）
     async function stationLogic() {
@@ -280,15 +316,39 @@ async function main() {
                 await sleep(100);
                 continue;
             }
-            await logicGraph.invoke(
-                { structures: [s], project: "workspace" },
-                { configurable: { thread_id: `fl-${s.description.slice(0, 20)}` } }
-            );
+            // 追加语义：本次结构产出涉及的文件里，哪些已由前面任务产出 → 注入已有内容
+            const existing = [...writtenFiles.entries()]
+                .filter(([fp]) => s.files.some(f => f.filePath === fp))
+                .map(([filePath, code]) => ({ filePath, code }));
+
+            let state: typeof MessageState.State | undefined;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                    state = await logicGraph.invoke(
+                        { structures: [s], project: "workspace", existingFiles: existing },
+                        { configurable: { thread_id: `fl-${s.description.slice(0, 20)}` } }
+                    );
+                } catch (e) {
+                    console.log(`⚠️ LLM 调用失败（第 ${attempt} 次）：${(e as Error).message.slice(0, 80)}`);
+                    state = undefined;
+                    continue;
+                }
+                const last = state.logicCodes[state.logicCodes.length - 1];
+                if (last && last.files.length > 0) break;   // 有产出才往下走
+                console.log(`⚠️ 组件产出为空，重试 ${attempt}/3`);
+            }
+            const last = state ? state.logicCodes[state.logicCodes.length - 1] : undefined;
+            if (last && last.files.length > 0) {
+                for (const f of last.files) writtenFiles.set(f.filePath, f.code);   // 记录最新内容，供后续任务追加
+            } else {
+                failed.push(s.description.slice(0, 40));
+                console.log(`❌ 连续 3 次失败，标记失败跳过：${s.description.slice(0, 40)}`);
+            }
         }
     }
 
     await Promise.all([stationStructure(), stationLogic()]);
-    console.log("前端流水线全部完成");
+    console.log(`前端流水线全部完成${failed.length ? `（${failed.length} 个任务失败：${failed.join("、")}）` : ""}`);
 }
 
 main();

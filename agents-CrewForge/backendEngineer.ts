@@ -3,6 +3,7 @@ import { SystemMessage } from "@langchain/core/messages";
 import * as z from "zod";
 import { Annotation, StateGraph, START, END, MemorySaver, type GraphNode } from "@langchain/langgraph";
 import fs from "node:fs";
+import path from "node:path";
 
 const model = new ChatDeepSeek({
     model: "deepseek-v4-flash",
@@ -42,6 +43,7 @@ interface ExecTask {
   layer: "backend" | "frontend";  // 归属层（backendEngineer 只处理 backend）
   method: string;        // GET/POST/PUT/DELETE（前端任务为空串）
   path: string;          // 接口路径（前端任务为空串）
+  files: string[];       // 架构师指定的文件清单（只写这些文件，不得另起）
   title: string;         // "POST /api/tasks：创建任务"
   description: string;   // 任务描述（含模块/业务/技术/入参/返回，自包含）
   parameters: {
@@ -111,10 +113,14 @@ const MessageState = Annotation.Root({
         default: () => [],
         reducer: codeContentReducer,
     }),
+    existingFiles: Annotation<{ filePath: string; code: string }[]>({
+        default: () => [],
+        reducer: (_, u) => u,   // 追加语义：同文件已由前面任务产出的内容，注入提示词（read→看懂→追加→保存）
+    }),
     summary: Annotation<number>({
         default: () => 0,
         reducer: (x, y) => x + y,
-    }),   
+    }),
     llmCalls: Annotation<number>({
         default: () => 0,
         reducer: (x, y) => x + y,
@@ -138,15 +144,16 @@ const pseudo_prompt: string = `
 2. 项目路径（决定 filePath 写哪个文件）
 
 ## 工作目标
-为当前任务产出代码文件（一个任务可拆多个文件，如 controller/service/mapper 分层）：
+为当前任务产出代码文件：
 1. 判断复杂度：
    - 简单接口（CRUD 直通、无业务逻辑、无数据转换）→ code 直接写完整可运行代码
    - 复杂接口（有数据转换/权限校验/多表操作/分支循环/业务规则）→ 逻辑部分用伪代码占位：中文注释写清"做什么、为什么"，配关键代码骨架，交给下一节点展开成完整代码
-2. filePath：根据项目路径和任务技术栈约定决定写入位置；目录不存在时给出建议路径
+2. filePath：**只用任务 files 字段里列出的路径**（架构师指定的文件清单，照做不探索）；files 里每个文件都要产出，不得遗漏、不得另起文件
 3. 代码风格：严格按任务描述中的【技术】【中间件】【数据库】字段
 
 ## 边界（严格遵守）
 - 不发明新需求，只实现当前任务描述里的接口
+- 不新增 files 之外的文件路径
 - 伪代码占位必须能看懂逻辑意图（注释里写清做什么和为什么），下一节点据此展开
 
 ## 输出格式（必须遵守）
@@ -206,6 +213,7 @@ const code_prompt: string = `
 ## 输入
 1. 伪代码（含代码骨架和中文注释描述的逻辑意图）
 2. 技术栈在伪代码里已有体现（按原风格写）
+3. 已存在的文件（追加语义）：和本次文件路径相同的旧文件内容会附在下方，先读懂再在其基础上追加/修改
 
 ## 工作目标
 1. 展开：把伪代码里的逻辑占位全部替换成真实实现（保留注释里的意图），产出完整可运行代码
@@ -248,20 +256,28 @@ const CodeWriterNode: GraphNode<typeof MessageState.State> = async (state) => {
     const currentPseudo = state.pseudoCodes[0];
     if (!currentPseudo) return {};  // 无待实现伪代码
 
+    // 追加语义：只把本次伪代码涉及文件（路径相同）的已有内容注入，避免无关文件刷屏
+    const existingContent = state.existingFiles.length > 0
+        ? `\n\n## 已存在的文件（追加语义：先读懂原内容，同路径文件在原有代码基础上追加/修改，保留已有代码和风格）\n${state.existingFiles.map(f => `--- ${f.filePath} ---\n${f.code}`).join("\n")}`
+        : "";
+
     const response = await codeModel.invoke([
         new SystemMessage(
             code_prompt +
-            `\n\n## 伪代码\n${JSON.stringify(currentPseudo, null, 2)}`
+            `\n\n## 伪代码\n${JSON.stringify(currentPseudo, null, 2)}` +
+            existingContent
         ),
     ]);
 
     // 删除逻辑：有产出才出队；空产出留在队首（下次 invoke 重试）
     if (response.files.length > 0) {
-        // 演示版：代码输出到控制台（正式版改为按 filePath 写盘）
+        // 正式版：按 filePath 写盘到工作区（替换控制台输出）；路径净化防 .. 逃逸
         for (const f of response.files) {
-            console.log(`\n===== 文件：${f.filePath} =====`);
-            console.log(f.code);
-            console.log("===== 文件结束 =====\n");
+            const safePath = f.filePath.replace(/^[/\\]+/, "").replace(/\.\./g, "");
+            const full = path.join("workspace", safePath);
+            fs.mkdirSync(path.dirname(full), { recursive: true });
+            fs.writeFileSync(full, f.code, "utf-8");
+            console.log(`✓ 已写入 ${full}`);
         }
         return { codeContents: [response], pseudoCodes: state.pseudoCodes.slice(1), llmCalls: 1 };
     }
@@ -296,19 +312,41 @@ async function main() {
     const tasks = all.filter(t => t.layer === "backend");   // 后端工程师只处理后端任务（前端任务留给前端工程师）
     console.log(`读取 ${all.length} 个任务，其中后端 ${tasks.length} 个，流水线开工\n`);
     const queue: PseudoCode[] = [];   // 传送带（main 里的共享数组）
+    const failed: string[] = [];      // 重试耗尽的任务 id（标记失败，不阻塞流水线）
+
     let bDone = false;
+    
 
     // B 工位：每任务 invoke 一次伪代码图（图的节点逻辑原样保留）
+    // 防卡死：LLM 空产出/解析失败（抛异常）都算失败，重试 ≤3 次，耗尽标记失败跳过
     async function stationB() {
         for (const t of tasks) {
-            const state = await pseudoGraph.invoke(
-                { execTasks: [t], project: "workspace" },
-                { configurable: { thread_id: `b-${t.id}` } }   // 每任务独立断点
-            );
-            queue.push(state.pseudoCodes[0]!);                 // 取图上传送带（图跑完必然出货）
+            let state: typeof MessageState.State | undefined;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                    state = await pseudoGraph.invoke(
+                        { execTasks: [t], project: "workspace" },
+                        { configurable: { thread_id: `b-${t.id}` } }   // 每任务独立断点
+                    );
+                } catch (e) {
+                    console.log(`⚠️ ${t.id} LLM 调用失败（第 ${attempt} 次）：${(e as Error).message.slice(0, 80)}`);
+                    state = undefined;
+                    continue;
+                }
+                if (state.pseudoCodes.length > 0) break;
+                console.log(`⚠️ ${t.id} 伪代码产出为空，重试 ${attempt}/3`);
+            }
+            if (state && state.pseudoCodes.length > 0) {
+                queue.push(state.pseudoCodes[0]!);            // 取图上传送带（图跑完必然出货）
+            } else {
+                failed.push(t.id);
+                console.log(`❌ ${t.id} 连续 3 次失败，标记失败跳过`);
+            }
         }
         bDone = true;
     }
+
+    const writtenFiles = new Map<string, string>();   // 追加语义：filePath → 最新代码（本流水线已产出）
 
     async function stationC() {
         while (true) {
@@ -318,15 +356,39 @@ async function main() {
                 await sleep(100);
                 continue;
             }
-            await codeGraph.invoke(
-                { pseudoCodes: [p], project: "workspace" },
-                { configurable: { thread_id: `c-${p.description}` } }
-            );   // 输出代码在 CodeWriterNode 里（原逻辑）
+            // 追加语义：本次伪代码涉及的文件里，哪些已由前面任务产出 → 注入已有内容（read→看懂→追加→保存）
+            const existing = [...writtenFiles.entries()]
+                .filter(([fp]) => p.files.some(f => f.filePath === fp))
+                .map(([filePath, code]) => ({ filePath, code }));
+
+            let state: typeof MessageState.State | undefined;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                try {
+                    state = await codeGraph.invoke(
+                        { pseudoCodes: [p], project: "workspace", existingFiles: existing },
+                        { configurable: { thread_id: `c-${p.description}` } }
+                    );
+                } catch (e) {
+                    console.log(`⚠️ LLM 调用失败（第 ${attempt} 次）：${(e as Error).message.slice(0, 80)}`);
+                    state = undefined;
+                    continue;
+                }
+                const last = state.codeContents[state.codeContents.length - 1];
+                if (last && last.files.length > 0) break;   // 有产出才往下走
+                console.log(`⚠️ 代码产出为空，重试 ${attempt}/3`);
+            }
+            const last = state ? state.codeContents[state.codeContents.length - 1] : undefined;
+            if (last && last.files.length > 0) {
+                for (const f of last.files) writtenFiles.set(f.filePath, f.code);   // 记录最新内容，供后续任务追加
+            } else {
+                failed.push(p.description.slice(0, 40));
+                console.log(`❌ 连续 3 次失败，标记失败跳过：${p.description.slice(0, 40)}`);
+            }
         }
     }
 
     await Promise.all([stationB(), stationC()]);
-    console.log("流水线全部完成");
+    console.log(`流水线全部完成${failed.length ? `（${failed.length} 个任务失败：${failed.join("、")}）` : ""}`);
 }
 
 main();

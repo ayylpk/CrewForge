@@ -8,7 +8,7 @@ import readline from "readline";
 // ============================================================
 // 架构师链路（v1）：PM 阶段计划 → 拆分下发为止
 //
-//   PM阶段划分 → agent1详细计划(业务分解) → agent2技术栈(中间件裁剪+表结构+绑定)
+//   PM阶段划分 → agent1详细计划(业务分解) → agent2技术栈(中间件裁剪+表结构+绑定)`
 //   → 用户确认 → agent3基础架构 → agent4接口拆分 → 交接（tasks.json）
 //
 // 边界（重要）：架构师只负责到拆分下发，之后是开发/测试/维护的事（executor.ts）
@@ -113,6 +113,7 @@ interface ExecTask {
   layer: "backend" | "frontend";  // 归属层（backendEngineer 只筛 backend）
   method: string;        // GET/POST/PUT/DELETE（前端任务为空串）
   path: string;          // 接口路径（前端任务为空串）
+  files: string[];       // 架构师指定的文件清单（按技术栈约定列全，如 Java 三层 Controller/Service/Mapper）——开发照做不探索
   title: string;         // "POST /api/tasks：创建任务" / "任务创建页：表单+列表刷新"
   description: string;   // 任务描述（含模块/业务/对应层技术栈/要素，自包含）
   parameters: {
@@ -273,14 +274,15 @@ const api_prompt: string = `
 - module 必须原样使用输入里的模块名，不能自创（下游按它抄验收标准）
 - 后端入参的 type 用简单类型：string/number/boolean/array/object
 - 前端任务的 api 字段填它调用的接口（method + path），必须和该对后端任务一致
+- files：按技术栈约定列全本任务要写的文件（Java 三层架构 → controller/service/mapper 三个文件；Express 分层 → routes/service/db 按需；简单接口一个文件即可）。这是开发唯一允许产出的文件清单，不得遗漏，也不要填不相关的文件
 
 ## 输出格式（必须遵守）
 只输出一段 JSON，不要夹带讨论。tasks 是二维数组：每个接口一对 [后端任务, 前端任务]：
 {
   "tasks": [
     [
-      { "method": "POST", "path": "/api/tasks", "module": "模块名", "purpose": "接口职责", "parameters": [{ "name": "title", "type": "string", "required": true, "description": "任务标题" }], "response": "返回说明" },
-      { "module": "模块名", "page": "页面/组件名", "interactions": "页面交互（表单/列表/刷新等）", "api": "POST /api/tasks" }
+      { "method": "POST", "path": "/api/tasks", "module": "模块名", "purpose": "接口职责", "files": ["src/routes/tasks.ts"], "parameters": [{ "name": "title", "type": "string", "required": true, "description": "任务标题" }], "response": "返回说明" },
+      { "module": "模块名", "page": "页面/组件名", "files": ["src/pages/TasksForm.vue"], "interactions": "页面交互（表单/列表/刷新等）", "api": "POST /api/tasks" }
     ]
   ]
 }
@@ -343,6 +345,7 @@ const resolutionModel = model.withStructuredOutput(
         path: z.string(),
         module: z.string(),      // 模块名必须和 detailedPlan 一致（代码据此抄验收标准）
         purpose: z.string(),
+        files: z.array(z.string()), // 文件清单（技术栈约定，开发照做不探索）
         parameters: z.array(z.object({
           name: z.string(),
           type: z.string(),
@@ -355,6 +358,7 @@ const resolutionModel = model.withStructuredOutput(
       z.object({
         module: z.string(),
         page: z.string(),        // 页面/组件名
+        files: z.array(z.string()), // 文件清单（页面组件文件）
         interactions: z.string(), // 页面交互
         api: z.string(),         // 调用的接口（method + path，与同对后端一致）
       }),
@@ -455,6 +459,7 @@ const dispatch: GraphNode<typeof MessageState.State> = async (state) => {
         layer: "backend",
         method: back.method,
         path: back.path,
+        files: back.files,
         title: `${back.method} ${back.path}：${back.purpose}`,
         description: `模块：${back.module}\n业务：${mod?.business}\n技术：${backendTech}\n中间件：${middlewareContent}\n数据库：${dbContent}\n入参：${back.parameters.map(p => `${p.name}(${p.type}${p.required ? "" : "，可选"})`).join("、")}\n返回：${back.response}`,
         parameters: back.parameters,
@@ -462,13 +467,16 @@ const dispatch: GraphNode<typeof MessageState.State> = async (state) => {
       };
 
       // 前端任务（页面形态，method/path 空串）
+      // 自包含铁律：后端契约机械抄进前端描述（字段名/格式/枚举照抄，前端工程师不探索、不猜）
+      const contract = `\n\n【后端契约（前端必须遵守：字段名/格式/枚举值照抄，不得改名）】\n接口：${back.method} ${back.path}\n入参：${back.parameters.map(p => `${p.name}(${p.type}${p.required ? "" : "，可选"})：${p.description}`).join("、")}\n返回：${back.response}`;
       const frontendTask: ExecTask = {
         id: `T${i + 1}-F`,
         layer: "frontend",
         method: "",
         path: "",
+        files: front.files,
         title: `${front.page}：${front.interactions}`,
-        description: `模块：${front.module}\n业务：${mod?.business}\n技术：${frontendTech}\n页面：${front.page}\n交互：${front.interactions}\n调用接口：${front.api}`,
+        description: `模块：${front.module}\n业务：${mod?.business}\n技术：${frontendTech}\n页面：${front.page}\n交互：${front.interactions}\n调用接口：${front.api}` + contract,
         parameters: [],
         acceptance,
       };

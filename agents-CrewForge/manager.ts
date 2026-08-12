@@ -4,6 +4,7 @@ import { HumanMessage, SystemMessage, type BaseMessage } from "@langchain/core/m
 import { TavilySearch } from "@langchain/tavily";
 import { Annotation, StateGraph, START, END, MemorySaver, type GraphNode, messagesStateReducer } from "@langchain/langgraph";
 import { ToolNode } from "@langchain/langgraph/prebuilt";
+import fs from "node:fs";
 import readline from "readline";
 
 interface typeOfTasks{
@@ -472,6 +473,9 @@ async function main() {
           });
           console.log(`\n风险：${result.plan.risks.join("；")}`);
           console.log("============================================");
+          // 落盘交接：架构师（architect.ts）从 plan.json 接手
+          fs.writeFileSync("plan.json", JSON.stringify(result.plan, null, 2));
+          console.log("规划已保存到 plan.json，下一步：bun run executor.ts");
         } else {
           console.log("\n⚠️ 规划未生成（plan 为空），请重试。");
         }
