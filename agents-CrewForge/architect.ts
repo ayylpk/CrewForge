@@ -4,6 +4,7 @@ import * as z from "zod";
 import { Annotation, StateGraph, START, END, MemorySaver, type GraphNode } from "@langchain/langgraph";
 import fs from "node:fs";
 import readline from "readline";
+import { TransferStation, roles } from "./Hub.ts";   // 架构师与 PM 的消息中转站 + 角色枚举
 
 // ============================================================
 // 架构师链路（v1）：PM 阶段计划 → 拆分下发为止
@@ -552,51 +553,115 @@ function printConfirm(state: typeof MessageState.State) {
   console.log("========================================");
 }
 
-async function main() {
-  // 样例计划从 plan.json 读（manager.ts 跑完把 plan 存这里即可替换真实输入）
-  const plan = JSON.parse(fs.readFileSync("plan.json", "utf-8")) as Plan;
-  console.log(`项目：${plan.project}｜共 ${plan.phases.length} 个阶段｜本版演示阶段 1「${plan.phases[0]!.name}」\n`);
+// ============================================================
+// 架构师消息收发（参照 manager.ts 模板）
+//   消息协议（content 为 JSON 字符串）：
+//     PM → 架构师:       {"type": "phase_plan", "phase": {...}}   下发阶段计划
+//     维护 → 架构师:     {"type": "phase_done", "phase": N}       汇报阶段完成（任务全做完）
+//     架构师 → PM:       {"type": "phase_request", "phase": N}    请求下一阶段（收到维护的完成才发）
+// ============================================================
 
-  const thread = { configurable: { thread_id: "architect-session" } };
-  let rejects = 0; // 防死循环：确认门最多拒绝 1 次重计划
+// 拆分一个阶段：读 plan.json → 只给当前阶段的 features → 跑拆分图 → 确认门 → tasks.json
+// 消息驱动：PM 发 phase_plan 才调用（不再启动就跑）；阶段=原子，一次只拆一个阶段
+// station：下发给开发/维护用（由 runArchitect 传入）
+async function runPhaseSplit(phase: planItem, station: TransferStation) {
+    const full = JSON.parse(fs.readFileSync("plan.json", "utf-8")) as Plan;
+    // 只把当前阶段的 features 丢给拆分图（验收标准从全量 features 里按名抄）
+    const planForPhase: Plan = {
+        project: full.project,
+        features: full.features.filter(f => phase.features.includes(f.name)),
+        phases: [phase],
+        mvp_scope: full.mvp_scope,
+        risks: full.risks,
+    };
 
-  try {
-    let state = await graph.invoke({ plans: plan }, thread);
-    while (true) {
-      if (state.handoffMsg) break; // 拆分交接完成
-      if (state.confirmPending) {
-        printConfirm(state);   // 给用户看方案
-        // 测试钩子：AUTO_CONFIRM=1 时自动确认（CI/脚本验证用，不影响手动交互）
-        if (process.env.AUTO_CONFIRM === "1") { state = await graph.invoke({ userConfirm: true }, thread); continue; }
-        const ans = await ask("技术方案如上，确认开工？(y / n+原因)");
-        if (/^y/i.test(ans.trim())) {
-          state = await graph.invoke({ userConfirm: true }, thread);
-          continue;
+    const thread = { configurable: { thread_id: `architect-phase-${phase.phase}` } };  // 每阶段独立断点
+    let rejects = 0; // 防死循环：确认门最多拒绝 1 次重计划
+
+    try {
+        let state = await graph.invoke({ plans: planForPhase }, thread);
+        while (true) {
+            if (state.handoffMsg) break; // 拆分交接完成
+            if (state.confirmPending) {
+                printConfirm(state);   // 给用户看方案
+                // 测试钩子：AUTO_CONFIRM=1 时自动确认（CI/脚本验证用，不影响手动交互）
+                if (process.env.AUTO_CONFIRM === "1") { state = await graph.invoke({ userConfirm: true }, thread); continue; }
+                const ans = await ask("技术方案如上，确认开工？(y / n+原因)");
+                if (/^y/i.test(ans.trim())) {
+                    state = await graph.invoke({ userConfirm: true }, thread);
+                    continue;
+                }
+                rejects += 1;
+                if (rejects >= 2) { console.log("连续两次拒绝，结束（防死循环）。"); break; }
+                const reason = ans.replace(/^n/i, "").trim() || "方案不满足需求";
+                state = await graph.invoke({ userConfirm: false, feedback: reason }, thread);
+                continue;
+            }
+            break; // 兜底
         }
-        rejects += 1;
-        if (rejects >= 2) { console.log("连续两次拒绝，结束（防死循环）。"); break; }
-        const reason = ans.replace(/^n/i, "").trim() || "方案不满足需求";
-        state = await graph.invoke({ userConfirm: false, feedback: reason }, thread);
-        continue;
-      }
-      break; // 兜底
-    }
 
-    if (state.exeTasks.length > 0) {
-      // 交接物落盘：任务=原子，执行层按它接手（未来 = sys_task 表）
-      fs.writeFileSync("tasks.json", JSON.stringify(state.exeTasks, null, 2));
-      console.log(`\n${state.handoffMsg}`);
-      console.log(`交接物：tasks.json（${state.exeTasks.length} 个任务，含验收标准和技术绑定）`);
-      console.log("下一步：bun run executor.ts 由开发/测试接手");
-      // debug：排查用，稳定后可删
-      console.log(`[debug] llmCalls=${state.llmCalls}`);
+        if (state.exeTasks.length > 0) {
+            // 交接物落盘：任务=原子，执行层按它接手（未来 = sys_task 表）
+            fs.writeFileSync("tasks.json", JSON.stringify(state.exeTasks, null, 2));
+            console.log(`\n${state.handoffMsg}`);
+            console.log(`交接物：tasks.json（${state.exeTasks.length} 个任务，含验收标准和技术绑定）`);
+
+            // 按 layer 分流 + 负载均衡下发给前后端开发（确定性路由，代码决定，不需要 LLM）
+            // 协议：{"type": "task", "task": ExecTask}
+            // 多开发场景：同一角色有多个注册（backend1/backend2），pickLeastBusy 选待处理最少的那个
+            state.exeTasks.forEach(t => {
+                const role = t.layer === "backend" ? roles.backendEngineer : roles.frontendEngineer;
+                const target = station.pickLeastBusy(role);
+                if (!target) {
+                    console.log(`⚠️ 没有 ${t.layer} 开发注册，任务 ${t.id} 下发失败`);
+                    return;
+                }
+                station.sendMessage("architect", target, JSON.stringify({ type: "task", task: t }));
+                console.log(`架构师 → ${target}：下发任务 ${t.id}（${t.title}）`);
+            });
+
+            // 任务全部下发完 → 向维护声明本阶段任务清单（当前一次性拆完：final=true）
+            // 维护按"已声明对全部通过 + final"判断阶段完成（集合收敛，不依赖预定的 N；
+            // 以后流水线分批拆分时：每批发一次声明（final=false），最后一批发 final=true）
+            const pairIds = [...new Set(state.exeTasks.map(t => t.id.endsWith("-F") ? t.id.slice(0, -2) : t.id))];
+            station.sendMessage("architect", "maintainer", JSON.stringify({ type: "tasks_declared", phase: phase.phase, pairIds, final: true }));
+            console.log(`架构师 → 维护：声明本阶段任务 ${pairIds.length} 对（final=true，阶段 ${phase.phase}）`);
+
+            console.log(`[debug] llmCalls=${state.llmCalls}`);
+        }
+    } catch (error) {
+        // 崩溃/校验失败：打印错误后重跑即可（MemorySaver + thread_id + resume 会从断点续跑）
+        console.error("出错了:", error);
+        console.log("重新运行 bun run architect.ts 即可从断点恢复。");
     }
-  } catch (error) {
-    // 崩溃/校验失败：打印错误后重跑即可（MemorySaver + thread_id + resume 会从断点续跑）
-    console.error("出错了:", error);
-    console.log("重新运行 bun run architect.ts 即可从断点恢复。");
-  }
-  rl.close();
 }
 
-main();
+// 架构师入口（函数化：单例，名字写死 "architect"；由 start.ts 拉起）
+export async function runArchitect(station: TransferStation) {
+    // 架构师消息循环：收两方消息——PM 的阶段计划 + 维护的完成信号
+    // 收到维护的"完成"之后，才向 PM 请求下一阶段
+    async function messageLoop() {
+        console.log("[architect] 消息监听已启动：等 PM 下发阶段计划 / 维护汇报完成");
+        while (true) {
+            const msg = await station.waitForMessage("architect");
+            if (!msg) continue;
+            let data: { type?: string; phase?: planItem };
+            try { data = JSON.parse(msg.content); } catch { continue; }
+
+            if (msg.sender === "manager" && data.type === "phase_plan") {
+                // PM 下发阶段计划 → 跑拆分（只拆消息里这个阶段，阶段=原子）
+                console.log(`[architect] ← PM：收到阶段计划（阶段 ${data.phase?.phase}）`);
+                if (data.phase) await runPhaseSplit(data.phase, station);
+            } else if (msg.sender === "maintainer" && data.type === "phase_done") {
+                // 维护汇报：本阶段任务全部完成 → 转告 PM 请求下一阶段
+                console.log(`[architect] ← 维护：阶段 ${data.phase?.phase} 全部完成`);
+                station.sendMessage("architect", "manager", JSON.stringify({ type: "phase_request", phase: data.phase?.phase }));
+                console.log(`[architect] → PM：请求下一阶段（阶段 ${data.phase?.phase} 已完成）`);
+            }
+            station.markDone("architect");   // 处理完记账（负载均衡的数据基础：pendingCount -1）
+        }
+    }
+
+    // 挂住等消息（进程保持存活；拆分在 messageLoop 里由消息触发）
+    await messageLoop();
+}

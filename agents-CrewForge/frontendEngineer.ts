@@ -4,6 +4,7 @@ import * as z from "zod";
 import { Annotation, StateGraph, START, END, MemorySaver, type GraphNode } from "@langchain/langgraph";
 import fs from "node:fs";
 import path from "node:path";
+import { TransferStation, roles } from "./Hub.ts";   // 前端与架构师/测试的消息中转站 + 角色枚举
 
 const model = new ChatDeepSeek({
     model: "deepseek-v4-flash",
@@ -265,90 +266,109 @@ const logicGraph = new StateGraph(MessageState)
     .addEdge("logic", END)
     .compile({ checkpointer: new MemorySaver() });
 
-// ---------- 双工位流水线（图 + 并发循环） ----------
+// ---------- 消息驱动版（参照 backendEngineer.ts） ----------
+// 消息协议（content 为 JSON 字符串）：
+//   架构师/合并器 → 前端: {"type": "task", "task": ExecTask}                 下发任务（layer 已筛过）/ 返工
+//   前端 → 合并器:        {"type": "task_result", "task": ExecTask, "success": bool} 干完活交合并器配对
 
-async function main() {
-    const all = JSON.parse(fs.readFileSync("tasks.json", "utf-8")) as ExecTask[];
-    const tasks = all.filter(t => t.layer === "frontend");   // 前端工程师只处理前端任务
-    console.log(`读取 ${all.length} 个任务，其中前端 ${tasks.length} 个，流水线开工\n`);
+const writtenFiles = new Map<string, string>();   // 追加语义：filePath → 最新代码（跨任务共享，同文件先读懂再追加）
 
-    const queue: CodeContent[] = [];   // 传送带（结构 → 逻辑）
-    const failed: string[] = [];       // 重试耗尽的任务 id（标记失败，不阻塞流水线）
-    let structureDone = false;
-
-    // 结构工位：每任务 invoke 一次结构图
-    // 防卡死：LLM 空产出/解析失败（抛异常）都算失败，重试 ≤3 次，耗尽标记失败跳过
-    async function stationStructure() {
-        for (const t of tasks) {
-            let state: typeof MessageState.State | undefined;
-            for (let attempt = 1; attempt <= 3; attempt++) {
-                try {
-                    state = await structureGraph.invoke(
-                        { execTasks: [t], project: "workspace" },
-                        { configurable: { thread_id: `fs-${t.id}` } }   // 每任务独立断点
-                    );
-                } catch (e) {
-                    console.log(`⚠️ ${t.id} LLM 调用失败（第 ${attempt} 次）：${(e as Error).message.slice(0, 80)}`);
-                    state = undefined;
-                    continue;
-                }
-                if (state.structures.length > 0) break;
-                console.log(`⚠️ ${t.id} 结构产出为空，重试 ${attempt}/3`);
-            }
-            if (state && state.structures.length > 0) {
-                queue.push(state.structures[0]!);               // 取图上传送带（图跑完必然出货）
-            } else {
-                failed.push(t.id);
-                console.log(`❌ ${t.id} 连续 3 次失败，标记失败跳过`);
-            }
+// 处理单个任务（从 main() 的双工位流水线提炼）：结构图 → 逻辑图 → 写盘 workspace/
+// 返回是否成功（失败也交测试，测试按 task_result.success 判断）
+async function processOneTask(t: ExecTask): Promise<boolean> {
+    // 结构工位：每任务 invoke 一次结构图（重试 ≤3，防卡死）
+    let state: typeof MessageState.State | undefined;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            state = await structureGraph.invoke(
+                { execTasks: [t], project: "workspace" },
+                { configurable: { thread_id: `fs-${t.id}` } }   // 每任务独立断点
+            );
+        } catch (e) {
+            console.log(`⚠️ ${t.id} LLM 调用失败（第 ${attempt} 次）：${(e as Error).message.slice(0, 80)}`);
+            state = undefined;
+            continue;
         }
-        structureDone = true;
+        if (state.structures.length > 0) break;
+        console.log(`⚠️ ${t.id} 结构产出为空，重试 ${attempt}/3`);
     }
+    if (!state || state.structures.length === 0) {
+        console.log(`❌ ${t.id} 连续 3 次失败，标记失败跳过`);
+        return false;
+    }
+    const s = state.structures[0]!;
 
-    const writtenFiles = new Map<string, string>();   // 追加语义：filePath → 最新代码（本流水线已产出）
+    // 追加语义：本次结构产出涉及的文件里，哪些已由前面任务产出 → 注入已有内容
+    const existing = [...writtenFiles.entries()]
+        .filter(([fp]) => s.files.some(f => f.filePath === fp))
+        .map(([filePath, code]) => ({ filePath, code }));
 
-    // 逻辑工位：从传送带取货，invoke 逻辑图（输出组件在 LogicNode 里）
-    async function stationLogic() {
-        while (true) {
-            const s = queue.shift();
-            if (!s) {
-                if (structureDone) break;
-                await sleep(100);
-                continue;
-            }
-            // 追加语义：本次结构产出涉及的文件里，哪些已由前面任务产出 → 注入已有内容
-            const existing = [...writtenFiles.entries()]
-                .filter(([fp]) => s.files.some(f => f.filePath === fp))
-                .map(([filePath, code]) => ({ filePath, code }));
-
-            let state: typeof MessageState.State | undefined;
-            for (let attempt = 1; attempt <= 3; attempt++) {
-                try {
-                    state = await logicGraph.invoke(
-                        { structures: [s], project: "workspace", existingFiles: existing },
-                        { configurable: { thread_id: `fl-${s.description.slice(0, 20)}` } }
-                    );
-                } catch (e) {
-                    console.log(`⚠️ LLM 调用失败（第 ${attempt} 次）：${(e as Error).message.slice(0, 80)}`);
-                    state = undefined;
-                    continue;
-                }
-                const last = state.logicCodes[state.logicCodes.length - 1];
-                if (last && last.files.length > 0) break;   // 有产出才往下走
-                console.log(`⚠️ 组件产出为空，重试 ${attempt}/3`);
-            }
-            const last = state ? state.logicCodes[state.logicCodes.length - 1] : undefined;
-            if (last && last.files.length > 0) {
-                for (const f of last.files) writtenFiles.set(f.filePath, f.code);   // 记录最新内容，供后续任务追加
-            } else {
-                failed.push(s.description.slice(0, 40));
-                console.log(`❌ 连续 3 次失败，标记失败跳过：${s.description.slice(0, 40)}`);
-            }
+    // 逻辑工位：invoke 逻辑图（输出组件在 LogicNode 里写盘）
+    let cstate: typeof MessageState.State | undefined;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            cstate = await logicGraph.invoke(
+                { structures: [s], project: "workspace", existingFiles: existing },
+                { configurable: { thread_id: `fl-${s.description.slice(0, 20)}` } }
+            );
+        } catch (e) {
+            console.log(`⚠️ LLM 调用失败（第 ${attempt} 次）：${(e as Error).message.slice(0, 80)}`);
+            cstate = undefined;
+            continue;
         }
+        const last = cstate.logicCodes[cstate.logicCodes.length - 1];
+        if (last && last.files.length > 0) break;   // 有产出才往下走
+        console.log(`⚠️ 组件产出为空，重试 ${attempt}/3`);
     }
-
-    await Promise.all([stationStructure(), stationLogic()]);
-    console.log(`前端流水线全部完成${failed.length ? `（${failed.length} 个任务失败：${failed.join("、")}）` : ""}`);
+    const last = cstate ? cstate.logicCodes[cstate.logicCodes.length - 1] : undefined;
+    if (!last || last.files.length === 0) {
+        console.log(`❌ 连续 3 次失败，标记失败跳过：${s.description.slice(0, 40)}`);
+        return false;
+    }
+    for (const f of last.files) writtenFiles.set(f.filePath, f.code);   // 记录最新内容，供后续任务追加
+    console.log(`✓ ${t.id} 组件已写入 workspace/`);
+    return true;
 }
 
-main();
+// 前端开发入口（函数化：接收 agent 名 + 共享中转站，由 start.ts 拉起）
+export async function runFrontend(name: string, station: TransferStation) {
+    async function messageLoop() {
+        console.log(`[${name}] 消息监听已启动：等架构师下发任务`);
+        while (true) {
+            const msg = await station.waitForMessage(name);
+            if (!msg) continue;
+            let data: { type?: string; task?: ExecTask; success?: boolean; issues?: string[] };
+            try { data = JSON.parse(msg.content); } catch { continue; }
+
+            // 用角色检测发送方（多实例场景名字可能是 test1/test2，role 才是身份）
+            const senderRole = station.status[msg.sender]?.role;
+
+            if ((msg.sender === "architect" || msg.sender === "merger") && data.type === "task") {
+                // 架构师下发 / 合并器返工 → 干活（结构图 + 逻辑图 → 写盘 workspace/）
+                console.log(`[${name}] ← ${msg.sender}：收到任务 ${data.task?.id}（${data.task?.title}）`);
+                if (data.task) {
+                    const ok = await processOneTask(data.task);
+                    // 干完 → 交合并器配对（成功与否都交，success 由合并器判断是否返工）
+                    station.sendMessage(name, "merger", JSON.stringify({ type: "task_result", task: data.task, success: ok }));
+                    console.log(`[${name}] → 合并器：任务 ${data.task.id} ${ok ? "完成" : "失败"}，等配对`);
+                }
+            }
+
+            // 测试返工：revision（带问题清单）→ issues 拼进任务描述针对性修改 → 重新交合并器配对
+            if (senderRole === roles.testEngineer && data.type === "revision" && data.task) {
+                console.log(`[${name}] ← 测试：任务 ${data.task.id} 返工（${data.issues?.length ?? 0} 条意见）`);
+                const revised = {
+                    ...data.task,
+                    description: data.task.description + "\n\n【测试返工意见（必须逐条解决）】\n" + (data.issues ?? []).join("\n"),
+                };
+                const ok = await processOneTask(revised);
+                station.sendMessage(name, "merger", JSON.stringify({ type: "task_result", task: data.task, success: ok }));
+                console.log(`[${name}] → 合并器：任务 ${data.task.id} 返工${ok ? "完成" : "仍失败"}，重新交配`);
+            }
+            station.markDone(name);   // 处理完记账（负载均衡的数据基础：pendingCount -1）
+        }
+    }
+
+    // 挂住等消息（进程保持存活；干活在 messageLoop 里由消息触发）
+    await messageLoop();
+}

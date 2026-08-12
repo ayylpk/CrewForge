@@ -1,28 +1,23 @@
-import { ChatDeepSeek } from "@langchain/deepseek";
-import { SystemMessage } from "@langchain/core/messages";
-import * as z from "zod";
-import { Annotation, StateGraph, START, END, MemorySaver, type GraphNode } from "@langchain/langgraph";
-import fs from "node:fs";
-import path from "node:path";
-
 // ============================================================
-// 维护工程师（v1）：任务收尾（发布管家，不写业务、不碰 git、不做集成冒烟）
+// 维护工程师（v2）：阶段门控——纯程序，零 LLM
 //
-//   每任务：机械落盘确认（files 都在 workspace/？）→ LLM 交付说明
-//   （做了什么/改了哪些文件/怎么验证）→ 控制台输出（演示版：agent 间不通信）
+//   收测试的 task_passed（通过的接口对）+ 架构师的 tasks_declared（任务声明）
+//   → 集合收敛判断：架构师声明 final=true 且所有已声明对都通过 → 阶段完成
+//   → 发 phase_done 给架构师（架构师转告 PM 请求下一阶段）
 //
-// 关键约定：
-//   - 落盘确认是机械的（文件存在性），LLM 只写交付说明
-//   - 交付说明按任务原子（任务 = 原子铁律）
+// 设计：完成标准不预定义 N，由"声明 + 收敛"决定——
+//   架构师边发任务边声明（可动态追加/分批），维护按对 id 去重累积，
+//   final=true 表示本阶段不再有任务。阶段完成 = 声明耗尽 + 全部通过。
+//
+// 消息协议（content 为 JSON 字符串）：
+//   测试 → 维护:     {"type": "task_passed", "pair": {"back": ExecTask, "front": ExecTask|null}}
+//   架构师 → 维护:   {"type": "tasks_declared", "phase": N, "pairIds": ["T1", ...], "final": bool}
+//   维护 → 架构师:   {"type": "phase_done", "phase": N}   （阶段完成信号）
 // ============================================================
 
-const model = new ChatDeepSeek({
-    model: "deepseek-v4-flash",
-})
+import { TransferStation, roles } from "./Hub.ts";
 
-// ---------- 类型定义 ----------
-
-// 与架构师/工程师一致的 ExecTask
+// 任务（与各 agent 文件一致的 ExecTask）
 interface ExecTask {
   id: string;
   layer: "backend" | "frontend";
@@ -31,144 +26,64 @@ interface ExecTask {
   files: string[];
   title: string;
   description: string;
-  parameters: {
-    name: string;
-    type: string;
-    required: boolean;
-    description: string;
-  }[];
+  parameters: { name: string; type: string; required: boolean; description: string }[];
   acceptance: string;
 }
 
-// 交付说明（LLM 输出）
-interface Handover {
-  done: string;          // 做了什么
-  filesChanged: string[]; // 改了哪些文件
-  howToVerify: string;    // 怎么验证
+// 接口对（测试发来的 task_passed 携带）
+interface Pair {
+  back: ExecTask;
+  front: ExecTask | null;
 }
 
-// ---------- 状态通道 ----------
+// 维护入口（函数化：阶段门控，单例，名字写死 "maintainer"；由 start.ts 拉起）
+export async function runMaintainer(station: TransferStation) {
+    // 本阶段状态（每阶段完成时重置）：
+    let declaredPairs = new Set<string>();   // 架构师声明的对（pairId，可动态追加）
+    let passedPairs = new Set<string>();     // 已通过的对（pairId，按对去重）
+    let declaredFinal = false;               // 架构师声明"本阶段拆完了，不再有任务"
+    let currentPhase = 0;                    // 当前阶段号
 
-const MessageState = Annotation.Root({
-    task: Annotation<ExecTask | null>({
-        default: () => null,
-        reducer: (_, u) => u,
-    }),
-    handover: Annotation<Handover | null>({
-        default: () => null,
-        reducer: (_, u) => u,
-    }),
-    llmCalls: Annotation<number>({
-        default: () => 0,
-        reducer: (x, y) => x + y,
-    }),
-});
+    async function messageLoop() {
+        console.log("[maintainer] 已启动：等测试报通过 / 架构师声明任务");
+        while (true) {
+            const msg = await station.waitForMessage("maintainer");
+            if (!msg) continue;
+            let data: { type?: string; phase?: number; pairIds?: string[]; final?: boolean; pair?: Pair };
+            try { data = JSON.parse(msg.content); } catch { continue; }
 
-// ---------- 提示词 ----------
+            // 用角色检测发送方（多实例场景名字不定，role 才是身份）
+            const senderRole = station.status[msg.sender]?.role;
+            let handled = false;
 
-const handover_prompt: string = `
-# 角色定义
-你是 CrewForge 项目的【维护-交付说明】Agent。你负责给一个已完成的任务写交付说明（发布管家：不写业务代码，只管"东西能交出去、跑得起来"）。
+            if (senderRole === roles.testEngineer && data.type === "task_passed" && data.pair?.back?.id) {
+                // 测试判过的一对 → 按对 id 去重累积（返工不影响：同一对只 pass 一次）
+                const key = data.pair.back.id;
+                passedPairs.add(key);
+                console.log(`[maintainer] ← 测试：${key} 通过（已收 ${passedPairs.size} 对）`);
+                handled = true;
+            } else if (senderRole === roles.architect && data.type === "tasks_declared") {
+                // 架构师声明任务（可多次追加；final=true 表示本阶段不再有）
+                currentPhase = data.phase ?? currentPhase;
+                (data.pairIds ?? []).forEach(id => declaredPairs.add(id));
+                if (data.final) declaredFinal = true;
+                console.log(`[maintainer] ← 架构师：声明 ${(data.pairIds ?? []).length} 对${data.final ? "（final：本阶段不再有）" : ""}，累计 ${declaredPairs.size} 对`);
+                handled = true;
+            }
 
-## 输入
-1. 任务（契约 + 描述 + 验收标准）
-2. 该任务产出的代码文件
-
-## 工作目标
-写一份给接手人的交付说明：
-1. done：这个任务做了什么（一句话到两三句，业务视角）
-2. filesChanged：改了/新建了哪些文件（按文件列，说明每个文件的作用）
-3. howToVerify：怎么验证这个任务做对了（对照验收标准，给出具体的验证步骤——如调用哪个接口、页面怎么操作、看什么结果）
-
-## 输出（必须遵守）
-只输出一段 JSON，不要夹带讨论：
-{ "done": "做了什么", "filesChanged": ["文件1：作用", "文件2：作用"], "howToVerify": "怎么验证" }
-`;
-
-// ---------- 结构化输出模型 ----------
-
-const handoverModel = model.withStructuredOutput(
-  z.object({
-    done: z.string(),
-    filesChanged: z.array(z.string()),
-    howToVerify: z.string(),
-  }),
-  { method: "jsonMode", name: "extract_handover" }
-);
-
-// ---------- 工具 ----------
-
-function readTaskFiles(t: ExecTask): { filePath: string; content: string }[] {
-  return t.files.map(fp => {
-    const full = path.join("workspace", fp);
-    if (!fs.existsSync(full)) return { filePath: fp, content: "（文件缺失）" };
-    return { filePath: fp, content: fs.readFileSync(full, "utf-8") };
-  });
-}
-
-// ---------- 节点 ----------
-
-// 交付说明节点：读任务产物 → LLM 写交付说明
-const HandoverNode: GraphNode<typeof MessageState.State> = async (state) => {
-    const task = state.task!;
-    const files = readTaskFiles(task);
-
-    // LLM 调用失败（空输出/解析失败）→ 控制台标注，不崩流水线
-    let parsed;
-    try {
-        parsed = await handoverModel.invoke([
-            new SystemMessage(
-                handover_prompt +
-                `\n\n## 任务\n${JSON.stringify(task, null, 2)}` +
-                `\n\n## 产出代码\n${files.map(f => `--- ${f.filePath} ---\n${f.content}`).join("\n")}`
-            ),
-        ]);
-    } catch (e) {
-        return { handover: { done: `（LLM 调用失败：${(e as Error).message.slice(0, 80)}）`, filesChanged: [], howToVerify: "" } };
-    }
-    return { handover: parsed, llmCalls: 1 };
-};
-
-// ---------- 组装图 ----------
-// 单节点图：每任务一次 invoke（每任务独立 thread_id 断点）
-// 注意：节点名不能和状态通道名重名（handover 是通道，节点叫 handoverNode）
-const graph = new StateGraph(MessageState)
-    .addNode("handoverNode", HandoverNode)
-    .addEdge(START, "handoverNode")
-    .addEdge("handoverNode", END)
-    .compile({ checkpointer: new MemorySaver() });
-
-// ---------- 主流程 ----------
-
-async function main() {
-    const all = JSON.parse(fs.readFileSync("tasks.json", "utf-8")) as ExecTask[];
-    console.log(`维护收尾：${all.length} 个任务\n`);
-
-    let llmCalls = 0;
-    for (const task of all) {
-        console.log(`========== ${task.id} ${task.title} ==========`);
-
-        // 机械落盘确认：files 是否都在 workspace/
-        const missing = task.files.filter(fp => !fs.existsSync(path.join("workspace", fp)));
-        if (missing.length > 0) {
-            console.log(`⚠️ 落盘不完整，缺文件：${missing.join("、")}（后续任务可能没跑或产出为空）\n`);
-            continue;   // 缺文件不写交付说明（没法验）
+            // 集合收敛判断：架构师说拆完了 && 所有已声明对都通过 → 阶段完成
+            if (handled && declaredFinal && declaredPairs.size > 0 && [...declaredPairs].every(p => passedPairs.has(p))) {
+                station.sendMessage("maintainer", "architect", JSON.stringify({ type: "phase_done", phase: currentPhase }));
+                console.log(`[maintainer] → 架构师：阶段 ${currentPhase} 全部完成（${declaredPairs.size} 对全通过），请转告 PM 下一阶段`);
+                // 重置，等下一阶段（新声明 + 新通过）
+                declaredPairs = new Set();
+                passedPairs = new Set();
+                declaredFinal = false;
+            }
+            station.markDone("maintainer");   // 处理完记账（负载均衡的数据基础）
         }
-        console.log(`✓ 落盘确认：${task.files.length} 个文件都在`);
-
-        const state = await graph.invoke(
-            { task },
-            { configurable: { thread_id: `m-${task.id}` } }
-        );
-        const h = state.handover!;
-        llmCalls += state.llmCalls;
-
-        console.log(`  交付说明：${h.done}`);
-        console.log(`  文件：`);
-        h.filesChanged.forEach(f => console.log(`    - ${f}`));
-        console.log(`  怎么验证：${h.howToVerify}\n`);
     }
-    console.log(`维护收尾完成${llmCalls ? `，llmCalls=${llmCalls}` : ""}`);
-}
 
-main();
+    // 挂住等消息（进程保持存活）
+    await messageLoop();
+}

@@ -4,17 +4,22 @@ import * as z from "zod";
 import { Annotation, StateGraph, START, END, MemorySaver, type GraphNode } from "@langchain/langgraph";
 import fs from "node:fs";
 import path from "node:path";
+import { TransferStation, roles } from "./Hub.ts";   // 测试与合并器/开发/维护的消息中转站 + 角色枚举
 
 // ============================================================
-// 测试工程师（v1）：配对契约检查（纯 L3，LLM 模拟执行，零环境）
+// 测试工程师：配对契约检查（纯 L3，LLM 模拟执行，零环境）
 //
-//   按 id 规律配对（T{n} 后端 ↔ T{n}-F 前端）→ 每组一次 LLM 判断
-//   → 判定后端/前端/匹配问题 → 结果只输出控制台（演示版：agent 间不通信）
+//   消息驱动：合并器配好对（pair_ready）→ 每组一次 LLM 判断
+//   → 判过发维护计数；判错按 blame 发回对应开发（带问题清单，开发据此修代码）
+//
+// 消息协议（content 为 JSON 字符串）：
+//   合并器 → 测试:  {"type": "pair_ready", "pair": {"back": ExecTask, "front": ExecTask|null}}
+//   测试 → 开发:    {"type": "revision", "task": ExecTask, "issues": [问题清单]}  返工（blame 决定发给谁）
+//   测试 → 维护:    {"type": "task_passed", "pair": {...}}  判过，维护计数
 //
 // 关键约定：
 //   - 文件缺失 → 机械 fail，不调 LLM（反馈明确且省一次调用）
 //   - 匹配问题（前端调的接口/传参/字段 vs 后端定义）由 LLM 归入出错的那一侧
-//   - 落单任务（只有后端/只有前端）单独测
 // ============================================================
 
 const model = new ChatDeepSeek({
@@ -175,60 +180,71 @@ const graph = new StateGraph(MessageState)
     .addEdge("test", END)
     .compile({ checkpointer: new MemorySaver() });
 
-// ---------- 配对 ----------
+// ---------- 消息驱动主流程 ----------
 
-// 按 id 规律配对：前端剥掉 "-F" 找后端（架构师机械生成，T{n} ↔ T{n}-F）
-// 落单任务单独测（后端无前端 / 前端无后端）
-function buildPairs(all: ExecTask[]): Pair[] {
-    const pairs: Pair[] = [];
-    const backMap = new Map(all.filter(t => t.layer === "backend").map(t => [t.id, t]));
-    const usedBack = new Set<string>();
+// 测试入口（函数化：接收 agent 名 + 共享中转站，由 start.ts 拉起）
+// name = "testEngineer"/"test2"…（多测试负载均衡）
+export async function runTest(name: string, station: TransferStation) {
+    async function messageLoop() {
+        console.log(`[${name}] 消息监听已启动：等合并器送配好的接口对`);
+        while (true) {
+            const msg = await station.waitForMessage(name);
+            if (!msg) continue;
+            let data: { type?: string; pair?: Pair };
+            try { data = JSON.parse(msg.content); } catch { continue; }
+            if (msg.sender !== "merger" || data.type !== "pair_ready" || !data.pair) continue;
 
-    for (const t of all) {
-        if (t.layer !== "frontend") continue;
-        const backId = t.id.endsWith("-F") ? t.id.slice(0, -2) : t.id;   // T1-F → T1
-        const back = backMap.get(backId) ?? null;
-        if (back) usedBack.add(backId);
-        pairs.push({ back: back ?? { id: backId, layer: "backend", method: "", path: "", files: [], title: "（后端任务缺失）", description: "", parameters: [], acceptance: "" }, front: t });
-    }
-    for (const t of all) {
-        if (t.layer === "backend" && !usedBack.has(t.id)) pairs.push({ back: t, front: null });
-    }
-    return pairs;
-}
+            const pair = data.pair;
+            const label = `${pair.back.id}${pair.front ? `+${pair.front.id}` : ""} ${pair.back.method} ${pair.back.path}`;
+            console.log(`[${name}] ← 合并器：收到 ${label}`);
 
-// ---------- 主流程 ----------
+            // 契约判断（图：机械预检 + LLM；每对独立断点，可续跑）
+            let v: Verdict;
+            try {
+                const state = await graph.invoke(
+                    { pair },
+                    { configurable: { thread_id: `t-${pair.back.id}` } }
+                );
+                v = state.verdict!;
+                console.log(`[debug] llmCalls=${state.llmCalls}`);
+            } catch (e) {
+                v = { pass: false, blame: "both", backendIssues: [`测试图调用失败：${(e as Error).message.slice(0, 100)}`], frontendIssues: [] };
+            }
 
-async function main() {
-    const all = JSON.parse(fs.readFileSync("tasks.json", "utf-8")) as ExecTask[];
-    const pairs = buildPairs(all);
-    console.log(`配对 ${pairs.length} 组，测试开工\n`);
-
-    // 每对一次 invoke（thread_id = 后端 id，断点续跑）
-    let passed = 0;
-    let llmCalls = 0;
-
-    for (const pair of pairs) {
-        const state = await graph.invoke(
-            { pair },
-            { configurable: { thread_id: `t-${pair.back.id}` } }
-        );
-        const v = state.verdict!;
-        llmCalls += state.llmCalls;
-
-        const label = `${pair.back.id}${pair.front ? `+${pair.front.id}` : ""} ${pair.back.method} ${pair.back.path}`;
-        if (v.pass) {
-            passed += 1;
-            console.log(` ${label} 通过`);
-        } else {
-            const blame = v.blame === "both" ? "前后端都错" : v.blame === "backend" ? "后端错" : "前端错";
-            console.log(` ${label} 未通过（${blame}）`);
-            v.backendIssues.forEach(i => console.log(`   后端：${i}`));
-            v.frontendIssues.forEach(i => console.log(`   前端：${i}`));
+            if (v.pass) {
+                // 判过 → 维护计数（维护收齐任务才报阶段完成）
+                station.sendMessage(name, "maintainer", JSON.stringify({ type: "task_passed", pair }));
+                console.log(`[${name}] → 维护：${label} 通过`);
+            } else {
+                // 判错 → 按 blame 发回对应开发（revision 带问题清单，开发据此修改代码）
+                // 多开发场景：目标用 pickLeastBusy(role) 选该角色负载最低的（不写死名字）
+                const blame = v.blame === "both" ? "前后端都错" : v.blame === "backend" ? "后端错" : "前端错";
+                console.log(`[${name}]：${label} 未通过（${blame}）`);
+                if (v.blame === "backend" || v.blame === "both") {
+                    const target = station.pickLeastBusy(roles.backendEngineer);
+                    if (target) {
+                        station.sendMessage(name, target, JSON.stringify({ type: "revision", task: pair.back, issues: v.backendIssues }));
+                        v.backendIssues.forEach(i => console.log(`   后端：${i}`));
+                    } else {
+                        console.log(`⚠️ 没有后端开发注册，返工发送失败：${pair.back.id}`);
+                    }
+                }
+                if (v.blame === "frontend" || v.blame === "both") {
+                    if (pair.front) {
+                        const target = station.pickLeastBusy(roles.frontendEngineer);
+                        if (target) {
+                            station.sendMessage(name, target, JSON.stringify({ type: "revision", task: pair.front, issues: v.frontendIssues }));
+                            v.frontendIssues.forEach(i => console.log(`   前端：${i}`));
+                        } else {
+                            console.log(`⚠️ 没有前端开发注册，返工发送失败：${pair.front.id}`);
+                        }
+                    }
+                }
+            }
+            station.markDone(name);   // 处理完记账（负载均衡的数据基础）
         }
     }
 
-    console.log(`\n测试完成：${passed}/${pairs.length} 通过${llmCalls ? `，llmCalls=${llmCalls}` : ""}`);
+    // 挂住等消息（进程保持存活）
+    await messageLoop();
 }
-
-main();

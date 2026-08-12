@@ -6,6 +6,7 @@ import { Annotation, StateGraph, START, END, MemorySaver, type GraphNode, messag
 import { ToolNode } from "@langchain/langgraph/prebuilt";
 import fs from "node:fs";
 import readline from "readline";
+import { TransferStation } from "./Hub.ts";   // PM 与架构师的消息中转站
 
 interface typeOfTasks{
   name: string,
@@ -427,7 +428,50 @@ const graph = new StateGraph(MessagesState)
   .addEdge("planner", END)
   .compile({ checkpointer: new MemorySaver() });
 
-async function main() {
+// ============================================================
+// PM 消息收发（新增）：通过 Hub 中转站与架构师通信
+//   消息协议（content 为 JSON 字符串）：
+//     PM → 架构师: {"type": "phase_plan", "phase": {phase, name, ...}} 阶段计划（该干哪个阶段了）
+//     维护 → 架构师: {"type": "phase_done", "phase": <完成的阶段号>}    阶段完成（任务全做完）
+//     架构师 → PM: {"type": "phase_request", "phase": <完成的阶段号>}  请求下一阶段（维护确认完成，架构师转告）
+//   并发模型：messageLoop 与主对话图并行——消息来了立马处理，
+//   对话图该转继续转，互不阻塞
+// ============================================================
+
+// 取 plan.json 里"完成阶段号 + 1"的下一个阶段；没有则返回 null（全部完成）
+function nextPhase(after: number): planItem | null {
+    const plan = JSON.parse(fs.readFileSync("plan.json", "utf-8")) as Plan;
+    return plan.phases.find(p => p.phase === after + 1) ?? null;
+}
+
+// PM 入口（函数化：单例，名字写死 "manager"；由 start.ts 拉起）
+// 双循环：消息循环后台跑（等架构师请求下一阶段），主对话图照常运转
+export async function runManager(station: TransferStation) {
+  // PM 消息循环：等架构师的"请求下一阶段" → 下发下一阶段
+  // 不 await 这个循环，它后台跑；主对话图照常运转
+  async function messageLoop() {
+      console.log("PM 消息监听已启动：等架构师汇报阶段完成");
+      while (true) {
+          const msg = await station.waitForMessage("manager");
+          if (!msg) continue;   // 防御：唤醒但没取到消息就重等
+          let data: { type?: string; phase?: number };
+          try { data = JSON.parse(msg.content); } catch { continue; }   // 解析失败忽略
+          if (data.type !== "phase_request") continue;                   // 只认"请求下一阶段"信号（架构师转告的）
+
+          console.log(`PM ← 架构师：阶段 ${data.phase} 完成`);
+          const next = nextPhase(data.phase!);
+          if (!next) { console.log("PM：全部阶段已完成，项目交付"); continue; }
+
+          // 下发下一个阶段
+          station.sendMessage("manager", "architect", JSON.stringify({ type: "phase_plan", phase: next }));
+          console.log(`PM → 架构师：下发阶段 ${next.phase}（${next.name}）`);
+
+          station.markDone("manager");   // 处理完记账（负载均衡的数据基础：pendingCount -1）
+      }
+  }
+
+  // 启动消息监听循环（后台并行，消息来了立马处理，不阻塞对话）
+  const msgLoop = messageLoop();
   console.log("我是你的项目经理助手,请告诉我你想要一个什么样子的项目，有哪些功能和需求");
   console.log("输入 'exit' 退出程序\n");
 
@@ -476,6 +520,13 @@ async function main() {
           // 落盘交接：架构师（architect.ts）从 plan.json 接手
           fs.writeFileSync("plan.json", JSON.stringify(result.plan, null, 2));
           console.log("规划已保存到 plan.json，下一步：bun run executor.ts");
+          // 新增：规划落盘后，PM 进入阶段调度——先给架构师下发阶段 1
+          const phases = result.plan.phases;
+          if (phases.length > 0) {
+              const first = phases[0]!;  
+              station.sendMessage("manager", "architect", JSON.stringify({ type: "phase_plan", phase: first }));
+              console.log(`PM → 架构师：下发阶段 1：${first.name}`);
+          }
         } else {
           console.log("\n⚠️ 规划未生成（plan 为空），请重试。");
         }
@@ -488,6 +539,7 @@ async function main() {
   }
 
   rl.close();
-}
 
-main();
+  // 对话结束，PM 进入阶段调度模式：挂起等架构师消息（进程保持存活）
+  await msgLoop;
+}
