@@ -4,7 +4,7 @@ import * as z from "zod";
 import { Annotation, StateGraph, START, END, MemorySaver, type GraphNode } from "@langchain/langgraph";
 import fs from "node:fs";
 import readline from "readline";
-import { TransferStation, roles } from "./Hub.ts";   // 架构师与 PM 的消息中转站 + 角色枚举
+import { TransferStation, roles, llmWithTimeout } from "./Hub.ts";   // 架构师与 PM 的消息中转站 + 角色枚举 + 超时兜底
 
 // ============================================================
 // 架构师链路（v1）：PM 阶段计划 → 拆分下发为止
@@ -23,6 +23,7 @@ import { TransferStation, roles } from "./Hub.ts";   // 架构师与 PM 的消�
 
 const model = new ChatDeepSeek({
     model: "deepseek-v4-flash",
+    timeout: 180000,   // 单次调用 120s 超时：thinking 模型大输出可能很慢，但必须有界（挂起走重试）
 })
 
 const rl = readline.createInterface({
@@ -49,7 +50,7 @@ interface planItem {
   risk: string;            // 高 | 中 | 低
 }
 
-// PM 产出：结构化 PRD + 阶段规划（manager.ts 的输出，本文件从 plan.json 读）
+// PM 产出：结构化 PRD + 阶段规划（manager.ts 的输出，经 phase_plan 消息携带传入）
 interface Plan {
   project: string;
   features: typeOfTasks[]; // 详细功能清单原样放回
@@ -380,10 +381,25 @@ const architectPlan: GraphNode<typeof MessageState.State> = async (state) => {
     .map((f, i) => `${i + 1}. ${f.name}（${f.priority}）：${f.description} | 验收：${f.acceptance}`)
     .join('\n');
 
-  const parsed = await planModel.invoke([
-    new SystemMessage(plan_prompt + `\n\n## 本阶段\n阶段${phase.phase}「${phase.name}」目标：${phase.goal}\n\n## 本阶段功能详情\n${featuresContent}`),
-  ]);
-  return { detailedPlan: { ...parsed, phase: phase.phase }, llmCalls: 1 };
+  // 重试 ≤3：flash 模型 jsonMode 偶发校验失败，重试不崩（样式同 backendEngineer）
+  let parsed: Awaited<ReturnType<typeof planModel.invoke>> | undefined;
+  let ok = false;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      parsed = await llmWithTimeout(
+        sig => planModel.invoke([
+          new SystemMessage(plan_prompt + `\n\n## 本阶段\n阶段${phase.phase}「${phase.name}」目标：${phase.goal}\n\n## 本阶段功能详情\n${featuresContent}`),
+        ], { signal: sig }),
+        150000, "业务分解"
+      );
+      ok = true;
+      break;
+    } catch (e) {
+      console.log(`⚠️ 业务分解 LLM 失败（第 ${attempt} 次）：${(e as Error).message.slice(0, 80)}`);
+    }
+  }
+  if (!ok) throw new Error("业务分解连续 3 次失败");   // 外层 runPhaseSplit catch 接住
+  return { detailedPlan: { ...parsed!, phase: phase.phase }, llmCalls: 1 };
 };
 
 // agent2：技术栈（读业务计划，出全技术）
@@ -393,10 +409,24 @@ const architectStack: GraphNode<typeof MessageState.State> = async (state) => {
     .map((m, i) => `${i + 1}. ${m.name}（对应功能：${m.business}）\n   业务：${m.description}\n   数据需求：${m.dataNeeds.join("、")}\n   要点：${m.points.join("；")}`)
     .join('\n');
 
-  const parsed = await stackModel.invoke([
-    new SystemMessage(stack_prompt + `\n\n## 业务详细计划（阶段${d.phase}）\n${modulesContent}`),
-  ]);
-  return { stack: parsed, llmCalls: 1 };
+  let parsed: Awaited<ReturnType<typeof stackModel.invoke>> | undefined;
+  let ok = false;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      parsed = await llmWithTimeout(
+        sig => stackModel.invoke([
+          new SystemMessage(stack_prompt + `\n\n## 业务详细计划（阶段${d.phase}）\n${modulesContent}`),
+        ], { signal: sig }),
+        150000, "技术栈"
+      );
+      ok = true;
+      break;
+    } catch (e) {
+      console.log(`⚠️ 技术栈 LLM 失败（第 ${attempt} 次）：${(e as Error).message.slice(0, 80)}`);
+    }
+  }
+  if (!ok) throw new Error("技术栈连续 3 次失败");
+  return { stack: parsed!, llmCalls: 1 };
 };
 
 // 用户确认门：userConfirm 没置位就停（confirmPending=true），等 main() 问用户再回来
@@ -408,15 +438,29 @@ const confirmGate: GraphNode<typeof MessageState.State> = async (state) => {
 // agent3：基础架构（对照表结构和交付物补缺）
 const base: GraphNode<typeof MessageState.State> = async (state) => {
   const stack = state.stack!;
-  const parsed = await baseModel.invoke([
-    new SystemMessage(
-      base_prompt +
-      `\n\n## 技术栈\n中间件：${stack.techniques.middleware.map(m => `${m.name}（${m.purpose}）`).join("、")}\n数据库：${stack.techniques.database.type}（${stack.techniques.database.why}）` +
-      `\n\n## 表结构\n${stack.tables.map(t => `${t.name}：${t.fields.map(f => f.name).join("、")}`).join("\n")}` +
-      `\n\n## 交付物\n${state.detailedPlan!.deliverables.join("、")}`
-    ),
-  ]);
-  return { baseReady: true, basePlan: parsed, llmCalls: 1 };
+  let parsed: Awaited<ReturnType<typeof baseModel.invoke>> | undefined;
+  let ok = false;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      parsed = await llmWithTimeout(
+        sig => baseModel.invoke([
+          new SystemMessage(
+            base_prompt +
+            `\n\n## 技术栈\n中间件：${stack.techniques.middleware.map(m => `${m.name}（${m.purpose}）`).join("、")}\n数据库：${stack.techniques.database.type}（${stack.techniques.database.why}）` +
+            `\n\n## 表结构\n${stack.tables.map(t => `${t.name}：${t.fields.map(f => f.name).join("、")}`).join("\n")}` +
+            `\n\n## 交付物\n${state.detailedPlan!.deliverables.join("、")}`
+          ),
+        ], { signal: sig }),
+        150000, "基础架构"
+      );
+      ok = true;
+      break;
+    } catch (e) {
+      console.log(`⚠️ 基础架构 LLM 失败（第 ${attempt} 次）：${(e as Error).message.slice(0, 80)}`);
+    }
+  }
+  if (!ok) throw new Error("基础架构连续 3 次失败");
+  return { baseReady: true, basePlan: parsed!, llmCalls: 1 };
 };
 
 // agent4：接口拆分 —— LLM 出接口形态（RESTful），id/验收标准代码机械补（验收契约不发明）
@@ -434,16 +478,31 @@ const dispatch: GraphNode<typeof MessageState.State> = async (state) => {
       .join('\n');
     const techContent = stack.moduleTech.map(mt => `${mt.module} → 后端：${mt.backend}｜前端：${mt.frontend}`).join("\n");
 
-    const parsed = await resolutionModel.invoke([
-      new SystemMessage(api_prompt + `\n\n## 业务模块（阶段${detailed.phase}）\n${modulesContent}\n\n## 技术绑定\n${techContent}`),
-    ]);
+    // 重试 ≤3：接口拆分 schema 最复杂（二维数组），flash 模型最容易翻车，必须重试
+    let parsed: Awaited<ReturnType<typeof resolutionModel.invoke>> | undefined;
+    let ok = false;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        parsed = await llmWithTimeout(
+          sig => resolutionModel.invoke([
+            new SystemMessage(api_prompt + `\n\n## 业务模块（阶段${detailed.phase}）\n${modulesContent}\n\n## 技术绑定\n${techContent}`),
+          ], { signal: sig }),
+          150000, "接口拆分"
+        );
+        ok = true;
+        break;
+      } catch (e) {
+        console.log(`⚠️ 接口拆分 LLM 失败（第 ${attempt} 次）：${(e as Error).message.slice(0, 80)}`);
+      }
+    }
+    if (!ok) throw new Error("接口拆分连续 3 次失败");
 
     // 完整技术上下文：中间件 + 数据库（agent2 唯一归属，机械抄不发明）
     const middlewareContent = stack.techniques.middleware.map(m => `${m.name}（${m.purpose}）`).join("、");
     const dbContent = `${stack.techniques.database.type}（${stack.techniques.database.why}）`;
 
     // 机械部分：每个接口对拆成后端+前端两个任务；id 顺序生成；验收标准从 Plan.features 按模块 business 原样抄
-    tasks = parsed.tasks.flatMap((pair, i) => {
+    tasks = parsed!.tasks.flatMap((pair, i) => {
       const [back, front] = pair;
       // 模块名兜底匹配：LLM 可能在模块名上增删字（如"任务创建"→"任务创建模块"），严格匹配失败时按包含匹配
       const mod = detailed.modules.find(m => m.name === back.module)
@@ -561,18 +620,17 @@ function printConfirm(state: typeof MessageState.State) {
 //     架构师 → PM:       {"type": "phase_request", "phase": N}    请求下一阶段（收到维护的完成才发）
 // ============================================================
 
-// 拆分一个阶段：读 plan.json → 只给当前阶段的 features → 跑拆分图 → 确认门 → tasks.json
-// 消息驱动：PM 发 phase_plan 才调用（不再启动就跑）；阶段=原子，一次只拆一个阶段
+// 拆分一个阶段：拿消息携带的全量 plan → 只给当前阶段的 features → 跑拆分图 → 确认门 → tasks.json
+// 纯消息化：plan 由 phase_plan 消息携带（不再读 plan.json）；阶段=原子，一次只拆一个阶段
 // station：下发给开发/维护用（由 runArchitect 传入）
-async function runPhaseSplit(phase: planItem, station: TransferStation) {
-    const full = JSON.parse(fs.readFileSync("plan.json", "utf-8")) as Plan;
+async function runPhaseSplit(plan: Plan, phase: planItem, station: TransferStation) {
     // 只把当前阶段的 features 丢给拆分图（验收标准从全量 features 里按名抄）
     const planForPhase: Plan = {
-        project: full.project,
-        features: full.features.filter(f => phase.features.includes(f.name)),
+        project: plan.project,
+        features: plan.features.filter(f => phase.features.includes(f.name)),
         phases: [phase],
-        mvp_scope: full.mvp_scope,
-        risks: full.risks,
+        mvp_scope: plan.mvp_scope,
+        risks: plan.risks,
     };
 
     const thread = { configurable: { thread_id: `architect-phase-${phase.phase}` } };  // 每阶段独立断点
@@ -627,12 +685,17 @@ async function runPhaseSplit(phase: planItem, station: TransferStation) {
             station.sendMessage("architect", "maintainer", JSON.stringify({ type: "tasks_declared", phase: phase.phase, pairIds, final: true }));
             console.log(`架构师 → 维护：声明本阶段任务 ${pairIds.length} 对（final=true，阶段 ${phase.phase}）`);
 
+            // 通知合并器清配对缓存：任务 id 每阶段从 T1 重新编号，阶段 2 的 T1 不能撞阶段 1 的缓存
+            station.sendMessage("architect", "merger", JSON.stringify({ type: "phase_reset", phase: phase.phase }));
+            console.log(`架构师 → 合并器：阶段 ${phase.phase} 配对缓存重置`);
+
             console.log(`[debug] llmCalls=${state.llmCalls}`);
         }
     } catch (error) {
-        // 崩溃/校验失败：打印错误后重跑即可（MemorySaver + thread_id + resume 会从断点续跑）
-        console.error("出错了:", error);
-        console.log("重新运行 bun run architect.ts 即可从断点恢复。");
+        // 阶段拆分失败（LLM 连续失败）：静默卡死最糟——进程内 checkpoint 随进程退出丢失，
+        // 无续跑价值，明确报错退出，让启动方（平台/用户）重跑
+        console.error(`❌ 阶段 ${phase.phase} 拆分失败（重试耗尽）：`, (error as Error).message);
+        process.exit(1);
     }
 }
 
@@ -645,13 +708,13 @@ export async function runArchitect(station: TransferStation) {
         while (true) {
             const msg = await station.waitForMessage("architect");
             if (!msg) continue;
-            let data: { type?: string; phase?: planItem };
+            let data: { type?: string; phase?: planItem; plan?: Plan };
             try { data = JSON.parse(msg.content); } catch { continue; }
 
             if (msg.sender === "manager" && data.type === "phase_plan") {
-                // PM 下发阶段计划 → 跑拆分（只拆消息里这个阶段，阶段=原子）
+                // PM 下发阶段计划（消息带全量 plan）→ 跑拆分（只拆消息里这个阶段，阶段=原子）
                 console.log(`[architect] ← PM：收到阶段计划（阶段 ${data.phase?.phase}）`);
-                if (data.phase) await runPhaseSplit(data.phase, station);
+                if (data.phase && data.plan) await runPhaseSplit(data.plan, data.phase, station);
             } else if (msg.sender === "maintainer" && data.type === "phase_done") {
                 // 维护汇报：本阶段任务全部完成 → 转告 PM 请求下一阶段
                 console.log(`[architect] ← 维护：阶段 ${data.phase?.phase} 全部完成`);

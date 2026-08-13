@@ -37,7 +37,7 @@ station.register("manager", roles.manager);
 station.register("architect", roles.architect);
 station.register("backend1", roles.backendEngineer);
 station.register("frontend1", roles.frontendEngineer);
-station.register("merger", roles.unknown);        // 合并器：唯一装配点，不被负载均衡选择
+station.register("merger", roles.unknown);  // 合并器：唯一装配点，非角色成员（roles 枚举无 merger），按名字寻址，不被负载均衡选择
 station.register("testEngineer", roles.testEngineer);
 station.register("maintainer", roles.maintainer);
 

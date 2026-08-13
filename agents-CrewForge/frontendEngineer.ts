@@ -1,14 +1,17 @@
 import { ChatDeepSeek } from "@langchain/deepseek";
 import { SystemMessage } from "@langchain/core/messages";
 import * as z from "zod";
-import { Annotation, StateGraph, START, END, MemorySaver, type GraphNode } from "@langchain/langgraph";
 import fs from "node:fs";
 import path from "node:path";
-import { TransferStation, roles } from "./Hub.ts";   // 前端与架构师/测试的消息中转站 + 角色枚举
+import { TransferStation, roles, WorkQueue, llmWithTimeout } from "./Hub.ts";   // 中转站 + 角色枚举 + 工位队列 + 超时兜底
 
+// 前端全程非思考：契约自包含（后端契约照抄），执行性最强，要速度
+// thinking: {type:"disabled"} 是 DeepSeek v4 API 的关闭思考参数（实测有效）
 const model = new ChatDeepSeek({
     model: "deepseek-v4-flash",
-})
+    timeout: 120000,   // 单次调用 120s 超时：thinking 模型大输出可能很慢，但必须有界（挂起走重试）
+    thinking: { type: "disabled" },
+} as any)   // thinking 非 LangChain 官方字段，透传给 openai client
 
 // ============================================================
 // 前端工程师链路（v1）：前端任务 → 结构样式 → 逻辑脚本 → 完整组件
@@ -18,7 +21,7 @@ const model = new ChatDeepSeek({
 // 关键约定：
 //   - 结构节点产静态页面（引用主题变量 var()，禁写死颜色值）
 //   - 逻辑节点追加脚本（ref/handler 名必须与模板一致，用请求封装调任务描述里的接口）
-//   - 双工位流水线：structureGraph + logicGraph 并发循环（同 backendEngineer.ts）
+//   - 双工位流水线：结构工位(模板+样式) → 逻辑工位(补脚本+写盘)，信号量队列并行（同 backendEngineer.ts）
 //   - main 只筛 layer === "frontend" 的任务（后端任务留给 backendEngineer.ts）
 // ============================================================
 
@@ -53,46 +56,6 @@ interface CodeContent {
   description: string;
   files: CodeFile[];
 }
-
-const contentReducer = (
-  current: CodeContent[] = [],
-  update: CodeContent[] | CodeContent
-): CodeContent[] => {
-  if (Array.isArray(update) && update.length === 0) {
-    return [];
-  }
-  if (Array.isArray(update)) {
-    return [...current, ...update];
-  }
-  return [...current, update];
-};
-
-const MessageState = Annotation.Root({
-    execTasks: Annotation<ExecTask[]>({
-        default: () => [],
-        reducer: (_, u) => u,
-    }),
-    structures: Annotation<CodeContent[]>({
-        default: () => [],
-        reducer: contentReducer,   // 结构节点产出（模板+样式）
-    }),
-    logicCodes: Annotation<CodeContent[]>({
-        default: () => [],
-        reducer: contentReducer,   // 逻辑节点产出（完整组件）
-    }),
-    existingFiles: Annotation<{ filePath: string; code: string }[]>({
-        default: () => [],
-        reducer: (_, u) => u,   // 追加语义：同文件已由前面任务产出的内容，注入提示词（read→看懂→追加→保存）
-    }),
-    llmCalls: Annotation<number>({
-        default: () => 0,
-        reducer: (x, y) => x + y,
-    }),
-    project: Annotation<string>({
-        default: () => "",
-        reducer: (x) => x,
-    }),
-});
 
 // ---------- 基建占位（演示版） ----------
 // 正式版：架构师搭目录时产出 theme.css 和 request 封装，节点从 workspace 读取
@@ -183,155 +146,123 @@ const contentModel = model.withStructuredOutput(
   { method: "jsonMode", name: "extract_component" }
 );
 
-// ---------- 节点 ----------
-
-// 结构样式节点：队首前端任务 → 静态页面（模板+样式）
-// 删除逻辑：产出非空 → 出队；产出时把任务信息（交互/接口）并入 description，逻辑节点自包含
-const StructureNode: GraphNode<typeof MessageState.State> = async (state) => {
-    const currentTask = state.execTasks[0];
-    if (!currentTask) return {};  // 队列空，无事可做
-
-    const response = await contentModel.invoke([
-        new SystemMessage(
-            structure_prompt +
-            `\n\n## 当前任务\n${JSON.stringify(currentTask, null, 2)}` +
-            `\n\n## 主题变量\n${DEFAULT_THEME}` +
-            `\n\n## 请求封装\n${DEFAULT_REQUEST}`
-        ),
-    ]);
-
-    // 删除逻辑：有产出才出队；任务信息并入 description 传给逻辑节点
-    if (response.files.length > 0) {
-        return {
-            structures: [{ ...response, description: `【任务】${currentTask.title}\n${currentTask.description}\n【产出】${response.description}` }],
-            execTasks: state.execTasks.slice(1),
-            llmCalls: 1,
-        };
-    }
-    return { llmCalls: 1 };
-};
-
-// 逻辑节点：队首结构组件 → 补脚本 → 完整组件并输出
-// 删除逻辑：产出非空 → 输出 + 出队；空 → 留在队首，下轮重试
-const LogicNode: GraphNode<typeof MessageState.State> = async (state) => {
-    const currentStructure = state.structures[0];
-    if (!currentStructure) return {};  // 无待实现结构组件
-
-    // 追加语义：只把本次结构产出涉及文件（路径相同）的已有内容注入，避免无关文件刷屏
-    const existingContent = state.existingFiles.length > 0
-        ? `\n\n## 已存在的文件（追加语义：先读懂原内容，同路径文件在原有代码基础上追加/修改，保留已有代码和风格）\n${state.existingFiles.map(f => `--- ${f.filePath} ---\n${f.code}`).join("\n")}`
-        : "";
-
-    const response = await contentModel.invoke([
-        new SystemMessage(
-            logic_prompt +
-            `\n\n## 结构组件\n${JSON.stringify(currentStructure, null, 2)}` +
-            existingContent
-        ),
-    ]);
-
-    // 删除逻辑：有产出才输出出队；空产出留在队首（下次 invoke 重试）
-    if (response.files.length > 0) {
-        // 正式版：按 filePath 写盘到工作区（替换控制台输出）；路径净化防 .. 逃逸
-        for (const f of response.files) {
-            const safePath = f.filePath.replace(/^[/\\]+/, "").replace(/\.\./g, "");
-            const full = path.join("workspace", safePath);
-            fs.mkdirSync(path.dirname(full), { recursive: true });
-            fs.writeFileSync(full, f.code, "utf-8");
-            console.log(`✓ 已写入 ${full}`);
-        }
-        return { logicCodes: [response], structures: state.structures.slice(1), llmCalls: 1 };
-    }
-    return { llmCalls: 1 };
-};
-
-// ---------- 工具 ----------
-
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
-
-// ---------- 组装图 ----------
-// 双工位流水线：每个工位一个单节点图（节点化保留，未来映射 sys_agent_step）
-
-// 结构图：单节点（结构样式工位）
-const structureGraph = new StateGraph(MessageState)
-    .addNode("structure", StructureNode)
-    .addEdge(START, "structure")
-    .addEdge("structure", END)
-    .compile({ checkpointer: new MemorySaver() });
-
-// 逻辑图：单节点（逻辑工位）
-const logicGraph = new StateGraph(MessageState)
-    .addNode("logic", LogicNode)
-    .addEdge(START, "logic")
-    .addEdge("logic", END)
-    .compile({ checkpointer: new MemorySaver() });
-
-// ---------- 消息驱动版（参照 backendEngineer.ts） ----------
-// 消息协议（content 为 JSON 字符串）：
-//   架构师/合并器 → 前端: {"type": "task", "task": ExecTask}                 下发任务（layer 已筛过）/ 返工
-//   前端 → 合并器:        {"type": "task_result", "task": ExecTask, "success": bool} 干完活交合并器配对
-
-const writtenFiles = new Map<string, string>();   // 追加语义：filePath → 最新代码（跨任务共享，同文件先读懂再追加）
-
-// 处理单个任务（从 main() 的双工位流水线提炼）：结构图 → 逻辑图 → 写盘 workspace/
-// 返回是否成功（失败也交测试，测试按 task_result.success 判断）
-async function processOneTask(t: ExecTask): Promise<boolean> {
-    // 结构工位：每任务 invoke 一次结构图（重试 ≤3，防卡死）
-    let state: typeof MessageState.State | undefined;
-    for (let attempt = 1; attempt <= 3; attempt++) {
-        try {
-            state = await structureGraph.invoke(
-                { execTasks: [t], project: "workspace" },
-                { configurable: { thread_id: `fs-${t.id}` } }   // 每任务独立断点
-            );
-        } catch (e) {
-            console.log(`⚠️ ${t.id} LLM 调用失败（第 ${attempt} 次）：${(e as Error).message.slice(0, 80)}`);
-            state = undefined;
-            continue;
-        }
-        if (state.structures.length > 0) break;
-        console.log(`⚠️ ${t.id} 结构产出为空，重试 ${attempt}/3`);
-    }
-    if (!state || state.structures.length === 0) {
-        console.log(`❌ ${t.id} 连续 3 次失败，标记失败跳过`);
-        return false;
-    }
-    const s = state.structures[0]!;
-
-    // 追加语义：本次结构产出涉及的文件里，哪些已由前面任务产出 → 注入已有内容
-    const existing = [...writtenFiles.entries()]
-        .filter(([fp]) => s.files.some(f => f.filePath === fp))
-        .map(([filePath, code]) => ({ filePath, code }));
-
-    // 逻辑工位：invoke 逻辑图（输出组件在 LogicNode 里写盘）
-    let cstate: typeof MessageState.State | undefined;
-    for (let attempt = 1; attempt <= 3; attempt++) {
-        try {
-            cstate = await logicGraph.invoke(
-                { structures: [s], project: "workspace", existingFiles: existing },
-                { configurable: { thread_id: `fl-${s.description.slice(0, 20)}` } }
-            );
-        } catch (e) {
-            console.log(`⚠️ LLM 调用失败（第 ${attempt} 次）：${(e as Error).message.slice(0, 80)}`);
-            cstate = undefined;
-            continue;
-        }
-        const last = cstate.logicCodes[cstate.logicCodes.length - 1];
-        if (last && last.files.length > 0) break;   // 有产出才往下走
-        console.log(`⚠️ 组件产出为空，重试 ${attempt}/3`);
-    }
-    const last = cstate ? cstate.logicCodes[cstate.logicCodes.length - 1] : undefined;
-    if (!last || last.files.length === 0) {
-        console.log(`❌ 连续 3 次失败，标记失败跳过：${s.description.slice(0, 40)}`);
-        return false;
-    }
-    for (const f of last.files) writtenFiles.set(f.filePath, f.code);   // 记录最新内容，供后续任务追加
-    console.log(`✓ ${t.id} 组件已写入 workspace/`);
-    return true;
-}
+// ============================================================
+// 前端开发消息收发（参照 backendEngineer.ts 模板）
+//   消息协议（content 为 JSON 字符串）：
+//     架构师/合并器 → 前端: {"type": "task", "task": ExecTask}                 下发任务（layer 已筛过）/ 返工
+//     前端 → 合并器:        {"type": "task_result", "task": ExecTask, "success": bool} 干完活交合并器配对
+// ============================================================
 
 // 前端开发入口（函数化：接收 agent 名 + 共享中转站，由 start.ts 拉起）
+// name = "frontend1"/"frontend2"…（多开发负载均衡），station 是进程内全局唯一的站
+//
+// 真双工位流水线（信号量队列，非图，同 backendEngineer）：
+//   任务队列(structQueue) →【结构工位】(LLM 模板+样式) → 逻辑队列(logicQueue)
+//     →【逻辑工位】(LLM 补脚本 + 写盘) → 交合并器
 export async function runFrontend(name: string, station: TransferStation) {
+    const structQueue = new WorkQueue<{ task: ExecTask }>();        // 任务 → 结构工位
+    const logicQueue = new WorkQueue<{ task: ExecTask; structure: CodeContent }>();   // 结构 → 逻辑工位
+    const writtenFiles = new Map<string, string>();   // 追加语义：filePath → 最新代码（跨任务共享，同文件先读懂再追加）
+
+    // 结构工位：取任务 → LLM 模板+样式（重试 ≤3）→ 任务信息并入 description → 塞逻辑队列；失败上报
+    async function structureWorker() {
+        while (true) {
+            const { task } = await structQueue.pop();
+            let structure: CodeContent | null = null;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                const ts = Date.now();
+                try {
+                    const r = await llmWithTimeout(
+                        sig => contentModel.invoke([
+                            new SystemMessage(
+                                structure_prompt +
+                                `\n\n## 当前任务\n${JSON.stringify(task, null, 2)}` +
+                                `\n\n## 主题变量\n${DEFAULT_THEME}` +
+                                `\n\n## 请求封装\n${DEFAULT_REQUEST}`
+                            ),
+                        ], { signal: sig }),
+                        150000,
+                        `[${task.id}] 结构`
+                    );
+                    console.log(`[${task.id}] 结构 ${Date.now() - ts}ms`);
+                    if (r.files.length > 0) {
+                        // 任务信息并入 description，逻辑工位自包含（原 StructureNode 语义）
+                        structure = { ...r, description: `【任务】${task.title}\n${task.description}\n【产出】${r.description}` };
+                        break;
+                    }
+                    console.log(`⚠️ ${task.id} 结构产出为空，重试 ${attempt}/3`);
+                } catch (e) {
+                    console.log(`⚠️ ${task.id} 结构 LLM 失败（第 ${attempt} 次，${Date.now() - ts}ms）：${(e as Error).message.slice(0, 80)}`);
+                }
+            }
+            if (!structure) {
+                console.log(`❌ ${task.id} 结构连续 3 次失败，上报合并器`);
+                station.sendMessage(name, "merger", JSON.stringify({ type: "task_result", task, success: false }));
+                continue;
+            }
+            logicQueue.push({ task, structure });   // 立即开下一个任务，逻辑工位并行补脚本
+        }
+    }
+
+    // 逻辑工位：取结构 → 组装已有文件（追加语义）→ LLM 补脚本（重试 ≤3）→ 写盘 → 交合并器
+    async function logicWorker() {
+        while (true) {
+            const { task, structure } = await logicQueue.pop();
+
+            // 追加语义：本次结构涉及的文件里，哪些已由前面任务产出 → 注入已有内容
+            const existing = [...writtenFiles.entries()]
+                .filter(([fp]) => structure.files.some(f => f.filePath === fp))
+                .map(([filePath, code]) => ({ filePath, code }));
+            const existingContent = existing.length > 0
+                ? `\n\n## 已存在的文件（追加语义：先读懂原内容，同路径文件在原有代码基础上追加/修改，保留已有代码和风格）\n${existing.map(f => `--- ${f.filePath} ---\n${f.code}`).join("\n")}`
+                : "";
+
+            let last: CodeFile[] | null = null;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                const ts = Date.now();
+                try {
+                    const r = await llmWithTimeout(
+                        sig => contentModel.invoke([
+                            new SystemMessage(
+                                logic_prompt +
+                                `\n\n## 结构组件\n${JSON.stringify(structure, null, 2)}` +
+                                existingContent
+                            ),
+                        ], { signal: sig }),
+                        150000,
+                        `[${task.id}] 逻辑`
+                    );
+                    console.log(`[${task.id}] 逻辑 ${Date.now() - ts}ms`);
+                    if (r.files.length > 0) { last = r.files; break; }
+                    console.log(`⚠️ ${task.id} 逻辑产出为空，重试 ${attempt}/3`);
+                } catch (e) {
+                    console.log(`⚠️ ${task.id} 逻辑 LLM 失败（第 ${attempt} 次，${Date.now() - ts}ms）：${(e as Error).message.slice(0, 80)}`);
+                }
+            }
+            if (!last) {
+                console.log(`❌ ${task.id} 逻辑连续 3 次失败，上报合并器`);
+                station.sendMessage(name, "merger", JSON.stringify({ type: "task_result", task, success: false }));
+                continue;
+            }
+            // 写盘（路径净化防 .. 逃逸）+ 记录最新内容供后续任务追加
+            for (const f of last) {
+                const safePath = f.filePath.replace(/^[/\\]+/, "").replace(/\.\./g, "");
+                const full = path.join("workspace", safePath);
+                fs.mkdirSync(path.dirname(full), { recursive: true });
+                fs.writeFileSync(full, f.code, "utf-8");
+                console.log(`✓ 已写入 ${full}`);
+            }
+            for (const f of last) writtenFiles.set(f.filePath, f.code);
+            console.log(`✓ ${task.id} 组件已写入 workspace/`);
+            station.sendMessage(name, "merger", JSON.stringify({ type: "task_result", task, success: true }));
+            console.log(`[${name}] → 合并器：任务 ${task.id} 完成，等配对`);
+        }
+    }
+
+    // 两个工位并行拉起（各自挂在队列 pop 上；LLM 等待期间事件循环交替执行）
+    const w1 = structureWorker();
+    const w2 = logicWorker();
+
     async function messageLoop() {
         console.log(`[${name}] 消息监听已启动：等架构师下发任务`);
         while (true) {
@@ -344,31 +275,24 @@ export async function runFrontend(name: string, station: TransferStation) {
             const senderRole = station.status[msg.sender]?.role;
 
             if ((msg.sender === "architect" || msg.sender === "merger") && data.type === "task") {
-                // 架构师下发 / 合并器返工 → 干活（结构图 + 逻辑图 → 写盘 workspace/）
+                // 架构师下发 / 合并器返工 → 入结构队列（不 await，工位并行处理）
                 console.log(`[${name}] ← ${msg.sender}：收到任务 ${data.task?.id}（${data.task?.title}）`);
-                if (data.task) {
-                    const ok = await processOneTask(data.task);
-                    // 干完 → 交合并器配对（成功与否都交，success 由合并器判断是否返工）
-                    station.sendMessage(name, "merger", JSON.stringify({ type: "task_result", task: data.task, success: ok }));
-                    console.log(`[${name}] → 合并器：任务 ${data.task.id} ${ok ? "完成" : "失败"}，等配对`);
-                }
+                if (data.task) structQueue.push({ task: data.task });
             }
 
-            // 测试返工：revision（带问题清单）→ issues 拼进任务描述针对性修改 → 重新交合并器配对
+            // 测试返工：revision（带问题清单）→ issues 拼进任务描述针对性修改 → 重进结构队列
             if (senderRole === roles.testEngineer && data.type === "revision" && data.task) {
                 console.log(`[${name}] ← 测试：任务 ${data.task.id} 返工（${data.issues?.length ?? 0} 条意见）`);
                 const revised = {
                     ...data.task,
                     description: data.task.description + "\n\n【测试返工意见（必须逐条解决）】\n" + (data.issues ?? []).join("\n"),
                 };
-                const ok = await processOneTask(revised);
-                station.sendMessage(name, "merger", JSON.stringify({ type: "task_result", task: data.task, success: ok }));
-                console.log(`[${name}] → 合并器：任务 ${data.task.id} 返工${ok ? "完成" : "仍失败"}，重新交配`);
+                structQueue.push({ task: revised });
             }
             station.markDone(name);   // 处理完记账（负载均衡的数据基础：pendingCount -1）
         }
     }
 
-    // 挂住等消息（进程保持存活；干活在 messageLoop 里由消息触发）
+    // 挂住等消息（进程保持存活；结构/逻辑工位在后台并行运转）
     await messageLoop();
 }

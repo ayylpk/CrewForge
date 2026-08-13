@@ -2,15 +2,16 @@
 // 维护工程师（v2）：阶段门控——纯程序，零 LLM
 //
 //   收测试的 task_passed（通过的接口对）+ 架构师的 tasks_declared（任务声明）
-//   → 集合收敛判断：架构师声明 final=true 且所有已声明对都通过 → 阶段完成
+//   → 集合收敛判断：架构师声明 final=true 且所有已声明对都已定论（通过或放弃）→ 阶段完成
 //   → 发 phase_done 给架构师（架构师转告 PM 请求下一阶段）
 //
 // 设计：完成标准不预定义 N，由"声明 + 收敛"决定——
 //   架构师边发任务边声明（可动态追加/分批），维护按对 id 去重累积，
-//   final=true 表示本阶段不再有任务。阶段完成 = 声明耗尽 + 全部通过。
+//   final=true 表示本阶段不再有任务。阶段完成 = 声明耗尽 + 每对都有定论。
 //
 // 消息协议（content 为 JSON 字符串）：
 //   测试 → 维护:     {"type": "task_passed", "pair": {"back": ExecTask, "front": ExecTask|null}}
+//   合并器 → 维护:   {"type": "task_failed", "pairId": "T1"}   返工耗尽放弃的一对（也算定论，防阶段卡死）
 //   架构师 → 维护:   {"type": "tasks_declared", "phase": N, "pairIds": ["T1", ...], "final": bool}
 //   维护 → 架构师:   {"type": "phase_done", "phase": N}   （阶段完成信号）
 // ============================================================
@@ -41,6 +42,7 @@ export async function runMaintainer(station: TransferStation) {
     // 本阶段状态（每阶段完成时重置）：
     let declaredPairs = new Set<string>();   // 架构师声明的对（pairId，可动态追加）
     let passedPairs = new Set<string>();     // 已通过的对（pairId，按对去重）
+    let failedPairs = new Set<string>();     // 已放弃的对（返工耗尽，合并器上报）
     let declaredFinal = false;               // 架构师声明"本阶段拆完了，不再有任务"
     let currentPhase = 0;                    // 当前阶段号
 
@@ -62,6 +64,12 @@ export async function runMaintainer(station: TransferStation) {
                 passedPairs.add(key);
                 console.log(`[maintainer] ← 测试：${key} 通过（已收 ${passedPairs.size} 对）`);
                 handled = true;
+            } else if (msg.sender === "merger" && data.type === "task_failed" && data.pairId) {
+                // 合并器上报：返工耗尽放弃的一对 → 记失败（也算定论，保证阶段能收敛）
+                // 注意：merger 不是 roles 枚举成员（纯代码装配点、固定名单例），按名字判断
+                failedPairs.add(data.pairId);
+                console.log(`[maintainer] ← 合并器：${data.pairId} 放弃（已放弃 ${failedPairs.size} 对）`);
+                handled = true;
             } else if (senderRole === roles.architect && data.type === "tasks_declared") {
                 // 架构师声明任务（可多次追加；final=true 表示本阶段不再有）
                 currentPhase = data.phase ?? currentPhase;
@@ -71,13 +79,16 @@ export async function runMaintainer(station: TransferStation) {
                 handled = true;
             }
 
-            // 集合收敛判断：架构师说拆完了 && 所有已声明对都通过 → 阶段完成
-            if (handled && declaredFinal && declaredPairs.size > 0 && [...declaredPairs].every(p => passedPairs.has(p))) {
+            // 集合收敛判断：架构师说拆完了 && 每对都有定论（通过或放弃）→ 阶段完成
+            if (handled && declaredFinal && declaredPairs.size > 0
+                && [...declaredPairs].every(p => passedPairs.has(p) || failedPairs.has(p))) {
+                const failed = failedPairs.size;
                 station.sendMessage("maintainer", "architect", JSON.stringify({ type: "phase_done", phase: currentPhase }));
-                console.log(`[maintainer] → 架构师：阶段 ${currentPhase} 全部完成（${declaredPairs.size} 对全通过），请转告 PM 下一阶段`);
-                // 重置，等下一阶段（新声明 + 新通过）
+                console.log(`[maintainer] → 架构师：阶段 ${currentPhase} 完成（${declaredPairs.size} 对：通过 ${declaredPairs.size - failed}，放弃 ${failed}），请转告 PM 下一阶段`);
+                // 重置，等下一阶段（新声明 + 新通过 + 新失败）
                 declaredPairs = new Set();
                 passedPairs = new Set();
+                failedPairs = new Set();
                 declaredFinal = false;
             }
             station.markDone("maintainer");   // 处理完记账（负载均衡的数据基础）

@@ -1,12 +1,10 @@
 import { ChatDeepSeek } from "@langchain/deepseek";
 import * as z from "zod";
 import { HumanMessage, SystemMessage, type BaseMessage } from "@langchain/core/messages";
-import { TavilySearch } from "@langchain/tavily";
 import { Annotation, StateGraph, START, END, MemorySaver, type GraphNode, messagesStateReducer } from "@langchain/langgraph";
-import { ToolNode } from "@langchain/langgraph/prebuilt";
 import fs from "node:fs";
 import readline from "readline";
-import { TransferStation } from "./Hub.ts";   // PM 与架构师的消息中转站
+import { TransferStation, llmWithTimeout } from "./Hub.ts";   // PM 与架构师的消息中转站 + 超时兜底
 
 interface typeOfTasks{
   name: string,
@@ -68,6 +66,7 @@ const functionsReducer = (
 
 const model = new ChatDeepSeek({
     model: "deepseek-v4-flash",
+    timeout: 120000,   // 单次调用 120s 超时：thinking 模型大输出可能很慢，但必须有界（挂起走重试）
 })
 
 const rl = readline.createInterface({
@@ -86,7 +85,7 @@ const pm_system_prompt: string = `
 3. 输出清单：需求确认完成后，输出功能清单 JSON 交给下游（功能细化）消费
 
 ## 可用工具
-- web_search（Tavily 联网搜索）：查行业信息、竞品、价格行情、真实数据时使用；平时不需要。
+- 无（deepseek-v4-flash 思考模式不支持工具调用，仅靠对话澄清需求）
 
 ## 对话策略（核心）
 - 开场让用户自由说：先请用户描述想法（"你想做什么？"），不要一上来就列问题清单
@@ -120,11 +119,11 @@ const pm_system_prompt: string = `
     }
   ]
 }
-2. 用户明确表示功能确认完毕（如"就这些了""没别的了""定稿""没问题""可以""就这样吧"）→ 输出 {"done": true}
+2. 用户明确表示功能确认完毕（如"就这些了""没别的了""定稿""没问题""可以""就这样吧"）→ 输出 {"done": true}；如果本轮同时确认了新功能，则输出 {"features": [...], "done": true}（两个字段都要带）
 注意：
 - 确认新功能时【必须】输出 features JSON，文字列清单不算数
 - features 只放本轮新确认的，避免重复累积
-- 只有用户确认完毕时才输出 done；done 那一轮不要输出 features（done 轮不重复输出清单）
+- done 轮如有新确认的功能，必须同时输出 features 和 done（如用户一口气说完所有需求，一轮内既要入功能库又要标记完成）；只有本轮没有新功能时才只输出 {"done": true}
 - 每个 feature 都要有明确的 acceptance，且经过用户确认
 - 用户中途想加需求，就回到对话继续确认，不要急着输出 done
 
@@ -188,44 +187,28 @@ const plan_system_prompt: string = `
 - 不涉及技术选型
 
 ## 输出格式（必须遵守）
-只输出一段 JSON，不要夹带其他讨论：
+只输出一段 JSON，不要夹带其他讨论。注意：**不要输出 features 字段**（详细功能清单由系统自动继承，你负责规划部分）：
 {
   "project": "项目名称",
-  "features": [详细功能清单原样放回],
   "phases": [
     {
       "phase": 1,
       "name": "阶段名称",
       "goal": "这个阶段完成什么目标",
-      "features": ["功能1", "功能2"],
+      "features": ["功能名（必须与输入清单里的功能名完全一致）", "功能2"],
       "dependencies": [],
       "relative_effort": "大 | 中 | 小",
       "risk": "高 | 中 | 低"
     }
   ],
-  "mvp_scope": ["功能1", "功能2"],
+  "mvp_scope": ["功能名（必须与输入清单里的功能名完全一致）"],
   "risks": ["需要提前关注的风险"]
 }
 `
 
-const tavilySearchTool = new TavilySearch({
-  maxResults: 3,
-  searchDepth: "basic", 
-  includeAnswer:true,
-});
-
-const tools = [tavilySearchTool];
-
-// 工具名 → 工具实例 的映射，后面 ToolNode 按名字找工具用
-// （不用断言类型，TS 会自己推断成 Record<string, TavilySearch>）
-const toolsByName = Object.fromEntries(
-    tools.map(t => [t.name, t])
-);
-
-const modelWithTools = model.bindTools(tools);
-
-// 工具执行节点：模型要求调工具（如 web_search）时在这里真实执行
-const toolNode = new ToolNode(tools);
+// ⚠️ 工具调用已整体移除：deepseek-v4-flash 思考模式不支持 tool_choice（实测 invalid_request_error），
+// bindTools/ToolNode 会强制发 tool_choice；以后换支持工具的模型（如 deepseek-chat）再恢复
+// （原 Tavily web_search 工具见 git 历史）
 
 const MessagesState = Annotation.Root({
     messages: Annotation<BaseMessage[]>({
@@ -311,15 +294,15 @@ function parsePMResponse(response: BaseMessage): { newFunctions: FunctionItem[];
 
 // PM 节点：对话确认功能（确认一个写一个进 functions）
 const llmCalls: GraphNode<typeof MessagesState.State> = async (state) => {
-  // 系统提示词 + 完整对话历史拼一起发给模型
-  const response = await modelWithTools.invoke([
-    new SystemMessage(pm_system_prompt),
-    ...state.messages,
-  ]);
-  // 如果模型要求调工具（如 web_search），本轮先不解析功能，
-  // 让 ToolNode 执行工具后回到本节点继续对话
-  const hasToolCalls = response.tool_calls !== undefined && response.tool_calls.length > 0;
-  const { newFunctions, done } = hasToolCalls ? { newFunctions: [], done: false } : parsePMResponse(response);
+  // 系统提示词 + 完整对话历史拼一起发给模型（无工具：thinking 模型不支持 tool_choice）
+  const response = await llmWithTimeout(
+    sig => model.invoke([
+      new SystemMessage(pm_system_prompt),
+      ...state.messages,
+    ], { signal: sig }),
+    150000, "PM 对话"
+  );
+  const { newFunctions, done } = parsePMResponse(response);
   // messages：追加模型回复；llmCalls：加 1
   // functions：有新的才写（空数组会被 reducer 当成"清空"信号，所以没新功能时干脆不带这个字段）
   // flag：PM 任务是否完成
@@ -342,7 +325,7 @@ const disposeModel = model.withStructuredOutput(
       acceptance: z.string(),
     })),
   }),
-  { method: "functionCalling", name: "extract_tasks" }
+  { method: "jsonMode", name: "extract_tasks" }
 );
 
 const dispose: GraphNode<typeof MessagesState.State> = async (state) => {
@@ -352,26 +335,36 @@ const dispose: GraphNode<typeof MessagesState.State> = async (state) => {
     .map((fn, index) => `${index + 1}. ${fn.name}: ${fn.description}`)
     .join('\n');
 
-  // 2. 结构化输出直接拿 tasks（无兜底：schema 校验失败会抛错，由外层 catch 接住）
-  const parsed = await disposeModel.invoke([
-    new SystemMessage(detail_system_prompt + '\n\n## 功能清单\n' + functionsContent),
-  ]);
+  // 2. 结构化输出直接拿 tasks（重试 ≤3：flash 模型 jsonMode 偶发校验失败，重试不崩）
+  let parsed: Awaited<ReturnType<typeof disposeModel.invoke>> | undefined;
+  let ok = false;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      parsed = await llmWithTimeout(
+        sig => disposeModel.invoke([
+          new SystemMessage(detail_system_prompt + '\n\n## 功能清单\n' + functionsContent),
+        ], { signal: sig }),
+        150000, "功能细化"
+      );
+      ok = true;
+      break;
+    } catch (e) {
+      console.log(`⚠️ 功能细化 LLM 失败（第 ${attempt} 次）：${(e as Error).message.slice(0, 80)}`);
+    }
+  }
+  if (!ok) throw new Error("功能细化连续 3 次失败");
 
   // 3. 返回更新：tasks 追加、numberOfTasks 累加、functions 用空数组清空（reducer 约定）
-  return { tasks: parsed.tasks, numberOfTasks: parsed.tasks.length, functions: [] };
+  return { tasks: parsed!.tasks, numberOfTasks: parsed!.tasks.length, functions: [] };
 }
 
 // 规划节点：根据详细确认的功能（tasks）做轻量规划，产出 plan（最终输出）
 // 结构化输出，无兜底
+// features 字段不交给模型：模型输出容易把对象清单压成字符串（flash 模型指令遵循弱），
+// 由 planner 节点用 state.tasks 程序化继承（确定性逻辑走代码，见 planner 节点）
 const plannerModel = model.withStructuredOutput(
   z.object({
     project: z.string(),
-    features: z.array(z.object({
-      name: z.string(),
-      description: z.string(),
-      priority: z.string(),
-      acceptance: z.string(),
-    })),
     phases: z.array(z.object({
       phase: z.number(),
       name: z.string(),
@@ -384,7 +377,7 @@ const plannerModel = model.withStructuredOutput(
     mvp_scope: z.array(z.string()),
     risks: z.array(z.string()),
   }),
-  { method: "functionCalling", name: "extract_plan" }
+  { method: "jsonMode", name: "extract_plan" }   
 );
 
 const planner: GraphNode<typeof MessagesState.State> = async (state) => {
@@ -393,23 +386,37 @@ const planner: GraphNode<typeof MessagesState.State> = async (state) => {
     .map((t, i) => `${i + 1}. ${t.name}（${t.priority}）：${t.description} | 验收：${t.acceptance}`)
     .join('\n');
 
-  // 2. 结构化输出直接拿 plan（无兜底：失败即抛错）
-  const plan = await plannerModel.invoke([
-    new SystemMessage(plan_system_prompt + '\n\n## 已确认的详细功能清单\n' + tasksContent),
-  ]);
+  // 2. 结构化输出直接拿规划（重试 ≤3；模型不输出 features）
+  let parsed: Awaited<ReturnType<typeof plannerModel.invoke>> | undefined;
+  let ok = false;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      parsed = await llmWithTimeout(
+        sig => plannerModel.invoke([
+          new SystemMessage(plan_system_prompt + '\n\n## 已确认的详细功能清单\n' + tasksContent),
+        ], { signal: sig }),
+        150000, "阶段规划"
+      );
+      ok = true;
+      break;
+    } catch (e) {
+      console.log(`⚠️ 阶段规划 LLM 失败（第 ${attempt} 次）：${(e as Error).message.slice(0, 80)}`);
+    }
+  }
+  if (!ok) throw new Error("阶段规划连续 3 次失败");
 
-  // 3. 覆盖写进 state.plan
+  // 3. features 程序化继承：模型只规划，功能清单原样继承（确定性逻辑走代码，防模型压成字符串）
+  const plan: Plan = { ...parsed!, features: state.tasks };
+
+  // 4. 覆盖写进 state.plan
   return { plan };
 }
 
 // 路由节点（条件边）：PM 回复后决定图往哪走
-const afterPm = (state: typeof MessagesState.State): "tools" | "dispose" | "__end__" => {
-  // 1. 模型要求调工具（如 web_search）→ 去 ToolNode 执行，执行完回到 pm 继续对话
-  const lastMessage = state.messages[state.messages.length - 1] as { tool_calls?: unknown[] };
-  if (lastMessage?.tool_calls && lastMessage.tool_calls.length > 0) return "tools";
-  // 2. 有已确认的功能 → 去细化（先 functions 后 flag 的顺序）
+const afterPm = (state: typeof MessagesState.State): "dispose" | "__end__" => {
+  // 1. 有已确认的功能 → 去细化（先 functions 后 flag 的顺序）
   if (state.functions.length > 0) return "dispose";
-  // 3. 没有待细化的功能 → 本轮图结束（flag 由应用层读取，决定整个对话是否收尾）
+  // 2. 没有待细化的功能 → 本轮图结束（flag 由应用层读取，决定整个对话是否收尾）
   return "__end__";
 };
 
@@ -418,12 +425,10 @@ const afterPm = (state: typeof MessagesState.State): "tools" | "dispose" | "__en
 // checkpointer：MemorySaver + 相同 thread_id = 状态跨轮保存（否则每轮 invoke 状态都会重置）
 const graph = new StateGraph(MessagesState)
   .addNode("pm", llmCalls)
-  .addNode("tools", toolNode)
   .addNode("dispose", dispose)
   .addNode("planner", planner)
   .addEdge(START, "pm")
   .addConditionalEdges("pm", afterPm)
-  .addEdge("tools", "pm") // 工具执行完回到 PM 继续对话
   .addEdge("dispose", "planner")
   .addEdge("planner", END)
   .compile({ checkpointer: new MemorySaver() });
@@ -438,15 +443,12 @@ const graph = new StateGraph(MessagesState)
 //   对话图该转继续转，互不阻塞
 // ============================================================
 
-// 取 plan.json 里"完成阶段号 + 1"的下一个阶段；没有则返回 null（全部完成）
-function nextPhase(after: number): planItem | null {
-    const plan = JSON.parse(fs.readFileSync("plan.json", "utf-8")) as Plan;
-    return plan.phases.find(p => p.phase === after + 1) ?? null;
-}
-
 // PM 入口（函数化：单例，名字写死 "manager"；由 start.ts 拉起）
 // 双循环：消息循环后台跑（等架构师请求下一阶段），主对话图照常运转
+// 纯消息化：全量 plan 由 phase_plan 消息携带（不再写/读 plan.json），currentPlan 是唯一持有者
 export async function runManager(station: TransferStation) {
+  let currentPlan: Plan | null = null;   // 对话完成时赋值，消息循环用它调度阶段
+
   // PM 消息循环：等架构师的"请求下一阶段" → 下发下一阶段
   // 不 await 这个循环，它后台跑；主对话图照常运转
   async function messageLoop() {
@@ -459,11 +461,12 @@ export async function runManager(station: TransferStation) {
           if (data.type !== "phase_request") continue;                   // 只认"请求下一阶段"信号（架构师转告的）
 
           console.log(`PM ← 架构师：阶段 ${data.phase} 完成`);
-          const next = nextPhase(data.phase!);
+          // 取"完成阶段号 + 1"的下一个阶段；没有则全部完成
+          const next = currentPlan?.phases.find(p => p.phase === data.phase! + 1) ?? null;
           if (!next) { console.log("PM：全部阶段已完成，项目交付"); continue; }
 
-          // 下发下一个阶段
-          station.sendMessage("manager", "architect", JSON.stringify({ type: "phase_plan", phase: next }));
+          // 下发下一个阶段（消息携带全量 plan，架构师不再读文件）
+          station.sendMessage("manager", "architect", JSON.stringify({ type: "phase_plan", phase: next, plan: currentPlan }));
           console.log(`PM → 架构师：下发阶段 ${next.phase}（${next.name}）`);
 
           station.markDone("manager");   // 处理完记账（负载均衡的数据基础：pendingCount -1）
@@ -475,7 +478,14 @@ export async function runManager(station: TransferStation) {
   console.log("我是你的项目经理助手,请告诉我你想要一个什么样子的项目，有哪些功能和需求");
   console.log("输入 'exit' 退出程序\n");
 
+  let stdinClosed = false;   // stdin EOF 标记：管道/重定向模式下（无真人输入），LLM 失败重试时不再 question，直接退出
+  rl.on("close", () => { stdinClosed = true; });
+
   while(true){
+    if (stdinClosed) {
+      console.log("输入流已关闭（EOF），对话结束。");
+      break;
+    }
     const userInput = await new Promise<string>((resolve) => {
       rl.question("你: ",resolve);
     });
@@ -517,18 +527,19 @@ export async function runManager(station: TransferStation) {
           });
           console.log(`\n风险：${result.plan.risks.join("；")}`);
           console.log("============================================");
-          // 落盘交接：架构师（architect.ts）从 plan.json 接手
-          fs.writeFileSync("plan.json", JSON.stringify(result.plan, null, 2));
-          console.log("规划已保存到 plan.json，下一步：bun run executor.ts");
-          // 新增：规划落盘后，PM 进入阶段调度——先给架构师下发阶段 1
+          // 纯消息化：plan 不再落盘，currentPlan 持有全量，阶段调度全走消息
+          currentPlan = result.plan;
+          console.log("规划完成，PM 进入阶段调度：全量 plan 随消息直传架构师。");
+          // 先给架构师下发阶段 1（消息携带全量 plan）
           const phases = result.plan.phases;
           if (phases.length > 0) {
-              const first = phases[0]!;  
-              station.sendMessage("manager", "architect", JSON.stringify({ type: "phase_plan", phase: first }));
+              const first = phases[0]!;
+              station.sendMessage("manager", "architect", JSON.stringify({ type: "phase_plan", phase: first, plan: currentPlan }));
               console.log(`PM → 架构师：下发阶段 1：${first.name}`);
           }
         } else {
           console.log("\n⚠️ 规划未生成（plan 为空），请重试。");
+          process.exit(1);   // 无 plan 就没有阶段可调度，挂住等消息只会死等，直接退出
         }
         break;
       }
@@ -541,5 +552,10 @@ export async function runManager(station: TransferStation) {
   rl.close();
 
   // 对话结束，PM 进入阶段调度模式：挂起等架构师消息（进程保持存活）
+  // 防御：没有全量 plan 就说明没有阶段可调度（对话未完成/规划失败），挂等只会死等，直接退出
+  if (!currentPlan) {
+    console.log("⚠️ 未生成规划（currentPlan 为空），无可调度阶段，进程退出。");
+    process.exit(1);
+  }
   await msgLoop;
 }

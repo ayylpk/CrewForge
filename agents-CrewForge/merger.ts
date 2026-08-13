@@ -38,10 +38,15 @@ interface PendingPair {
   front?: ExecTask;
   backOk?: boolean;
   frontOk?: boolean;
+  reworkCount: number;   // 已返工轮数：≥3 放弃（防 LLM 持续失败无限返工）
 }
 
 // 配对缓存：pairId → 半成品对（后端先到、前端后到，谁先到都行）
 const pending = new Map<string, PendingPair>();
+
+// 交付缓存：pairId → 最近一次成功交付的完整对
+// 用途：测试 revision 返工后，半边交回时对侧缺失（对侧没被判错、没在重做）→ 用缓存补位配对
+const deliveredCache = new Map<string, PendingPair>();
 
 // 合并器入口（函数化：唯一装配点，单例，名字写死 "merger"；由 start.ts 拉起）
 export async function runMerger(station: TransferStation) {
@@ -50,32 +55,68 @@ export async function runMerger(station: TransferStation) {
         while (true) {
             const msg = await station.waitForMessage("merger");
             if (!msg) continue;
-            let data: { type?: string; task?: ExecTask; success?: boolean };
+            let data: { type?: string; task?: ExecTask; success?: boolean; phase?: number };
             try { data = JSON.parse(msg.content); } catch { continue; }
+
+            // 新阶段开始：清空配对/交付缓存（任务 id 每阶段从 T1 重新编号，防跨阶段撞 key）
+            if (data.type === "phase_reset") {
+                pending.clear();
+                deliveredCache.clear();
+                console.log(`[merger] 阶段 ${data.phase} 开始：配对/交付缓存已重置`);
+                station.markDone("merger");
+                continue;
+            }
+
             if (data.type !== "task_result" || !data.task) continue;
 
             // 配对 key：前端剥 "-F"（T1-F → T1），后端原样（T1 → T1）——谁先到都进同一个槽位
             const pairKey = data.task.id.endsWith("-F") ? data.task.id.slice(0, -2) : data.task.id;
 
             // 放进等待中的对（后端/前端各占一位；先到的占位，后到的补位）
-            const slot = pending.get(pairKey) ?? {};
+            // 不存在则直接建 key（测试 revision 返工后半边交回：slot 已删，这里重建）
+            const slot = pending.get(pairKey) ?? { reworkCount: 0 };
             if (data.task.layer === "backend") { slot.back = data.task; slot.backOk = data.success; }
             else { slot.front = data.task; slot.frontOk = data.success; }
+            // 对侧缺失 → 从交付缓存补位（对侧没被判错就没在重做，旧交付即最终版）
+            const cached = deliveredCache.get(pairKey);
+            if (!slot.back && cached?.back) { slot.back = cached.back; slot.backOk = cached.backOk; }
+            if (!slot.front && cached?.front) { slot.front = cached.front; slot.frontOk = cached.frontOk; }
             pending.set(pairKey, slot);
 
             const mark = (v?: boolean) => v === undefined ? "…" : v ? "✓" : "✗";
             console.log(`[merger] ← ${msg.sender}：${data.task.id} ${data.success ? "成功" : "失败"}，${pairKey} 状态：后端${mark(slot.backOk)} 前端${mark(slot.frontOk)}`);
 
-            // 失败的半边 → 发回对应开发返工（和架构师下发同协议 task），清掉成败标记等返工结果
-            if (slot.backOk === false && slot.back) {
-                station.sendMessage("merger", "backend", JSON.stringify({ type: "task", task: slot.back }));
-                slot.backOk = undefined;
-                console.log(`[merger] → backend：${slot.back.id} 返工`);
-            }
-            if (slot.frontOk === false && slot.front) {
-                station.sendMessage("merger", "frontend", JSON.stringify({ type: "task", task: slot.front }));
-                slot.frontOk = undefined;
-                console.log(`[merger] → frontend：${slot.front.id} 返工`);
+            // 返工轮次：本次配对任一失败 → reworkCount +1（防 LLM 持续失败无限返工）
+            if (slot.backOk === false || slot.frontOk === false) slot.reworkCount += 1;
+
+            if (slot.reworkCount >= 3) {
+                // 放弃该对：通知维护记失败（保证阶段能收敛，不会卡死），清理配对缓存
+                station.sendMessage("merger", "maintainer", JSON.stringify({ type: "task_failed", pairId: pairKey }));
+                console.log(`[merger] ⚠️ ${pairKey} 返工 ${slot.reworkCount} 轮仍失败，放弃并上报维护`);
+                pending.delete(pairKey);
+            } else {
+                // 失败的半边 → 发回对应开发返工（和架构师下发同协议 task），清掉成败标记等返工结果
+                // 目标用 pickLeastBusy 按角色选（多开发场景不写死名字：backend1/backend2 谁闲选谁）
+                if (slot.backOk === false && slot.back) {
+                    const target = station.pickLeastBusy(roles.backendEngineer);
+                    if (target) {
+                        station.sendMessage("merger", target, JSON.stringify({ type: "task", task: slot.back }));
+                        slot.backOk = undefined;   // 等返工结果重新填
+                        console.log(`[merger] → ${target}：${slot.back.id} 返工`);
+                    } else {
+                        console.log(`⚠️ 没有后端开发注册，${slot.back.id} 返工发送失败，滞留等待`);
+                    }
+                }
+                if (slot.frontOk === false && slot.front) {
+                    const target = station.pickLeastBusy(roles.frontendEngineer);
+                    if (target) {
+                        station.sendMessage("merger", target, JSON.stringify({ type: "task", task: slot.front }));
+                        slot.frontOk = undefined;   // 等返工结果重新填
+                        console.log(`[merger] → ${target}：${slot.front.id} 返工`);
+                    } else {
+                        console.log(`⚠️ 没有前端开发注册，${slot.front.id} 返工发送失败，滞留等待`);
+                    }
+                }
             }
 
             // 配齐且都成功 → 发给测试（按对负载均衡：一对一个测试）
@@ -84,7 +125,9 @@ export async function runMerger(station: TransferStation) {
                 if (!test) { console.log(`⚠️ 没有测试注册，${pairKey} 滞留等待`); continue; }
                 station.sendMessage("merger", test, JSON.stringify({ type: "pair_ready", pair: { back: slot.back, front: slot.front } }));
                 console.log(`[merger] → ${test}：${pairKey} 配对完成（后端 ${slot.back.id} + 前端 ${slot.front.id}）`);
-                pending.delete(pairKey);   // 交付完成，回收
+                // 交付完成：留档交付缓存（返工半边交回时补位用），pending 回收
+                deliveredCache.set(pairKey, { back: slot.back, front: slot.front, backOk: true, frontOk: true, reworkCount: 0 });
+                pending.delete(pairKey);
             }
         }
     }

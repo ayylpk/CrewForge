@@ -157,3 +157,78 @@ export class TransferStation{
         return this.getStatus(receiver).pendingCount > 0;
     }
 }
+
+// 信号量工作队列：push 入队唤醒，pop 阻塞等待（事件循环内 wait/set 模式）
+// 用途：开发工位流水线（伪代码工位 → 代码工位），双工位并行独立循环
+export class WorkQueue<T> {
+    private items: T[] = [];
+    private _resolve: (() => void) | null = null;
+
+    push(item: T): void {
+        this.items.push(item);
+        this._resolve?.();        // 唤醒等待中的消费者
+        this._resolve = null;
+    }
+
+    async pop(): Promise<T> {
+        while (this.items.length === 0) {
+            await new Promise<void>(res => { this._resolve = res; });   // 挂住等信号
+        }
+        return this.items.shift()!;
+    }
+}
+
+// 信号量（Semaphore）：并发上限控制。limit=1 时即互斥锁
+// 用途：全局 LLM 请求限流——实测 DeepSeek 大输出请求同一瞬间扎堆会全部卡死（3 并发 60s 全无响应），
+// 错开启动的并发则正常。所以闸门 = 并发上限 + 启动间隔双保险
+export class Semaphore {
+    private available: number;
+    private waiters: (() => void)[] = [];
+
+    constructor(limit: number) { this.available = limit; }
+
+    // 取锁：有额度直接拿（-1）；满员排队等，锁由 release 移交
+    async acquire(): Promise<void> {
+        if (this.available > 0) { this.available--; return; }
+        await new Promise<void>(res => this.waiters.push(res));
+    }
+
+    // 还锁：有人排队 → 锁直接移交；没人 → 归还配额
+    release(): void {
+        const next = this.waiters.shift();
+        if (next) next();
+        else this.available++;
+    }
+}
+
+// 全局 LLM 闸门：并发 ≤2 + 启动间隔 3s（实测同刻扎堆 3 个大请求全挂，错开没事）
+const llmGate = new Semaphore(2);
+const LAUNCH_INTERVAL_MS = 3000;
+let lastLaunchAt = 0;
+
+
+export async function llmWithTimeout<T>(
+    call: (signal: AbortSignal) => Promise<T>,
+    ms: number,
+    label: string
+): Promise<T> {
+
+    await llmGate.acquire();
+    
+    const gap = lastLaunchAt + LAUNCH_INTERVAL_MS - Date.now();
+    if (gap > 0) await new Promise<void>(r => setTimeout(r, gap));
+    lastLaunchAt = Date.now();
+
+    //超时兜底：150s 无响应强制中止（排队时间不占用超时窗口）
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => {
+        ctrl.abort();
+        console.log(`⚠️ ${label} 超时 ${Math.round(ms / 1000)}s，强制中止`);
+    }, ms);
+    try {
+        return await call(ctrl.signal);
+    } finally {
+        clearTimeout(timer);
+        llmGate.release();
+    }
+}

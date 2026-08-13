@@ -1,14 +1,22 @@
 import { ChatDeepSeek } from "@langchain/deepseek";
 import { SystemMessage } from "@langchain/core/messages";
 import * as z from "zod";
-import { Annotation, StateGraph, START, END, MemorySaver, type GraphNode } from "@langchain/langgraph";
 import fs from "node:fs";
 import path from "node:path";
-import { TransferStation, roles } from "./Hub.ts";   // 后端与架构师/测试的消息中转站 + 角色枚举
+import { TransferStation, roles, WorkQueue, llmWithTimeout } from "./Hub.ts";   // 中转站 + 角色枚举 + 工位队列 + 超时兜底
 
+// 双实例分工：伪代码图用思考模式（设计业务逻辑要推理）；代码图用非思考（契约已定，执行性展开，快+省 token）
+// thinking: {type:"disabled"} 是 DeepSeek v4 API 的关闭思考参数（实测有效）
 const model = new ChatDeepSeek({
     model: "deepseek-v4-flash",
+    timeout: 120000,   // 单次调用 120s 超时：thinking 模型大输出可能很慢，但必须有界（挂起走重试）
 })
+
+const codeModelBase = new ChatDeepSeek({
+    model: "deepseek-v4-flash",
+    timeout: 120000,
+    thinking: { type: "disabled" },   // 非思考：代码展开是执行性工作，要速度
+} as any)   // thinking 非 LangChain 官方字段，透传给 openai client
 
 //   [
 //     {
@@ -65,72 +73,9 @@ interface CodeFile {
 
 // 1. 伪代码接口（设计阶段）
 interface PseudoCode {
-  description: string;      
-  files: CodeFile[];        
+  description: string;
+  files: CodeFile[];
 }
-
-// 2. 实际代码接口（实现阶段）
-interface CodeContent {
-  description: string;      
-  files: CodeFile[];      
-}
-
-const PseudoCodeReducer = (
-  current: PseudoCode[] = [],
-  update: PseudoCode[] | PseudoCode
-): PseudoCode[] => {
-  if (Array.isArray(update) && update.length === 0) {
-    return [];
-  }
-  if (Array.isArray(update)) {
-    return [...current, ...update];
-  }
-  return [...current, update];
-};
-
-const codeContentReducer = (
-  current: CodeContent[] = [],
-  update: CodeContent[] | CodeContent
-): CodeContent[] => {
-  if (Array.isArray(update) && update.length === 0) {
-    return [];
-  }
-  if (Array.isArray(update)) {
-    return [...current, ...update];
-  }
-  return [...current, update];
-};
-
-const MessageState = Annotation.Root({
-    execTasks: Annotation<ExecTask[]>({
-        default: () => [],
-        reducer: (_, u) => u,
-    }),
-    pseudoCodes: Annotation<PseudoCode[]> ({
-        default: () => [],
-        reducer: PseudoCodeReducer,
-    }),
-    codeContents: Annotation<CodeContent[]>({
-        default: () => [],
-        reducer: codeContentReducer,
-    }),
-    existingFiles: Annotation<{ filePath: string; code: string }[]>({
-        default: () => [],
-        reducer: (_, u) => u,   // 追加语义：同文件已由前面任务产出的内容，注入提示词（read→看懂→追加→保存）
-    }),
-    summary: Annotation<number>({
-        default: () => 0,
-        reducer: (x, y) => x + y,
-    }),
-    llmCalls: Annotation<number>({
-        default: () => 0,
-        reducer: (x, y) => x + y,
-    }),
-    project: Annotation<string>({
-        default: () => "",
-        reducer: (x) => x
-    })
-});
 
 
 // ---------- 伪代码提示词 ----------
@@ -181,29 +126,6 @@ const pseudoModel = model.withStructuredOutput(
   { method: "jsonMode", name: "extract_pseudo_code" }
 );
 
-// ---------- 节点 ----------
-
-// 伪代码节点：每次只处理队首任务（execTasks[0]），产出追加进 pseudoCodes
-// 删除逻辑：产出非空（files.length > 0）→ 出队（slice(1)）；空 → 留在队首，下轮重试
-const PseudoCodeNode: GraphNode<typeof MessageState.State> = async (state) => {
-    const currentTask = state.execTasks[0];
-    if (!currentTask) return {};  // 队列空，无事可做
-
-    const response = await pseudoModel.invoke([
-        new SystemMessage(
-            pseudo_prompt +
-            `\n\n## 当前任务\n${JSON.stringify(currentTask, null, 2)}` +
-            `\n\n## 项目路径\n${state.project || "workspace"}`
-        ),
-    ]);
-
-    // 删除逻辑：有产出才出队；空产出留在队首（下次 invoke 重试）
-    if (response.files.length > 0) {
-        return { pseudoCodes: [response], execTasks: state.execTasks.slice(1), llmCalls: 1 };
-    }
-    return { llmCalls: 1 };
-};
-
 // ---------- 实际代码提示词 ----------
 
 // 核心策略：把伪代码展开成完整可运行代码（逻辑占位 → 真实实现），保持 filePath 不动
@@ -237,7 +159,7 @@ const code_prompt: string = `
 
 // ---------- 结构化输出模型 ----------
 
-const codeModel = model.withStructuredOutput(
+const codeModel = codeModelBase.withStructuredOutput(
   z.object({
     description: z.string(),
     files: z.array(z.object({
@@ -249,65 +171,6 @@ const codeModel = model.withStructuredOutput(
   { method: "jsonMode", name: "extract_code" }
 );
 
-// ---------- 节点 ----------
-
-// 实际代码节点：每次只处理队首伪代码（pseudoCodes[0]），展开成完整代码并写盘
-// 删除逻辑：产出非空（files.length > 0）→ 写盘 + 出队（slice(1)）；空 → 留在队首，下轮重试
-const CodeWriterNode: GraphNode<typeof MessageState.State> = async (state) => {
-    const currentPseudo = state.pseudoCodes[0];
-    if (!currentPseudo) return {};  // 无待实现伪代码
-
-    // 追加语义：只把本次伪代码涉及文件（路径相同）的已有内容注入，避免无关文件刷屏
-    const existingContent = state.existingFiles.length > 0
-        ? `\n\n## 已存在的文件（追加语义：先读懂原内容，同路径文件在原有代码基础上追加/修改，保留已有代码和风格）\n${state.existingFiles.map(f => `--- ${f.filePath} ---\n${f.code}`).join("\n")}`
-        : "";
-
-    const response = await codeModel.invoke([
-        new SystemMessage(
-            code_prompt +
-            `\n\n## 伪代码\n${JSON.stringify(currentPseudo, null, 2)}` +
-            existingContent
-        ),
-    ]);
-
-    // 删除逻辑：有产出才出队；空产出留在队首（下次 invoke 重试）
-    if (response.files.length > 0) {
-        // 正式版：按 filePath 写盘到工作区（替换控制台输出）；路径净化防 .. 逃逸
-        for (const f of response.files) {
-            const safePath = f.filePath.replace(/^[/\\]+/, "").replace(/\.\./g, "");
-            const full = path.join("workspace", safePath);
-            fs.mkdirSync(path.dirname(full), { recursive: true });
-            fs.writeFileSync(full, f.code, "utf-8");
-            console.log(`✓ 已写入 ${full}`);
-        }
-        return { codeContents: [response], pseudoCodes: state.pseudoCodes.slice(1), llmCalls: 1 };
-    }
-    return { llmCalls: 1 };
-};
-
-// ---------- 工具 ----------
-
-const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
-
-// ---------- 组装图 ----------
-// 双工位流水线：每个工位一个单节点图（节点化保留，未来映射 sys_agent_step）
-
-// 伪代码图：单节点（B 工位）
-const pseudoGraph = new StateGraph(MessageState)
-    .addNode("pseudoCode", PseudoCodeNode)
-    .addEdge(START, "pseudoCode")
-    .addEdge("pseudoCode", END)
-    .compile({ checkpointer: new MemorySaver() });
-
-// 代码图：单节点（C 工位）
-const codeGraph = new StateGraph(MessageState)
-    .addNode("codeWriter", CodeWriterNode)
-    .addEdge(START, "codeWriter")
-    .addEdge("codeWriter", END)
-    .compile({ checkpointer: new MemorySaver() });
-
-// ---------- 双工位流水线（图 + 并发循环） ----------
-
 // ============================================================
 // 后端开发消息收发（参照 architect.ts 模板）
 //   消息协议（content 为 JSON 字符串）：
@@ -315,69 +178,113 @@ const codeGraph = new StateGraph(MessageState)
 //     后端 → 合并器:        {"type": "task_result", "task": ExecTask, "success": bool} 干完活交合并器配对
 // ============================================================
 
-const writtenFiles = new Map<string, string>();   // 追加语义：filePath → 最新代码（跨任务共享，同文件先读懂再追加）
-
-// 处理单个任务（从 main() 的双工位流水线提炼）：伪代码图 → 代码图 → 写盘 workspace/
-// 返回是否成功（失败也交测试，测试按 task_result.success 判断）
-async function processOneTask(t: ExecTask): Promise<boolean> {
-    // B 工位：伪代码图（重试 ≤3，防卡死）
-    let state: typeof MessageState.State | undefined;
-    for (let attempt = 1; attempt <= 3; attempt++) {
-        try {
-            state = await pseudoGraph.invoke(
-                { execTasks: [t], project: "workspace" },
-                { configurable: { thread_id: `b-${t.id}` } }   // 每任务独立断点
-            );
-        } catch (e) {
-            console.log(`⚠️ ${t.id} LLM 调用失败（第 ${attempt} 次）：${(e as Error).message.slice(0, 80)}`);
-            state = undefined;
-            continue;
-        }
-        if (state.pseudoCodes.length > 0) break;
-        console.log(`⚠️ ${t.id} 伪代码产出为空，重试 ${attempt}/3`);
-    }
-    if (!state || state.pseudoCodes.length === 0) {
-        console.log(`❌ ${t.id} 连续 3 次失败，标记失败跳过`);
-        return false;
-    }
-    const p = state.pseudoCodes[0]!;
-
-    // 追加语义：本次伪代码涉及的文件里，哪些已由前面任务产出 → 注入已有内容（read→看懂→追加→保存）
-    const existing = [...writtenFiles.entries()]
-        .filter(([fp]) => p.files.some(f => f.filePath === fp))
-        .map(([filePath, code]) => ({ filePath, code }));
-
-    // C 工位：代码图（重试 ≤3）
-    let cstate: typeof MessageState.State | undefined;
-    for (let attempt = 1; attempt <= 3; attempt++) {
-        try {
-            cstate = await codeGraph.invoke(
-                { pseudoCodes: [p], project: "workspace", existingFiles: existing },
-                { configurable: { thread_id: `c-${p.description}` } }
-            );
-        } catch (e) {
-            console.log(`⚠️ LLM 调用失败（第 ${attempt} 次）：${(e as Error).message.slice(0, 80)}`);
-            cstate = undefined;
-            continue;
-        }
-        const last = cstate.codeContents[cstate.codeContents.length - 1];
-        if (last && last.files.length > 0) break;   // 有产出才往下走
-        console.log(`⚠️ 代码产出为空，重试 ${attempt}/3`);
-    }
-    const last = cstate ? cstate.codeContents[cstate.codeContents.length - 1] : undefined;
-    if (!last || last.files.length === 0) {
-        console.log(`❌ 连续 3 次失败，标记失败跳过：${p.description.slice(0, 40)}`);
-        return false;
-    }
-    for (const f of last.files) writtenFiles.set(f.filePath, f.code);   // 记录最新内容，供后续任务追加
-    console.log(`✓ ${t.id} 代码已写入 workspace/`);
-    return true;
-}
-
-// 后端消息循环：收架构师的任务 → 干活（processOneTask）→ 交测试
 // 后端开发入口（函数化：接收 agent 名 + 共享中转站，由 start.ts 拉起）
 // name = "backend1"/"backend2"…（多开发负载均衡），station 是进程内全局唯一的站
+//
+// 真双工位流水线（信号量队列，非图）：
+//   任务队列(pseudoQueue) →【伪代码工位】(LLM 伪代码) → 代码队列(codeQueue)
+//     →【代码工位】(LLM 展开 + 写盘) → 交合并器
+//   两个工位是独立循环：伪代码写完一个任务立刻开下一个，代码工位同时展开上一个——并行流水线
 export async function runBackend(name: string, station: TransferStation) {
+    const pseudoQueue = new WorkQueue<{ task: ExecTask }>();        // 任务 → 伪代码工位
+    const codeQueue = new WorkQueue<{ task: ExecTask; pseudo: PseudoCode }>();   // 伪代码 → 代码工位
+    const writtenFiles = new Map<string, string>();   // 追加语义：filePath → 最新代码（跨任务共享，同文件先读懂再追加）
+
+    // 伪代码工位：取任务 → LLM 写伪代码（重试 ≤3）→ 塞代码队列；失败直接上报合并器
+    async function pseudoWorker() {
+        while (true) {
+            const { task } = await pseudoQueue.pop();
+            let pseudo: PseudoCode | null = null;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                const ts = Date.now();
+                try {
+                    // llmWithTimeout：外部超时兜底（150s，thinking 大输出实测 20~90s 波动）
+                    const r = await llmWithTimeout(
+                        sig => pseudoModel.invoke([
+                            new SystemMessage(
+                                pseudo_prompt +
+                                `\n\n## 当前任务\n${JSON.stringify(task, null, 2)}` +
+                                `\n\n## 项目路径\nworkspace`
+                            ),
+                        ], { signal: sig }),
+                        150000,
+                        `[${task.id}] 伪代码`
+                    );
+                    console.log(`[${task.id}] 伪代码 ${Date.now() - ts}ms`);
+                    if (r.files.length > 0) { pseudo = r; break; }
+                    console.log(`⚠️ ${task.id} 伪代码产出为空，重试 ${attempt}/3`);
+                } catch (e) {
+                    console.log(`⚠️ ${task.id} 伪代码 LLM 失败（第 ${attempt} 次，${Date.now() - ts}ms）：${(e as Error).message.slice(0, 80)}`);
+                }
+            }
+            if (!pseudo) {
+                console.log(`❌ ${task.id} 伪代码连续 3 次失败，上报合并器`);
+                station.sendMessage(name, "merger", JSON.stringify({ type: "task_result", task, success: false }));
+                continue;
+            }
+            codeQueue.push({ task, pseudo });   // 立即开下一个任务，代码工位并行展开
+        }
+    }
+
+    // 代码工位：取伪代码 → 组装已有文件（追加语义）→ LLM 展开（重试 ≤3）→ 写盘 → 交合并器
+    async function codeWorker() {
+        while (true) {
+            const { task, pseudo } = await codeQueue.pop();
+
+            // 追加语义：本次伪代码涉及的文件里，哪些已由前面任务产出 → 注入已有内容（read→看懂→追加→保存）
+            const existing = [...writtenFiles.entries()]
+                .filter(([fp]) => pseudo.files.some(f => f.filePath === fp))
+                .map(([filePath, code]) => ({ filePath, code }));
+            const existingContent = existing.length > 0
+                ? `\n\n## 已存在的文件（追加语义：先读懂原内容，同路径文件在原有代码基础上追加/修改，保留已有代码和风格）\n${existing.map(f => `--- ${f.filePath} ---\n${f.code}`).join("\n")}`
+                : "";
+
+            let last: CodeFile[] | null = null;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                const ts = Date.now();
+                try {
+                    const r = await llmWithTimeout(
+                        sig => codeModel.invoke([
+                            new SystemMessage(
+                                code_prompt +
+                                `\n\n## 伪代码\n${JSON.stringify(pseudo, null, 2)}` +
+                                existingContent
+                            ),
+                        ], { signal: sig }),
+                        150000,
+                        `[${task.id}] 代码`
+                    );
+                    console.log(`[${task.id}] 代码 ${Date.now() - ts}ms`);
+                    if (r.files.length > 0) { last = r.files; break; }
+                    console.log(`⚠️ ${task.id} 代码产出为空，重试 ${attempt}/3`);
+                } catch (e) {
+                    console.log(`⚠️ ${task.id} 代码 LLM 失败（第 ${attempt} 次，${Date.now() - ts}ms）：${(e as Error).message.slice(0, 80)}`);
+                }
+            }
+            if (!last) {
+                console.log(`❌ ${task.id} 代码连续 3 次失败，上报合并器`);
+                station.sendMessage(name, "merger", JSON.stringify({ type: "task_result", task, success: false }));
+                continue;
+            }
+            // 写盘（路径净化防 .. 逃逸）+ 记录最新内容供后续任务追加
+            for (const f of last) {
+                const safePath = f.filePath.replace(/^[/\\]+/, "").replace(/\.\./g, "");
+                const full = path.join("workspace", safePath);
+                fs.mkdirSync(path.dirname(full), { recursive: true });
+                fs.writeFileSync(full, f.code, "utf-8");
+                console.log(`✓ 已写入 ${full}`);
+            }
+            for (const f of last) writtenFiles.set(f.filePath, f.code);
+            console.log(`✓ ${task.id} 代码已写入 workspace/`);
+            station.sendMessage(name, "merger", JSON.stringify({ type: "task_result", task, success: true }));
+            console.log(`[${name}] → 合并器：任务 ${task.id} 完成，等配对`);
+        }
+    }
+
+    // 两个工位并行拉起（各自挂在队列 pop 上；LLM 等待期间事件循环交替执行）
+    const w1 = pseudoWorker();
+    const w2 = codeWorker();
+
     async function messageLoop() {
         console.log(`[${name}] 消息监听已启动：等架构师下发任务`);
         while (true) {
@@ -390,32 +297,25 @@ export async function runBackend(name: string, station: TransferStation) {
             const senderRole = station.status[msg.sender]?.role;
 
             if ((msg.sender === "architect" || msg.sender === "merger") && data.type === "task") {
-                // 架构师下发 / 合并器返工 → 干活（伪代码图 + 代码图 → 写盘 workspace/）
+                // 架构师下发 / 合并器返工 → 入伪代码队列（不 await，工位并行处理）
                 console.log(`[${name}] ← ${msg.sender}：收到任务 ${data.task?.id}（${data.task?.title}）`);
-                if (data.task) {
-                    const ok = await processOneTask(data.task);
-                    // 干完 → 交合并器配对（成功与否都交，success 由合并器判断是否返工）
-                    station.sendMessage(name, "merger", JSON.stringify({ type: "task_result", task: data.task, success: ok }));
-                    console.log(`[${name}] → 合并器：任务 ${data.task.id} ${ok ? "完成" : "失败"}，等配对`);
-                }
+                if (data.task) pseudoQueue.push({ task: data.task });
             }
 
-            // 测试返工：revision（带问题清单）→ issues 拼进任务描述针对性修改 → 重新交合并器配对
+            // 测试返工：revision（带问题清单）→ issues 拼进任务描述针对性修改 → 重进伪代码队列
             if (senderRole === roles.testEngineer && data.type === "revision" && data.task) {
                 console.log(`[${name}] ← 测试：任务 ${data.task.id} 返工（${data.issues?.length ?? 0} 条意见）`);
                 const revised = {
                     ...data.task,
                     description: data.task.description + "\n\n【测试返工意见（必须逐条解决）】\n" + (data.issues ?? []).join("\n"),
                 };
-                const ok = await processOneTask(revised);
-                station.sendMessage(name, "merger", JSON.stringify({ type: "task_result", task: data.task, success: ok }));
-                console.log(`[${name}] → 合并器：任务 ${data.task.id} 返工${ok ? "完成" : "仍失败"}，重新交配`);
+                pseudoQueue.push({ task: revised });
             }
             station.markDone(name);   // 处理完记账（负载均衡的数据基础：pendingCount -1）
         }
     }
 
-    // 挂住等消息（进程保持存活；干活在 messageLoop 里由消息触发）
+    // 挂住等消息（进程保持存活；伪代码/代码工位在后台并行运转）
     await messageLoop();
 }
 

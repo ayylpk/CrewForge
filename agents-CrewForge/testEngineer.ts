@@ -4,7 +4,7 @@ import * as z from "zod";
 import { Annotation, StateGraph, START, END, MemorySaver, type GraphNode } from "@langchain/langgraph";
 import fs from "node:fs";
 import path from "node:path";
-import { TransferStation, roles } from "./Hub.ts";   // 测试与合并器/开发/维护的消息中转站 + 角色枚举
+import { TransferStation, roles, llmWithTimeout } from "./Hub.ts";   // 测试与合并器/开发/维护的消息中转站 + 角色枚举 + 超时兜底
 
 // ============================================================
 // 测试工程师：配对契约检查（纯 L3，LLM 模拟执行，零环境）
@@ -24,6 +24,7 @@ import { TransferStation, roles } from "./Hub.ts";   // 测试与合并器/开�
 
 const model = new ChatDeepSeek({
     model: "deepseek-v4-flash",
+    timeout: 120000,   // 单次调用 120s 超时：thinking 模型大输出可能很慢，但必须有界（挂起走重试）
 })
 
 // ---------- 类型定义 ----------
@@ -154,17 +155,20 @@ const TestNode: GraphNode<typeof MessageState.State> = async (state) => {
     // LLM 调用失败（空输出/解析失败）→ 按 fail 处理，不崩流水线
     let parsed;
     try {
-        parsed = await verdictModel.invoke([
-            new SystemMessage(
-                test_prompt +
-                `\n\n## 后端任务（契约）\n${JSON.stringify(pair.back, null, 2)}` +
-                `\n\n## 后端产出代码\n${backFiles.map(f => `--- ${f.filePath} ---\n${f.content}`).join("\n")}` +
-                (pair.front
-                    ? `\n\n## 前端任务（契约）\n${JSON.stringify(pair.front, null, 2)}` +
-                      `\n\n## 前端产出代码\n${frontFiles.map(f => `--- ${f.filePath} ---\n${f.content}`).join("\n")}`
-                    : "")
-            ),
-        ]);
+        parsed = await llmWithTimeout(
+            sig => verdictModel.invoke([
+                new SystemMessage(
+                    test_prompt +
+                    `\n\n## 后端任务（契约）\n${JSON.stringify(pair.back, null, 2)}` +
+                    `\n\n## 后端产出代码\n${backFiles.map(f => `--- ${f.filePath} ---\n${f.content}`).join("\n")}` +
+                    (pair.front
+                        ? `\n\n## 前端任务（契约）\n${JSON.stringify(pair.front, null, 2)}` +
+                          `\n\n## 前端产出代码\n${frontFiles.map(f => `--- ${f.filePath} ---\n${f.content}`).join("\n")}`
+                        : "")
+                ),
+            ], { signal: sig }),
+            150000, `测试判定 ${pair.back.id}`
+        );
     } catch (e) {
         // LLM 失败无法归责，保守按 both（issue 文案已写明是调用失败而非代码错误）
         return { verdict: { pass: false, blame: "both", backendIssues: [`LLM 调用失败：${(e as Error).message.slice(0, 100)}`], frontendIssues: [] } };
@@ -185,6 +189,8 @@ const graph = new StateGraph(MessageState)
 // 测试入口（函数化：接收 agent 名 + 共享中转站，由 start.ts 拉起）
 // name = "testEngineer"/"test2"…（多测试负载均衡）
 export async function runTest(name: string, station: TransferStation) {
+    const judgementCount = new Map<string, number>();   // pairId → 判定次数：≥3 次未过放弃（防 revision 无限循环）
+
     async function messageLoop() {
         console.log(`[${name}] 消息监听已启动：等合并器送配好的接口对`);
         while (true) {
@@ -195,7 +201,8 @@ export async function runTest(name: string, station: TransferStation) {
             if (msg.sender !== "merger" || data.type !== "pair_ready" || !data.pair) continue;
 
             const pair = data.pair;
-            const label = `${pair.back.id}${pair.front ? `+${pair.front.id}` : ""} ${pair.back.method} ${pair.back.path}`;
+            const pairKey = pair.back.id;
+            const label = `${pairKey}${pair.front ? `+${pair.front.id}` : ""} ${pair.back.method} ${pair.back.path}`;
             console.log(`[${name}] ← 合并器：收到 ${label}`);
 
             // 契约判断（图：机械预检 + LLM；每对独立断点，可续跑）
@@ -216,11 +223,18 @@ export async function runTest(name: string, station: TransferStation) {
                 station.sendMessage(name, "maintainer", JSON.stringify({ type: "task_passed", pair }));
                 console.log(`[${name}] → 维护：${label} 通过`);
             } else {
-                // 判错 → 按 blame 发回对应开发（revision 带问题清单，开发据此修改代码）
-                // 多开发场景：目标用 pickLeastBusy(role) 选该角色负载最低的（不写死名字）
-                const blame = v.blame === "both" ? "前后端都错" : v.blame === "backend" ? "后端错" : "前端错";
-                console.log(`[${name}]：${label} 未通过（${blame}）`);
-                if (v.blame === "backend" || v.blame === "both") {
+                // 判定轮次上限：同一对 ≥3 次未过 → 放弃（防开发修不好无限循环），上报维护记失败
+                const count = (judgementCount.get(pairKey) ?? 0) + 1;
+                judgementCount.set(pairKey, count);
+                if (count >= 3) {
+                    station.sendMessage(name, "maintainer", JSON.stringify({ type: "task_failed", pairId: pairKey }));
+                    console.log(`[${name}] ⚠️ ${label} 判定 ${count} 次仍未通过，放弃并上报维护`);
+                } else {
+                    // 判错 → 按 blame 发回对应开发（revision 带问题清单，开发据此修改代码）
+                    // 多开发场景：目标用 pickLeastBusy(role) 选该角色负载最低的（不写死名字）
+                    const blame = v.blame === "both" ? "前后端都错" : v.blame === "backend" ? "后端错" : "前端错";
+                    console.log(`[${name}]：${label} 未通过（${blame}，第 ${count} 次判定）`);
+                    if (v.blame === "backend" || v.blame === "both") {
                     const target = station.pickLeastBusy(roles.backendEngineer);
                     if (target) {
                         station.sendMessage(name, target, JSON.stringify({ type: "revision", task: pair.back, issues: v.backendIssues }));
@@ -239,6 +253,7 @@ export async function runTest(name: string, station: TransferStation) {
                             console.log(`⚠️ 没有前端开发注册，返工发送失败：${pair.front.id}`);
                         }
                     }
+                }
                 }
             }
             station.markDone(name);   // 处理完记账（负载均衡的数据基础）
