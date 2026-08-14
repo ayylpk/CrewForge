@@ -16,6 +16,4 @@ public class ProjectAgentQueryParam {
     private Long projectId;
     /** 用户ID（与 projectId 双条件隔离） */
     private Long userId;
-    /** 关键词搜索（匹配 Agent 名称/职位） */
-    private String keyword;
 }

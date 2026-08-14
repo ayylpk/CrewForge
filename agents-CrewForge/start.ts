@@ -1,10 +1,11 @@
 // ============================================================
 // start.ts：项目启动器（一项目一进程）
-//   用法：bun run start.ts <projectId>（缺省 "demo"）
+//   用法：bun run build:node && bun run start:node -- <projectId>（缺省 "demo"）
 //   一个进程 = 一个项目 = 一个站 = 一个 agent 团队（进程内全局共享站）
 //
 //   多项目：每条命令一个进程，进程间零通信、纯隔离
 //   平台后端（Java）用 ProcessBuilder spawn 本脚本管理项目生命周期
+//   生产运行：先 bun run build:node，再用 node dist-node/start.mjs 启动
 // ============================================================
 
 import fs from "node:fs";
@@ -16,6 +17,18 @@ import { runFrontend } from "./frontendEngineer.ts";
 import { runMerger } from "./merger.ts";
 import { runTest } from "./testEngineer.ts";
 import { runMaintainer } from "./maintainer.ts";
+
+const runtimeVersions = process.versions as Record<string, string | undefined>;
+if (runtimeVersions.bun) {
+    throw new Error("CrewForge Agent 生产进程必须使用 Node.js；请先执行 bun run build:node，再执行 node dist-node/start.mjs");
+}
+if (!runtimeVersions.node) {
+    throw new Error("CrewForge Agent 需要 Node.js 运行时");
+}
+
+// Agent 空闲时只会等待内存 Promise；未完成的 Promise 不能让 Node 自身保持运行。
+// 这个被引用的定时器是进程生命周期锚点，确保请求超时和队列唤醒仍有机会执行。
+setInterval(() => undefined, 60_000);
 
 // ---------- 项目身份 ----------
 
@@ -43,7 +56,7 @@ station.register("maintainer", roles.maintainer);
 
 // ---------- 拉起团队（并发运行，全项目共享同一个站） ----------
 
-console.log(`[${projectId}] 中转站就绪：${Object.keys(station.status).length} 个 agent 已注册，团队拉起……`);
+console.log(`[${projectId}] 中转站就绪：${Object.keys(station.status).length} 个 agent 已注册，团队拉起`);
 
 // 全部 agent 并发跑（各自挂在各自的 wait 上；LLM 等待期间事件循环交替执行）
 // 多开发/多测试：同角色注册多个名字后，这里多传几个 runBackend("backend2", station)

@@ -4,7 +4,7 @@
 
     <select id="list" parameterType="com.hina.crewforge.pojo.QueryParam.ProjectAgentQueryParam"
             resultType="com.hina.crewforge.pojo.entity.ProjectAgent">
-        SELECT id, project_id, user_id, name, role, system_prompt, tools, model, temperature, status, create_time, update_time
+        SELECT id, project_id, user_id, agent_id, status, create_time, update_time
         FROM sys_project_agent
         WHERE deleted = 0
         <if test="projectId != null">
@@ -13,20 +13,20 @@
         <if test="userId != null">
             AND user_id = #{userId}
         </if>
-        <if test="keyword != null and keyword != ''">
-            AND (name LIKE CONCAT('%', #{keyword}, '%') OR role LIKE CONCAT('%', #{keyword}, '%'))
-        </if>
         ORDER BY create_time DESC
     </select>
 
-    <!-- 查询某项目某用户的全部 Agent（无分页，团队配置页回显用） -->
-    <select id="listAll" resultType="com.hina.crewforge.pojo.entity.ProjectAgent">
-        SELECT id, project_id, user_id, name, role, system_prompt, tools, model, temperature, status, create_time, update_time
-        FROM sys_project_agent
-        WHERE project_id = #{projectId}
-          AND user_id = #{userId}
-          AND deleted = 0
-        ORDER BY id ASC
+    <!-- 查询某项目某用户的全部 Agent（无分页，团队配置页回显用）
+         LEFT JOIN sys_agent 带出 name/role；不过滤 sa.deleted —— 池删了项目副本名字仍在 -->
+    <select id="listAll" resultType="com.hina.crewforge.pojo.vo.ProjectAgentVO">
+        SELECT pa.id, pa.project_id, pa.user_id, pa.agent_id, pa.status, pa.create_time, pa.update_time,
+               sa.name, sa.role
+        FROM sys_project_agent pa
+        LEFT JOIN sys_agent sa ON sa.id = pa.agent_id
+        WHERE pa.project_id = #{projectId}
+          AND pa.user_id = #{userId}
+          AND pa.deleted = 0
+        ORDER BY pa.id ASC
     </select>
 
     <insert id="insert" parameterType="com.hina.crewforge.pojo.entity.ProjectAgent"
@@ -34,24 +34,14 @@
         INSERT INTO sys_project_agent (
             project_id,
             user_id,
-            name,
-            role,
-            system_prompt,
-            tools,
-            model,
-            temperature,
+            agent_id,
             status,
             create_time,
             update_time
         ) VALUES (
             #{projectId},
             #{userId},
-            #{name},
-            #{role},
-            #{systemPrompt},
-            #{tools},
-            #{model},
-            #{temperature},
+            #{agentId},
             #{status},
             #{createTime},
             #{updateTime}
@@ -60,22 +50,29 @@
 
     <update id="updateById" parameterType="com.hina.crewforge.pojo.entity.ProjectAgent">
         UPDATE sys_project_agent
-        SET name = #{name},
-            role = #{role},
-            system_prompt = #{systemPrompt},
-            tools = #{tools},
-            model = #{model},
-            temperature = #{temperature},
+        SET agent_id = #{agentId},
             status = #{status},
             update_time = #{updateTime}
         WHERE id = #{id}
           AND deleted = 0
     </update>
 
-    <select id="getById" resultType="com.hina.crewforge.pojo.entity.ProjectAgent">
-        SELECT id, project_id, user_id, name, role, system_prompt, tools, model, temperature, status, create_time, update_time
+    <select id="getById" resultType="com.hina.crewforge.pojo.vo.ProjectAgentVO">
+        SELECT pa.id, pa.project_id, pa.user_id, pa.agent_id, pa.status, pa.create_time, pa.update_time,
+               sa.name, sa.role
+        FROM sys_project_agent pa
+        LEFT JOIN sys_agent sa ON sa.id = pa.agent_id
+        WHERE pa.id = #{id}
+          AND pa.deleted = 0
+    </select>
+
+    <!-- 按 projectId + agentId + userId 查成员行（归属校验） -->
+    <select id="getByProjectAndAgent" resultType="com.hina.crewforge.pojo.entity.ProjectAgent">
+        SELECT id, project_id, user_id, agent_id, status, create_time, update_time
         FROM sys_project_agent
-        WHERE id = #{id}
+        WHERE project_id = #{projectId}
+          AND agent_id = #{agentId}
+          AND user_id = #{userId}
           AND deleted = 0
     </select>
 

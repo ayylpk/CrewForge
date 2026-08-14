@@ -3,6 +3,13 @@
   "module": "index.ts",
   "type": "module",
   "private": true,
+  "scripts": {
+    "build:node": "bun build start.ts --target node --format esm --outfile dist-node/start.mjs",
+    "start:node": "node --env-file=.env dist-node/start.mjs",
+    "verify:timeout": "node verify-node-abort.mjs",
+    "verify:http-client": "node --experimental-strip-types verify-http-client.ts",
+    "verify:frontend-split": "bun --env-file=.env verify-frontend-split.ts"
+  },
   "devDependencies": {
     "@types/bun": "^1.3.14"
   },
@@ -15,6 +22,7 @@
     "@langchain/langgraph": "^1.4.9",
     "@langchain/tavily": "^1.2.0",
     "langchain": "^1.5.5",
+    "undici": "^8.10.0",
     "zod": "^4.4.3"
   }
 }

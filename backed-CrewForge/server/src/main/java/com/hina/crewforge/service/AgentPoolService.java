@@ -10,7 +10,8 @@ public interface AgentPoolService {
 
     PageResult<AgentPoolVO> page(AgentPoolQueryParam agentQueryParam);
 
-    void create(AgentPoolDTO dto);
+    /** 新增, 返回自增主键 id（新建后挂节点用） */
+    Long create(AgentPoolDTO dto);
 
     void update(Long id, AgentPoolDTO dto);
 

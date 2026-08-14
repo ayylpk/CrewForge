@@ -3,6 +3,9 @@
 
 import { z } from "zod";                        // 工具入参 schema（等价 Hub.py 的 input_schema 字典）
 import { tool } from "@langchain/core/tools";   // 包装 send_message / wait_for_message 为 LangChain 工具
+// 保留给诊断脚本；生产 LLM 请求由 deepseekClient.ts 的独立 undici.Client 负责。
+import { fetch as undiciFetch } from "undici";
+export const llmFetch = undiciFetch as unknown as typeof fetch;
 
 // agent 角色枚举（数字索引：manager=0 … maintainer=5，unknown=6 兜底）
 // 注：带引号的成员名 + 数字值，访问用 roles.manager / roles["backendEngineer"]
@@ -201,8 +204,9 @@ export class Semaphore {
     }
 }
 
-// 全局 LLM 闸门：并发 ≤2 + 启动间隔 3s（实测同刻扎堆 3 个大请求全挂，错开没事）
-const llmGate = new Semaphore(2);
+// 首先保证单条端到端链路稳定。前端 fan-out 保留任务拆分，但模型调用统一串行；
+// 当前 API/SDK 组合在三个同时活跃的调用下已复现悬空，稳定前不放大并发。
+const llmGate = new Semaphore(1);
 const LAUNCH_INTERVAL_MS = 3000;
 let lastLaunchAt = 0;
 
@@ -213,22 +217,33 @@ export async function llmWithTimeout<T>(
     label: string
 ): Promise<T> {
 
+    // 诊断日志（临时）：定位 e2e 挂起时请求卡在哪一步
+    console.log(`[gate] ${label} 开始 acquire（${new Date().toLocaleTimeString()}）`);
     await llmGate.acquire();
-    
-    const gap = lastLaunchAt + LAUNCH_INTERVAL_MS - Date.now();
-    if (gap > 0) await new Promise<void>(r => setTimeout(r, gap));
-    lastLaunchAt = Date.now();
+    console.log(`[gate] ${label} 拿到锁（${new Date().toLocaleTimeString()}）`);
 
-    //超时兜底：150s 无响应强制中止（排队时间不占用超时窗口）
+    const gap = lastLaunchAt + LAUNCH_INTERVAL_MS - Date.now();
+    if (gap > 0) { console.log(`[gate] ${label} 等错开 ${gap}ms`); await new Promise<void>(r => setTimeout(r, gap)); }
+    lastLaunchAt = Date.now();
+    console.log(`[gate] ${label} 发出调用（${new Date().toLocaleTimeString()}）`);
+
+    // 双层保护：Node 的 abort 负责释放底层请求，Promise.race 负责给业务层一个绝对上限。
+    // callPromise 的 rejection 额外被消费，避免超时后底层请求晚到时形成 unhandled rejection。
     const ctrl = new AbortController();
-    const timer = setTimeout(() => {
-        ctrl.abort();
-        console.log(`⚠️ ${label} 超时 ${Math.round(ms / 1000)}s，强制中止`);
-    }, ms);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const callPromise = Promise.resolve().then(() => call(ctrl.signal));
+    callPromise.catch(() => undefined);
+    const raceTimeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+            ctrl.abort();
+            console.log(`提示：${label} 超时 ${Math.round(ms / 1000)}s，已发出取消信号`);
+            reject(new Error(`${label} 超时 ${Math.round(ms / 1000)}s`));
+        }, ms);
+    });
     try {
-        return await call(ctrl.signal);
+        return await Promise.race([callPromise, raceTimeout]);
     } finally {
-        clearTimeout(timer);
+        if (timer) clearTimeout(timer);
         llmGate.release();
     }
 }

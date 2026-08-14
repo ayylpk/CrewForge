@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.hina.crewforge.mapper.AgentNodeMapper">
+
+    <select id="listByAgentId" resultType="com.hina.crewforge.pojo.entity.AgentNode">
+        SELECT id, agent_id, node_name, description, system_prompt, temperature, tools, model, create_time, update_time
+        FROM sys_agent_node
+        WHERE agent_id = #{agentId}
+          AND deleted = 0
+        ORDER BY id ASC
+    </select>
+
+    <select id="selectByAgentIds" resultType="com.hina.crewforge.pojo.entity.AgentNode">
+        SELECT id, agent_id, node_name, description, system_prompt, temperature, tools, model, create_time, update_time
+        FROM sys_agent_node
+        WHERE deleted = 0
+          AND agent_id IN
+        <foreach collection="agentIds" item="agentId" open="(" separator="," close=")">
+            #{agentId}
+        </foreach>
+        ORDER BY id ASC
+    </select>
+
+    <insert id="insert" parameterType="com.hina.crewforge.pojo.entity.AgentNode"
+            useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO sys_agent_node (
+            agent_id,
+            node_name,
+            description,
+            system_prompt,
+            temperature,
+            tools,
+            model,
+            create_time,
+            update_time
+        ) VALUES (
+            #{agentId},
+            #{nodeName},
+            #{description},
+            #{systemPrompt},
+            #{temperature},
+            #{tools},
+            #{model},
+            #{createTime},
+            #{updateTime}
+        )
+    </insert>
+
+    <update id="updateById" parameterType="com.hina.crewforge.pojo.entity.AgentNode">
+        UPDATE sys_agent_node
+        SET node_name = #{nodeName},
+            description = #{description},
+            system_prompt = #{systemPrompt},
+            temperature = #{temperature},
+            tools = #{tools},
+            model = #{model},
+            update_time = #{updateTime}
+        WHERE id = #{id}
+          AND deleted = 0
+    </update>
+
+    <select id="getById" resultType="com.hina.crewforge.pojo.entity.AgentNode">
+        SELECT id, agent_id, node_name, description, system_prompt, temperature, tools, model, create_time, update_time
+        FROM sys_agent_node
+        WHERE id = #{id}
+          AND deleted = 0
+    </select>
+
+    <update id="deleteById">
+        UPDATE sys_agent_node
+        SET deleted = 1,
+            update_time = #{updateTime}
+        WHERE id = #{id}
+    </update>
+
+    <update id="deleteByAgentIds">
+        UPDATE sys_agent_node
+        SET deleted = 1,
+            update_time = #{updateTime}
+        WHERE agent_id IN
+        <foreach collection="agentIds" item="agentId" open="(" separator="," close=")">
+            #{agentId}
+        </foreach>
+          AND agent_id IN (
+              SELECT id FROM sys_agent WHERE user_id = #{userId} AND deleted = 0
+          )
+    </update>
+
+</mapper>

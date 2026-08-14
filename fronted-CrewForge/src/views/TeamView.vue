@@ -135,6 +135,8 @@ const existingAgents = ref<agentVO[]>([])
 /** 页面展示用成员结构 */
 interface MemberView {
   tempId: number
+  /** 关联池 Agent id；手动添加的成员可能为 0（无池关联，无法配置/查看节点） */
+  agentId: number
   name: string
   role: string
   systemPrompt: string
@@ -147,6 +149,7 @@ interface MemberView {
 const displayMembers = computed<MemberView[]>(() =>
   existingAgents.value.map((vo) => ({
     tempId: vo.id,
+    agentId: vo.agentId ?? 0,
     name: vo.name,
     role: vo.role || '',
     systemPrompt: vo.systemPrompt || '',
@@ -168,9 +171,9 @@ function roleMetaByLabel(label: string) {
 
 // ===== 添加/编辑成员（复用 AgentFormView 页面，带 ?projectId= 即项目模式） =====
 
-/** 添加成员：跳新建表单（项目模式），保存后回到本页自动刷新 */
+/** 添加成员：成员必须来自 Agent 仓库（节点随拉取复制），直接打开仓库拉取弹窗 */
 function addMember() {
-  router.push({ path: '/agents/new', query: { projectId: String(route.params.id) } })
+  openPoolModal()
 }
 
 /** 编辑成员：跳编辑表单（项目模式 + 项目 Agent id） */
@@ -201,6 +204,11 @@ async function removeMember(m: MemberView) {
   } catch {
     /* 拦截器已提示 */
   }
+}
+
+/** 点击成员卡片：跳转全屏详情页（AgentFormView 项目模式，展示/管理该成员的全部节点） */
+function goMemberDetail(m: MemberView) {
+  router.push({ path: `/agents/${m.tempId}`, query: { projectId: String(route.params.id) } })
 }
 
 // ===== 从仓库拉取（勾选池 Agent → 批量复制为项目成员） =====
@@ -399,7 +407,7 @@ function confirmTeam() {
 
         <!-- 成员网格 -->
         <div class="member-grid">
-          <CardShell v-for="m in displayMembers" :key="m.tempId" class="member-card">
+          <CardShell v-for="m in displayMembers" :key="m.tempId" class="member-card" @click="goMemberDetail(m)">
             <div class="member-top">
               <!-- 职位图标（按 role 反查预设，找不到用通用样式） -->
               <div class="member-icons">
@@ -412,7 +420,7 @@ function confirmTeam() {
                   <span v-else>{{ m.role.slice(0, 1) }}</span>
                 </span>
               </div>
-              <button class="member-remove" @click="removeMember(m)">✕</button>
+              <button class="member-remove" @click.stop="removeMember(m)">✕</button>
             </div>
 
             <h4 class="member-name">{{ m.name }}</h4>
@@ -441,7 +449,7 @@ function confirmTeam() {
             <p class="member-prompt">{{ m.systemPrompt || '（未配置提示词）' }}</p>
 
             <div class="member-actions">
-              <button class="act-btn" @click="editMember(m)">编辑</button>
+              <button class="act-btn" @click.stop="editMember(m)">编辑</button>
             </div>
           </CardShell>
 

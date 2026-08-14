@@ -14,27 +14,27 @@ export interface PageResult<T> {
 
 /**
  * 项目 Agent 实体（对应后端 ProjectAgentVO / sys_project_agent 表）
- * 从池里复制一份过来，每个项目成员一行；主键 id 就是项目内 agent_id
+ * 成员行引用池 Agent（agentId），name/role 由后端 JOIN sys_agent 带出
+ * 主键 id 就是项目内成员 id；节点配置在 sys_project_agent_node（复制自池）
  */
 export interface agentVO {
-  /** 项目内 Agent ID（精准定位用） */
+  /** 项目内成员 ID（精准定位用） */
   id: number
   /** 所属项目 ID */
   projectId: number
   /** 所属用户 ID（数据隔离，与 projectId 双条件） */
   userId: number
-  /** Agent 名称（复制自池，项目内可再改） */
+  /** 关联池 Agent id（sys_agent.id）；手动添加的成员可能为空 */
+  agentId: number | null
+  /** Agent 名称（JOIN 池带出，池删除后仍保留） */
   name: string
-  /** 职位描述，如"负责 Vue 前端开发" */
+  /** 职位描述（JOIN 池带出） */
   role: string
-  /** 系统提示词 */
-  systemPrompt: string
-  /** 可用工具列表（后端是 JSON 数组字符串，如 '["web_search","read_file"]'） */
-  tools: string
-  /** 模型，如 deepseek/deepseek-v4-flash */
-  model: string
-  /** 采样温度 0.0-2.0 */
-  temperature: number
+  /** 兼容旧字段：后端 ProjectAgentVO 不返回这些，保留类型避免破坏现有引用（值恒为 undefined） */
+  systemPrompt?: string
+  tools?: string
+  model?: string
+  temperature?: number | null
   /** 状态: 1-参与项目, 0-已移出 */
   status: number
   createTime: string
@@ -126,4 +126,81 @@ export interface agentQueryParam {
   projectId: number
   /** 模糊匹配 name/role */
   keyword?: string
+}
+
+/**
+ * Agent 节点（对应后端 AgentNodeVO / sys_agent_node 表）
+ * 一个池 Agent 可配多个节点，每节点一套系统提示词/工具/模型/温度
+ */
+export interface agentNodeVO {
+  /** 节点 ID */
+  id: number
+  /** 关联池 Agent id（sys_agent.id） */
+  agentId: number
+  /** 节点名称，如"规划节点"、"编码节点" */
+  nodeName: string
+  /** 节点作用描述 */
+  description: string
+  /** 系统提示词 */
+  systemPrompt: string
+  /** 采样温度 0.0-2.0 */
+  temperature: number
+  /** 可用工具列表（后端是 JSON 数组字符串） */
+  tools: string
+  /** 模型，如 deepseek/deepseek-v4-flash；空 = 跟随全局 */
+  model: string
+  createTime: string
+  updateTime: string
+}
+
+/** 新建/更新池 Agent 节点请求（对应后端 AgentNodeDTO；id 走路径，agentId 必传） */
+export interface agentNodeDTO {
+  /** 关联池 Agent id（必传） */
+  agentId: number
+  /** 节点名称 */
+  nodeName: string
+  /** 节点作用描述 */
+  description?: string
+  /** 系统提示词 */
+  systemPrompt?: string
+  /** 工具列表(JSON 数组字符串) */
+  tools?: string
+  /** 模型 */
+  model?: string
+  /** 采样温度（不传后端给默认 0.7） */
+  temperature?: number | null
+}
+
+/**
+ * 项目成员节点（对应后端 ProjectAgentNodeVO / sys_project_agent_node 表）
+ * 拉取成员时从池复制一份，项目内独立修改
+ */
+export interface projectAgentNodeVO {
+  id: number
+  projectId: number
+  /** 来源池 Agent id（sys_agent.id） */
+  agentId: number
+  userId: number
+  nodeName: string
+  description: string
+  systemPrompt: string
+  temperature: number
+  tools: string
+  model: string
+  createTime: string
+  updateTime: string
+}
+
+/** 新建/更新项目成员节点请求（对应后端 ProjectAgentNodeDTO） */
+export interface projectAgentNodeDTO {
+  /** 项目 ID（必传） */
+  projectId: number
+  /** 来源池 Agent id（必传，即成员的 agentId） */
+  agentId: number
+  nodeName: string
+  description?: string
+  systemPrompt?: string
+  tools?: string
+  model?: string
+  temperature?: number | null
 }

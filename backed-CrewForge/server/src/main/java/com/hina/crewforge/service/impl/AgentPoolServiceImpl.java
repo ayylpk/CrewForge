@@ -5,6 +5,7 @@ import com.github.pagehelper.PageHelper;
 import com.hina.crewforge.common.context.BaseContext;
 import com.hina.crewforge.common.exception.BaseException;
 import com.hina.crewforge.common.result.PageResult;
+import com.hina.crewforge.mapper.AgentNodeMapper;
 import com.hina.crewforge.mapper.AgentPoolMapper;
 import com.hina.crewforge.pojo.QueryParam.AgentPoolQueryParam;
 import com.hina.crewforge.pojo.dto.AgentPoolDTO;
@@ -14,6 +15,7 @@ import com.hina.crewforge.service.AgentPoolService;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.*;
@@ -24,6 +26,9 @@ public class AgentPoolServiceImpl implements AgentPoolService {
 
     @Autowired
     private AgentPoolMapper agentMapper;
+
+    @Autowired
+    private AgentNodeMapper agentNodeMapper;
 
     @Override
     public PageResult<AgentPoolVO> page(AgentPoolQueryParam agentQueryParam) {
@@ -39,21 +44,10 @@ public class AgentPoolServiceImpl implements AgentPoolService {
         return new PageResult<>(p.getTotal(),voList);
     }
 
-    /** 空字符串转 null：tools 是 JSON 列不能存 ''；model 空串=跟随全局（存 NULL） */
-    private void normalize(AgentPool entity) {
-        if (entity.getTools() != null && entity.getTools().trim().isEmpty()) {
-            entity.setTools(null);
-        }
-        if (entity.getModel() != null && entity.getModel().trim().isEmpty()) {
-            entity.setModel(null);
-        }
-    }
-
     @Override
-    public void create(AgentPoolDTO dto) {
+    public Long create(AgentPoolDTO dto) {
         AgentPool entity = new AgentPool();
         BeanUtils.copyProperties(dto, entity);
-        normalize(entity);
         LocalDateTime now = LocalDateTime.now();
         entity.setCreateTime(now);
         entity.setUpdateTime(now);
@@ -64,6 +58,8 @@ public class AgentPoolServiceImpl implements AgentPoolService {
             entity.setStatus(1);
         }
         agentMapper.insert(entity);
+        // 返回自增主键（新建后前端挂节点需要）
+        return entity.getId();
     }
 
     @Override
@@ -79,7 +75,6 @@ public class AgentPoolServiceImpl implements AgentPoolService {
         // 2. 更新（userId 不允许改, 从实体里去不掉则覆盖为原值）
         AgentPool entity = new AgentPool();
         BeanUtils.copyProperties(dto, entity);
-        normalize(entity);
         entity.setId(id);
         entity.setUserId(existing.getUserId());
         entity.setUpdateTime(LocalDateTime.now());
@@ -88,11 +83,19 @@ public class AgentPoolServiceImpl implements AgentPoolService {
 
     @Override
     public AgentPoolVO getById(Long id) {
+        // 存在 + 所有权校验（池按用户隔离, 只能读自己的）
         AgentPool entity = agentMapper.getById(id);
+        if (entity == null) {
+            throw new BaseException("Agent 不存在: " + id);
+        }
+        if (!entity.getUserId().equals(BaseContext.getCurrentUserId())) {
+            throw new BaseException("无权查看他人的 Agent");
+        }
         return toVO(entity);
     }
 
     @Override
+    @Transactional
     public void deleteByIds(String ids) {
         // 格式: "id1-id2-id3"（userId 不拼在路径里了, 从 JWT 取当前登录用户）
         String[] parts = ids.split("-");
@@ -101,7 +104,11 @@ public class AgentPoolServiceImpl implements AgentPoolService {
         for (String part : parts) {
             idList.add(Long.parseLong(part));
         }
-        agentMapper.deleteByIds(idList, userId, LocalDateTime.now());
+        LocalDateTime now = LocalDateTime.now();
+        // 1. 删除池 Agent
+        agentMapper.deleteByIds(idList, userId, now);
+        // 2. 级联删除这些 Agent 的节点配置（按 userId 二次校验防越权）
+        agentNodeMapper.deleteByAgentIds(idList, userId, now);
     }
 
     private AgentPoolVO toVO(AgentPool agent) {

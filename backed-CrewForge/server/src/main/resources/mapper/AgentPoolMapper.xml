@@ -4,7 +4,7 @@
 
     <select id="list" parameterType="com.hina.crewforge.pojo.QueryParam.AgentPoolQueryParam"
             resultType="com.hina.crewforge.pojo.entity.AgentPool">
-        SELECT id, user_id, name, role, system_prompt, tools, model, temperature, status, create_time, update_time
+        SELECT id, user_id, name, role, status, create_time, update_time
         FROM sys_agent
         WHERE deleted = 0
         <if test="userId != null">
@@ -22,10 +22,6 @@
             user_id,
             name,
             role,
-            system_prompt,
-            tools,
-            model,
-            temperature,
             status,
             create_time,
             update_time
@@ -33,10 +29,6 @@
             #{userId},
             #{name},
             #{role},
-            #{systemPrompt},
-            #{tools},
-            #{model},
-            #{temperature},
             #{status},
             #{createTime},
             #{updateTime}
@@ -47,10 +39,6 @@
         UPDATE sys_agent
         SET name = #{name},
             role = #{role},
-            system_prompt = #{systemPrompt},
-            tools = #{tools},
-            model = #{model},
-            temperature = #{temperature},
             status = #{status},
             update_time = #{updateTime}
         WHERE id = #{id}
@@ -58,14 +46,14 @@
     </update>
 
     <select id="getById" resultType="com.hina.crewforge.pojo.entity.AgentPool">
-        SELECT id, user_id, name, role, system_prompt, tools, model, temperature, status, create_time, update_time
+        SELECT id, user_id, name, role, status, create_time, update_time
         FROM sys_agent
         WHERE id = #{id}
           AND deleted = 0
     </select>
 
     <select id="selectByIds" resultType="com.hina.crewforge.pojo.entity.AgentPool">
-        SELECT id, user_id, name, role, system_prompt, tools, model, temperature, status, create_time, update_time
+        SELECT id, user_id, name, role, status, create_time, update_time
         FROM sys_agent
         WHERE deleted = 0
           AND id IN

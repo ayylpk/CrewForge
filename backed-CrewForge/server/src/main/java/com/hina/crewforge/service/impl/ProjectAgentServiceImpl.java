@@ -5,13 +5,17 @@ import com.github.pagehelper.PageHelper;
 import com.hina.crewforge.common.context.BaseContext;
 import com.hina.crewforge.common.exception.BaseException;
 import com.hina.crewforge.common.result.PageResult;
+import com.hina.crewforge.mapper.AgentNodeMapper;
 import com.hina.crewforge.mapper.AgentPoolMapper;
 import com.hina.crewforge.mapper.ProjectAgentMapper;
+import com.hina.crewforge.mapper.ProjectAgentNodeMapper;
 import com.hina.crewforge.pojo.QueryParam.ProjectAgentQueryParam;
 import com.hina.crewforge.pojo.dto.ProjectAgentCopyDTO;
 import com.hina.crewforge.pojo.dto.ProjectAgentDTO;
+import com.hina.crewforge.pojo.entity.AgentNode;
 import com.hina.crewforge.pojo.entity.AgentPool;
 import com.hina.crewforge.pojo.entity.ProjectAgent;
+import com.hina.crewforge.pojo.entity.ProjectAgentNode;
 import com.hina.crewforge.pojo.vo.ProjectAgentVO;
 import com.hina.crewforge.service.ProjectAgentService;
 import org.springframework.beans.BeanUtils;
@@ -32,6 +36,12 @@ public class ProjectAgentServiceImpl implements ProjectAgentService {
     @Autowired
     private AgentPoolMapper agentPoolMapper;
 
+    @Autowired
+    private AgentNodeMapper agentNodeMapper;
+
+    @Autowired
+    private ProjectAgentNodeMapper projectAgentNodeMapper;
+
     @Override
     public PageResult<ProjectAgentVO> page(ProjectAgentQueryParam projectAgentQueryParam) {
         // ⚠️ 不信任前端传的 userId, 从 JWT 解析当前登录用户
@@ -50,25 +60,14 @@ public class ProjectAgentServiceImpl implements ProjectAgentService {
     public List<ProjectAgentVO> listAll(Long projectId) {
         // ⚠️ 不信任前端传的 userId, 从 JWT 解析当前登录用户
         Long userId = BaseContext.getCurrentUserId();
-        List<ProjectAgent> list = projectAgentMapper.listAll(projectId, userId);
-        return list.stream().map(this::toVO).collect(Collectors.toList());
-    }
-
-    /** 空字符串转 null：tools 是 JSON 列不能存 ''；model 空串=跟随全局（存 NULL） */
-    private void normalize(ProjectAgent entity) {
-        if (entity.getTools() != null && entity.getTools().trim().isEmpty()) {
-            entity.setTools(null);
-        }
-        if (entity.getModel() != null && entity.getModel().trim().isEmpty()) {
-            entity.setModel(null);
-        }
+        // Mapper 已 JOIN sys_agent 带出 name/role, 直接返回 VO
+        return projectAgentMapper.listAll(projectId, userId);
     }
 
     @Override
     public void create(ProjectAgentDTO dto) {
         ProjectAgent entity = new ProjectAgent();
         BeanUtils.copyProperties(dto, entity);
-        normalize(entity);
         LocalDateTime now = LocalDateTime.now();
         entity.setCreateTime(now);
         entity.setUpdateTime(now);
@@ -84,7 +83,7 @@ public class ProjectAgentServiceImpl implements ProjectAgentService {
     @Override
     public void update(Long id, ProjectAgentDTO dto) {
         // 1. 存在 + 所有权校验（项目 Agent 按用户隔离, 只能改自己的）
-        ProjectAgent existing = projectAgentMapper.getById(id);
+        ProjectAgentVO existing = projectAgentMapper.getById(id);
         if (existing == null) {
             throw new BaseException("项目 Agent 不存在: " + id);
         }
@@ -94,7 +93,6 @@ public class ProjectAgentServiceImpl implements ProjectAgentService {
         // 2. 更新（userId 不允许改, 覆盖为原值）
         ProjectAgent entity = new ProjectAgent();
         BeanUtils.copyProperties(dto, entity);
-        normalize(entity);
         entity.setId(id);
         entity.setUserId(existing.getUserId());
         entity.setUpdateTime(LocalDateTime.now());
@@ -103,8 +101,8 @@ public class ProjectAgentServiceImpl implements ProjectAgentService {
 
     @Override
     public ProjectAgentVO getById(Long id) {
-        ProjectAgent entity = projectAgentMapper.getById(id);
-        return toVO(entity);
+        // Mapper 已 JOIN sys_agent 带出 name/role
+        return projectAgentMapper.getById(id);
     }
 
     @Override
@@ -112,16 +110,21 @@ public class ProjectAgentServiceImpl implements ProjectAgentService {
         // 格式: "projectId-id1-id2-id3" —— projectId 仅作过滤, userId 从 JWT 取(防删别人的)
         String[] parts = ids.split("-");
         Long projectId = Long.parseLong(parts[0]);
+        Long userId = BaseContext.getCurrentUserId();
         List<Long> idList = new ArrayList<>();
         for (int i = 1; i < parts.length; i++) {
             idList.add(Long.parseLong(parts[i]));
         }
-        projectAgentMapper.deleteByIds(idList, projectId, BaseContext.getCurrentUserId(), LocalDateTime.now());
+        LocalDateTime now = LocalDateTime.now();
+        // 1. 删除项目成员行
+        projectAgentMapper.deleteByIds(idList, projectId, userId, now);
+        // 2. 级联删除这些成员的项目节点（子查询限定 projectId+userId 防越权）
+        projectAgentNodeMapper.deleteByMemberIds(projectId, idList, userId, now);
     }
 
     /**
-     * 从 Agent 池复制到项目团队（复制非引用：改池不影响已复制的成员）
-     * 一个事务：查池 → 逐条复制字段 → 批量插入，全成或全败
+     * 从 Agent 池拉取到项目团队（成员行存 agentId 引用池, 节点复制一份进项目）
+     * 一个事务：查池 → 逐条插入成员行 + 复制节点 → 全成或全败
      */
     @Override
     @Transactional
@@ -131,28 +134,43 @@ public class ProjectAgentServiceImpl implements ProjectAgentService {
         }
         // ⚠️ 不信任前端传的 userId, 从 JWT 解析当前登录用户
         Long currentUserId = BaseContext.getCurrentUserId();
-        // 池里的 Agent 只允许复制自己的（防拿别人的池模板）
+        // 池里的 Agent 只允许拉取自己的（防拿别人的池模板）
         List<AgentPool> pool = agentPoolMapper.selectByIds(dto.getAgentIds()).stream()
                 .filter(p -> p.getUserId().equals(currentUserId))
                 .collect(Collectors.toList());
+        // 批量查池节点, 按 agentId 分组, 供逐成员复制
+        List<AgentNode> poolNodes = agentNodeMapper.selectByAgentIds(dto.getAgentIds());
+        Map<Long, List<AgentNode>> nodesByAgent = poolNodes.stream()
+                .collect(Collectors.groupingBy(AgentNode::getAgentId));
         LocalDateTime now = LocalDateTime.now();
         int count = 0;
         for (AgentPool p : pool) {
             ProjectAgent entity = new ProjectAgent();
             entity.setProjectId(dto.getProjectId());
             entity.setUserId(currentUserId);
-            entity.setName(p.getName());
-            entity.setRole(p.getRole());
-            entity.setSystemPrompt(p.getSystemPrompt());
-            entity.setTools(p.getTools());
-            entity.setModel(p.getModel());
-            entity.setTemperature(p.getTemperature());
+            entity.setAgentId(p.getId());
             // 拉取进项目默认参与
             entity.setStatus(1);
             entity.setCreateTime(now);
             entity.setUpdateTime(now);
             projectAgentMapper.insert(entity);
             count++;
+            // 复制池节点到项目节点表（复制非引用: 项目内修改不影响池）
+            for (AgentNode n : nodesByAgent.getOrDefault(p.getId(), Collections.emptyList())) {
+                ProjectAgentNode pn = new ProjectAgentNode();
+                pn.setProjectId(dto.getProjectId());
+                pn.setAgentId(p.getId());
+                pn.setUserId(currentUserId);
+                pn.setNodeName(n.getNodeName());
+                pn.setDescription(n.getDescription());
+                pn.setSystemPrompt(n.getSystemPrompt());
+                pn.setTemperature(n.getTemperature());
+                pn.setTools(n.getTools());
+                pn.setModel(n.getModel());
+                pn.setCreateTime(now);
+                pn.setUpdateTime(now);
+                projectAgentNodeMapper.insert(pn);
+            }
         }
         return count;
     }

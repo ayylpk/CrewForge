@@ -18,9 +18,9 @@ export function fetchAgentPoolById(id: number): Promise<agentPoolVO> {
   return request.get(`/api/agent/${id}`) as Promise<agentPoolVO>
 }
 
-/** 新建池 Agent（后端不取 token，userId 必须前端传） */
-export function createAgentPool(dto: agentPoolDTO): Promise<void> {
-  return request.post('/api/agent', dto) as Promise<void>
+/** 新建池 Agent，返回新 Agent id（挂节点用） */
+export function createAgentPool(dto: agentPoolDTO): Promise<number> {
+  return request.post('/api/agent', dto) as Promise<number>
 }
 
 /** 更新池 Agent（id 走路径） */

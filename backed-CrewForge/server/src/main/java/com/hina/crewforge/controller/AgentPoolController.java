@@ -29,12 +29,12 @@ public class AgentPoolController {
         return Result.success(pageResult);
     }
 
-    @Operation(summary = "新增")
+    @Operation(summary = "新增, 返回新 Agent id")
     @PostMapping
-    public Result<Void> create(@RequestBody AgentPoolDTO dto) {
+    public Result<Long> create(@RequestBody AgentPoolDTO dto) {
         log.info("新增agent:{}",dto);
-        agentService.create(dto);
-        return Result.success();
+        Long id = agentService.create(dto);
+        return Result.success(id);
     }
 
     @Operation(summary = "删除")

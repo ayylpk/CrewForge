@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.hina.crewforge.mapper.ProjectAgentNodeMapper">
+
+    <select id="listByMember" resultType="com.hina.crewforge.pojo.entity.ProjectAgentNode">
+        SELECT id, project_id, agent_id, user_id, node_name, description, system_prompt,
+               temperature, tools, model, create_time, update_time
+        FROM sys_project_agent_node
+        WHERE project_id = #{projectId}
+          AND agent_id = #{agentId}
+          AND deleted = 0
+        ORDER BY id ASC
+    </select>
+
+    <insert id="insert" parameterType="com.hina.crewforge.pojo.entity.ProjectAgentNode"
+            useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO sys_project_agent_node (
+            project_id,
+            agent_id,
+            user_id,
+            node_name,
+            description,
+            system_prompt,
+            temperature,
+            tools,
+            model,
+            create_time,
+            update_time
+        ) VALUES (
+            #{projectId},
+            #{agentId},
+            #{userId},
+            #{nodeName},
+            #{description},
+            #{systemPrompt},
+            #{temperature},
+            #{tools},
+            #{model},
+            #{createTime},
+            #{updateTime}
+        )
+    </insert>
+
+    <update id="updateById" parameterType="com.hina.crewforge.pojo.entity.ProjectAgentNode">
+        UPDATE sys_project_agent_node
+        SET node_name = #{nodeName},
+            description = #{description},
+            system_prompt = #{systemPrompt},
+            temperature = #{temperature},
+            tools = #{tools},
+            model = #{model},
+            update_time = #{updateTime}
+        WHERE id = #{id}
+          AND deleted = 0
+    </update>
+
+    <select id="getById" resultType="com.hina.crewforge.pojo.entity.ProjectAgentNode">
+        SELECT id, project_id, agent_id, user_id, node_name, description, system_prompt,
+               temperature, tools, model, create_time, update_time
+        FROM sys_project_agent_node
+        WHERE id = #{id}
+          AND deleted = 0
+    </select>
+
+    <update id="deleteById">
+        UPDATE sys_project_agent_node
+        SET deleted = 1,
+            update_time = #{updateTime}
+        WHERE id = #{id}
+    </update>
+
+    <!-- 级联删除: 成员 id 是 sys_project_agent.id, 节点表存的是 agent_id, 用子查询换算 -->
+    <update id="deleteByMemberIds">
+        UPDATE sys_project_agent_node
+        SET deleted = 1,
+            update_time = #{updateTime}
+        WHERE project_id = #{projectId}
+          AND user_id = #{userId}
+          AND agent_id IN (
+              SELECT agent_id FROM sys_project_agent
+              WHERE id IN
+              <foreach collection="memberIds" item="id" open="(" separator="," close=")">
+                  #{id}
+              </foreach>
+                AND project_id = #{projectId}
+                AND user_id = #{userId}
+                AND deleted = 0
+          )
+    </update>
+
+</mapper>

@@ -1,4 +1,4 @@
-import { ChatDeepSeek } from "@langchain/deepseek";
+import { DirectChatDeepSeek } from "./deepseekClient.ts";
 import { SystemMessage } from "@langchain/core/messages";
 import * as z from "zod";
 import { Annotation, StateGraph, START, END, MemorySaver, type GraphNode } from "@langchain/langgraph";
@@ -22,7 +22,7 @@ import { TransferStation, roles, llmWithTimeout } from "./Hub.ts";   // 测试�
 //   - 匹配问题（前端调的接口/传参/字段 vs 后端定义）由 LLM 归入出错的那一侧
 // ============================================================
 
-const model = new ChatDeepSeek({
+const model = new DirectChatDeepSeek({
     model: "deepseek-v4-flash",
     timeout: 120000,   // 单次调用 120s 超时：thinking 模型大输出可能很慢，但必须有界（挂起走重试）
 })
@@ -81,28 +81,30 @@ const MessageState = Annotation.Root({
 // ---------- 提示词 ----------
 
 const test_prompt: string = `
-# 角色定义
-你是 CrewForge 项目的【测试-契约检查】Agent。你拿到一个接口的前后端任务和它们产出的代码文件，要判断契约是否被实现（纯代码阅读判断，不执行代码）。
+# 角色
+你是 CrewForge 项目的测试-契约检查 Agent。你只通过阅读任务契约和代码判断实现是否满足要求，不执行代码，也不替换开发者做设计。
 
 ## 输入
 1. 后端任务（契约：method/path/入参/返回/验收标准）+ 后端产出代码
 2. 前端任务（页面/交互/调用的接口/验收标准）+ 前端产出代码
 
-## 判断三件事
-1. 后端问题：路由是否按契约定义（method+path）、入参校验是否按参数契约、返回字段是否齐全、验收标准是否满足
-2. 前端问题：页面交互是否实现（表单/校验/调接口/数据渲染）、验收标准是否满足
-3. 匹配问题：前端调用的接口（method+path）是否和后端定义的一致？前端传参名/字段名是否和后端入参/返回对得上？——匹配问题归入出错的那一侧（谁错了写进谁的 issues）
+## 检查顺序
+1. 后端：核对 method、path、参数名与必填性、返回字段、错误处理和后端验收标准。
+2. 前端：核对页面交互、表单校验、请求调用、参数组装、响应渲染和前端验收标准。
+3. 集成契约：核对前端调用的 method/path、请求字段和响应字段是否与后端完全一致。
+4. 每个问题都要引用可定位的实际行为，说明期望和实际；没有证据的问题不要提出。
 
-## 输出（必须遵守）
-只输出一段 JSON，不要夹带讨论：
+## 输出
+只输出合法 JSON，不要 Markdown、解释或额外字段：
 { "pass": true/false, "blame": "backend"|"frontend"|"both", "backendIssues": ["具体问题"], "frontendIssues": ["具体问题"] }
 
-## 归责（blame）规则：结论必须明确到一侧或两侧
+## 归责
+结论必须明确到一侧或两侧：
 - 谁错了就归谁：只有后端问题→"backend"；只有前端问题→"frontend"；两边都错→"both"
 - blame 必须和 issues 自洽：blame="backend" 则 backendIssues 非空、frontendIssues 为空；"both" 则两边都非空
 - 匹配问题（前后端对不上）归入出错的那一侧，blame 跟着那一侧走
 - pass=true 时 issues 留空数组，blame 填 "backend" 占位（调用方只看 pass）
-- pass=false 时 issues 写清楚：哪里不对、期望是什么、实际是什么
+- pass=false 时，每条 issue 写清楚位置、期望行为和实际行为；问题应足够具体，使开发 Agent 可以直接修改。
 `;
 
 // ---------- 结构化输出模型 ----------
@@ -203,7 +205,7 @@ export async function runTest(name: string, station: TransferStation) {
             const pair = data.pair;
             const pairKey = pair.back.id;
             const label = `${pairKey}${pair.front ? `+${pair.front.id}` : ""} ${pair.back.method} ${pair.back.path}`;
-            console.log(`[${name}] ← 合并器：收到 ${label}`);
+                console.log(`[${name}] 收到合并器的接口对：${label}`);
 
             // 契约判断（图：机械预检 + LLM；每对独立断点，可续跑）
             let v: Verdict;
@@ -221,14 +223,14 @@ export async function runTest(name: string, station: TransferStation) {
             if (v.pass) {
                 // 判过 → 维护计数（维护收齐任务才报阶段完成）
                 station.sendMessage(name, "maintainer", JSON.stringify({ type: "task_passed", pair }));
-                console.log(`[${name}] → 维护：${label} 通过`);
+                console.log(`[${name}] 发送到维护：${label} 通过`);
             } else {
                 // 判定轮次上限：同一对 ≥3 次未过 → 放弃（防开发修不好无限循环），上报维护记失败
                 const count = (judgementCount.get(pairKey) ?? 0) + 1;
                 judgementCount.set(pairKey, count);
                 if (count >= 3) {
                     station.sendMessage(name, "maintainer", JSON.stringify({ type: "task_failed", pairId: pairKey }));
-                    console.log(`[${name}] ⚠️ ${label} 判定 ${count} 次仍未通过，放弃并上报维护`);
+                    console.log(`[${name}] 提示：${label} 判定 ${count} 次仍未通过，放弃并上报维护`);
                 } else {
                     // 判错 → 按 blame 发回对应开发（revision 带问题清单，开发据此修改代码）
                     // 多开发场景：目标用 pickLeastBusy(role) 选该角色负载最低的（不写死名字）
@@ -240,7 +242,7 @@ export async function runTest(name: string, station: TransferStation) {
                         station.sendMessage(name, target, JSON.stringify({ type: "revision", task: pair.back, issues: v.backendIssues }));
                         v.backendIssues.forEach(i => console.log(`   后端：${i}`));
                     } else {
-                        console.log(`⚠️ 没有后端开发注册，返工发送失败：${pair.back.id}`);
+                            console.log(`提示：没有后端开发注册，返工发送失败：${pair.back.id}`);
                     }
                 }
                 if (v.blame === "frontend" || v.blame === "both") {
@@ -250,7 +252,7 @@ export async function runTest(name: string, station: TransferStation) {
                             station.sendMessage(name, target, JSON.stringify({ type: "revision", task: pair.front, issues: v.frontendIssues }));
                             v.frontendIssues.forEach(i => console.log(`   前端：${i}`));
                         } else {
-                            console.log(`⚠️ 没有前端开发注册，返工发送失败：${pair.front.id}`);
+                            console.log(`提示：没有前端开发注册，返工发送失败：${pair.front.id}`);
                         }
                     }
                 }

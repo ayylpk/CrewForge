@@ -3,8 +3,6 @@ import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
-import java.math.BigDecimal;
-
 @Data
 @AllArgsConstructor
 @NoArgsConstructor
@@ -15,14 +13,6 @@ public class AgentPoolDTO {
     private String name;
     /** 职位描述 */
     private String role;
-    /** 系统提示词 */
-    private String systemPrompt;
-    /** 可用工具列表(JSON数组字符串) */
-    private String tools;
-    /** 模型 */
-    private String model;
-    /** 采样温度 */
-    private BigDecimal temperature;
     /** 状态: 1-启用, 0-停用 */
     private Integer status;
 }

@@ -51,7 +51,7 @@ export async function runMaintainer(station: TransferStation) {
         while (true) {
             const msg = await station.waitForMessage("maintainer");
             if (!msg) continue;
-            let data: { type?: string; phase?: number; pairIds?: string[]; final?: boolean; pair?: Pair };
+            let data: { type?: string; phase?: number; pairId?: string; pairIds?: string[]; final?: boolean; pair?: Pair };
             try { data = JSON.parse(msg.content); } catch { continue; }
 
             // 用角色检测发送方（多实例场景名字不定，role 才是身份）
@@ -62,20 +62,20 @@ export async function runMaintainer(station: TransferStation) {
                 // 测试判过的一对 → 按对 id 去重累积（返工不影响：同一对只 pass 一次）
                 const key = data.pair.back.id;
                 passedPairs.add(key);
-                console.log(`[maintainer] ← 测试：${key} 通过（已收 ${passedPairs.size} 对）`);
+                console.log(`[maintainer] 收到测试结果：${key} 通过（已收 ${passedPairs.size} 对）`);
                 handled = true;
             } else if (msg.sender === "merger" && data.type === "task_failed" && data.pairId) {
                 // 合并器上报：返工耗尽放弃的一对 → 记失败（也算定论，保证阶段能收敛）
                 // 注意：merger 不是 roles 枚举成员（纯代码装配点、固定名单例），按名字判断
                 failedPairs.add(data.pairId);
-                console.log(`[maintainer] ← 合并器：${data.pairId} 放弃（已放弃 ${failedPairs.size} 对）`);
+                console.log(`[maintainer] 收到合并器结果：${data.pairId} 放弃（已放弃 ${failedPairs.size} 对）`);
                 handled = true;
             } else if (senderRole === roles.architect && data.type === "tasks_declared") {
                 // 架构师声明任务（可多次追加；final=true 表示本阶段不再有）
                 currentPhase = data.phase ?? currentPhase;
                 (data.pairIds ?? []).forEach(id => declaredPairs.add(id));
                 if (data.final) declaredFinal = true;
-                console.log(`[maintainer] ← 架构师：声明 ${(data.pairIds ?? []).length} 对${data.final ? "（final：本阶段不再有）" : ""}，累计 ${declaredPairs.size} 对`);
+                console.log(`[maintainer] 收到架构师声明：${(data.pairIds ?? []).length} 对${data.final ? "（final：本阶段不再有）" : ""}，累计 ${declaredPairs.size} 对`);
                 handled = true;
             }
 
@@ -84,7 +84,7 @@ export async function runMaintainer(station: TransferStation) {
                 && [...declaredPairs].every(p => passedPairs.has(p) || failedPairs.has(p))) {
                 const failed = failedPairs.size;
                 station.sendMessage("maintainer", "architect", JSON.stringify({ type: "phase_done", phase: currentPhase }));
-                console.log(`[maintainer] → 架构师：阶段 ${currentPhase} 完成（${declaredPairs.size} 对：通过 ${declaredPairs.size - failed}，放弃 ${failed}），请转告 PM 下一阶段`);
+                console.log(`[maintainer] 发送到架构师：阶段 ${currentPhase} 完成（${declaredPairs.size} 对：通过 ${declaredPairs.size - failed}，放弃 ${failed}），请转告 PM 下一阶段`);
                 // 重置，等下一阶段（新声明 + 新通过 + 新失败）
                 declaredPairs = new Set();
                 passedPairs = new Set();
