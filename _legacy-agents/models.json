@@ -1,0 +1,37 @@
+{
+  "profiles": {
+    "planning": {
+      "provider": "deepseek",
+      "model": "deepseek-v4-flash",
+      "apiKeyEnv": "DEEPSEEK_API_KEY",
+      "temperature": 0.3,
+      "clientTimeoutMs": 240000,
+      "requestTimeoutMs": 240000
+    },
+    "backend": {
+      "provider": "deepseek",
+      "model": "deepseek-v4-flash",
+      "apiKeyEnv": "DEEPSEEK_API_KEY",
+      "temperature": 0.1,
+      "clientTimeoutMs": 120000,
+      "requestTimeoutMs": 150000
+    },
+    "frontend": {
+      "provider": "deepseek",
+      "model": "deepseek-v4-flash",
+      "apiKeyEnv": "DEEPSEEK_API_KEY",
+      "temperature": 0.1,
+      "thinking": "disabled",
+      "clientTimeoutMs": 120000,
+      "requestTimeoutMs": 150000
+    },
+    "review": {
+      "provider": "deepseek",
+      "model": "deepseek-v4-flash",
+      "apiKeyEnv": "DEEPSEEK_API_KEY",
+      "temperature": 0.2,
+      "clientTimeoutMs": 120000,
+      "requestTimeoutMs": 150000
+    }
+  }
+}

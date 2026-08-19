@@ -151,6 +151,20 @@ public class TenantServiceImpl implements TenantService {
     @Override
     public TenantVO getById(Long id) {
         Tenant entity = tenantMapper.selectById(id);
+        if (entity == null) {
+            throw new BaseException("团队不存在: " + id);
+        }
+        // 团队成员(含创建者)可读; 非成员不可读他人团队详情（防 IDOR 越权读取）
+        Long userId = BaseContext.getCurrentUserId();
+        if (!entity.getOwnerId().equals(userId)) {
+            Long cnt = userTenantMapper.selectCount(new LambdaQueryWrapper<UserTenant>()
+                    .eq(UserTenant::getUserId, userId)
+                    .eq(UserTenant::getTenantId, id)
+                    .eq(UserTenant::getStatus, 1));
+            if (cnt == null || cnt == 0) {
+                throw new BaseException("你不属于该团队，无权查看");
+            }
+        }
         return toVO(entity);
     }
 

@@ -23,4 +23,7 @@ public interface AgentPoolMapper {
 
     void deleteByIds(@Param("ids") List<Long> ids, @Param("userId") Long userId,
                      @Param("updateTime") LocalDateTime updateTime);
+
+    /** 查用户池里指定角色的 Agent（项目自动补单例角色时用；角色名即中文 label） */
+    AgentPool findByRoleAndUser(@Param("role") String role, @Param("userId") Long userId);
 }

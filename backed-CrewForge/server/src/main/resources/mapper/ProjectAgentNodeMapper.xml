@@ -4,7 +4,8 @@
 
     <select id="listByMember" resultType="com.hina.crewforge.pojo.entity.ProjectAgentNode">
         SELECT id, project_id, agent_id, user_id, node_name, description, system_prompt,
-               temperature, tools, model, create_time, update_time
+               temperature, tools, model, node_type, schema_key, code_key, output,
+               create_time, update_time
         FROM sys_project_agent_node
         WHERE project_id = #{projectId}
           AND agent_id = #{agentId}
@@ -24,6 +25,10 @@
             temperature,
             tools,
             model,
+            node_type,
+            schema_key,
+            code_key,
+            output,
             create_time,
             update_time
         ) VALUES (
@@ -36,6 +41,10 @@
             #{temperature},
             #{tools},
             #{model},
+            #{nodeType},
+            #{schemaKey},
+            #{codeKey},
+            #{output},
             #{createTime},
             #{updateTime}
         )
@@ -49,6 +58,10 @@
             temperature = #{temperature},
             tools = #{tools},
             model = #{model},
+            node_type = #{nodeType},
+            schema_key = #{schemaKey},
+            code_key = #{codeKey},
+            output = #{output},
             update_time = #{updateTime}
         WHERE id = #{id}
           AND deleted = 0
@@ -56,7 +69,8 @@
 
     <select id="getById" resultType="com.hina.crewforge.pojo.entity.ProjectAgentNode">
         SELECT id, project_id, agent_id, user_id, node_name, description, system_prompt,
-               temperature, tools, model, create_time, update_time
+               temperature, tools, model, node_type, schema_key, code_key, output,
+               create_time, update_time
         FROM sys_project_agent_node
         WHERE id = #{id}
           AND deleted = 0

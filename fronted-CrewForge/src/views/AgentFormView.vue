@@ -2,15 +2,16 @@
 /**
  * Agent 表单页（新建/编辑，双模式），Agent 配置以"节点"为原子
  * - 池模式（默认）：保存到 Agent 池（sys_agent），档案 = 名称/职位；节点存 sys_agent_node（POST/PUT /api/agent-node）
- * - 项目模式（?projectId=）：成员档案来自池（只读展示，JOIN sys_agent），节点存 sys_project_agent_node（复制自池，项目内独立）
- *   - 项目模式新建（/agents/new?projectId=）没有池关联 → 引导页：成员必须从仓库拉取
+ * - 项目模式（编辑时带 ?projectId=）：成员档案来自池（只读展示，JOIN sys_agent），节点存 sys_project_agent_node（复制自池，项目内独立）
+ * - 团队页新建（/agents/new?projectId=）：先保存到 Agent 池，再自动复制为当前项目成员
  * userId 后端从 JWT 取，前端不传
  */
 import { ref, computed, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElDialog, ElMessage } from 'element-plus'
+import 'element-plus/es/components/dialog/style/css'
 import { createAgentPool, updateAgentPool, fetchAgentPoolById } from '../api/agentPools'
-import { fetchProjectAgentById } from '../api/agent'
+import { fetchProjectAgentById, copyFromPool } from '../api/agent'
 import {
   fetchAgentNodes, createAgentNode, updateAgentNode, deleteAgentNode,
 } from '../api/agentNode'
@@ -18,6 +19,7 @@ import {
   fetchProjectAgentNodes, createProjectAgentNode, updateProjectAgentNode, deleteProjectAgentNode,
 } from '../api/projectAgentNode'
 import type { agentNodeVO, projectAgentNodeVO, agentNodeDTO, projectAgentNodeDTO } from '../types/agent'
+import MonacoEditor from '../components/MonacoEditor.vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -25,22 +27,18 @@ const route = useRoute()
 const isEdit = computed(() => !!route.params.id)
 const agentPoolId = Number(route.params.id || 0)
 
-/** 项目模式：带 ?projectId= 时保存到项目团队（sys_project_agent），否则保存到池（sys_agent） */
+/** 编辑成员时保存到项目节点；新建时始终先保存到 Agent 池 */
 const projectId = Number(route.query.projectId || 0)
-const isProjectMode = computed(() => projectId > 0)
+const isProjectMode = computed(() => projectId > 0 && isEdit.value)
 
-/** 项目模式新建 = 无池关联的成员无法配置 → 引导页 */
-const showGuide = computed(() => isProjectMode.value && !isEdit.value)
-
-// ===== 职责预设（与 TeamView 一致，供职位下拉） =====
+// ===== 职责预设（供职位下拉；项目经理/架构师为单例角色：一个项目最多一个，后端自动补模板） =====
 const ROLE_META: Record<string, { label: string }> = {
   manager: { label: '项目经理' },
   architect: { label: '架构师' },
   backend: { label: '后端开发' },
   frontend: { label: '前端开发' },
   tester: { label: '测试' },
-  devops: { label: '运维部署' },
-  docs: { label: '文档维护' },
+  maintainer: { label: '维护' },
 }
 
 // ===== 池模式档案表单（名称/职位；提示词等配置在节点里） =====
@@ -110,51 +108,92 @@ function modelLabel(value: string): string {
 
 // ===== 节点（工作区：未保存的增删改都在内存，点保存才落库） =====
 
-/** 工具项：函数名 + 作用说明 */
+/** 工具项：函数名 + 描述 + 参数 JSON + 函数体代码（对齐运行时 Tool 结构） */
 interface ToolItem {
   name: string
-  desc: string
+  description: string
+  /** JSON Schema 文本（空 = 无参数） */
+  parameters: string
+  /** 函数体（箭头函数字符串；空 = 仅声明不可执行） */
+  code: string
+}
+
+/** 空工具（新增时用） */
+function emptyTool(): ToolItem {
+  return { name: '', description: '', parameters: '', code: '' }
 }
 
 /**
- * tools（JSON 数组字符串，如 '["web_search:联网搜索","read_file"]'）→ 工具行
- * 兼容旧格式：非 JSON（逗号分隔）时降级按逗号拆
+ * tools（JSON 字符串）→ 工具行
+ * 兼容三种存储形态：
+ *   新格式：[{"name":"web_search","description":"...","parameters":{...},"code":"..."}]
+ *   旧格式：["web_search:联网搜索"]（字符串数组，name:desc）
+ *   兜底：  非 JSON 时按逗号拆
  */
 function toolsParse(tools: string): ToolItem[] {
   if (!tools) return []
-  let arr: string[]
+  let parsed: unknown
   try {
-    const parsed = JSON.parse(tools)
-    arr = Array.isArray(parsed) ? parsed.map(String) : []
+    parsed = JSON.parse(tools)
   } catch {
-    arr = tools.split(',')
+    return tools
+      .split(',')
+      .map(s => s.trim())
+      .filter(s => s.length > 0)
+      .map(s => {
+        const [name, desc] = s.split(':').map(x => x.trim())
+        return { name: name || s, description: desc || '', parameters: '', code: '' }
+      })
   }
-  return arr
-    .map(s => s.trim())
-    .filter(s => s.length > 0)
-    .map(item => {
+  if (!Array.isArray(parsed)) return []
+  return parsed.map(item => {
+    if (typeof item === 'string') {
+      // 旧格式字符串 "name:desc"
       const [name, desc] = item.split(':').map(s => s.trim())
-      return {
-        name: name || item,
-        desc: desc || ''
-      }
-    })
+      return { name: name || item, description: desc || '', parameters: '', code: '' }
+    }
+    const o = (item ?? {}) as Record<string, unknown>
+    const parameters = o.parameters
+    return {
+      name: String(o.name ?? '').trim(),
+      description: String(o.description ?? '').trim(),
+      parameters: parameters && typeof parameters === 'object' ? JSON.stringify(parameters, null, 2) : '',
+      code: String(o.code ?? '').trim(),
+    }
+  }).filter(t => t.name.length > 0)
 }
 
-/** 工具行 → tools JSON 数组字符串（元素格式 "函数名:作用"） */
+/** 工具行 → tools JSON 字符串（对象数组，空字段省略） */
 function toolsCombine(tools: ToolItem[]): string {
   if (!tools || tools.length === 0) return ''
   const arr = tools
-    .map(t => t.name.trim())
-    .filter(s => s.length > 0)
-    .map((name, i) => {
-      const desc = (tools[i].desc || '').trim()
-      return desc ? `${name}:${desc}` : name
+    .filter(t => t.name.trim().length > 0)
+    .map(t => {
+      const out: Record<string, unknown> = { name: t.name.trim(), description: t.description.trim() }
+      if (t.parameters.trim()) {
+        try { out.parameters = JSON.parse(t.parameters) } catch { /* 保存前已校验，忽略 */ }
+      }
+      if (t.code.trim()) out.code = t.code.trim()
+      return out
     })
-  return JSON.stringify(arr)
+  return arr.length > 0 ? JSON.stringify(arr) : ''
 }
 
-/** 工作区节点（id = null 表示本地新增，尚未落库；expanded 仅控制卡片提示词展开） */
+/** 校验函数体是合法函数表达式（试解析不执行；空 = 仅声明，放行） */
+function isValidFunctionCode(code: string): boolean {
+  if (!code.trim()) return true
+  try {
+    // eslint-disable-next-line no-new-func
+    new Function(`return (${code})`)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 工作区节点（id = null 表示本地新增，尚未落库；expanded 仅控制卡片提示词展开）
+ * 技术字段（nodeType/schemaKey/codeKey/output）用户不可编辑，保存时必须原样带回，
+ * 否则 UPDATE 会把它们置 null 覆盖（node_type 是 NOT NULL 列会直接报错） */
 interface NodeEdit {
   id: number | null
   nodeName: string
@@ -163,6 +202,10 @@ interface NodeEdit {
   tools: string
   model: string
   temperature: number | null
+  nodeType: string
+  schemaKey: string | null
+  codeKey: string | null
+  output: string | null
   expanded?: boolean
 }
 
@@ -171,6 +214,8 @@ const nodes = ref<NodeEdit[]>([])
 const removedIds = ref<number[]>([])
 
 function toNodeEdit(v: agentNodeVO | projectAgentNodeVO): NodeEdit {
+  // 项目节点（projectAgentNodeVO）无技术字段 → 取不到时给默认（llm）
+  const pool = v as agentNodeVO
   return {
     id: v.id,
     nodeName: v.nodeName ?? '',
@@ -179,6 +224,10 @@ function toNodeEdit(v: agentNodeVO | projectAgentNodeVO): NodeEdit {
     tools: v.tools ?? '',
     model: v.model ?? '',
     temperature: v.temperature ?? null,
+    nodeType: pool.nodeType ?? 'llm',
+    schemaKey: pool.schemaKey ?? null,
+    codeKey: pool.codeKey ?? null,
+    output: pool.output ?? null,
   }
 }
 
@@ -193,18 +242,6 @@ interface NodeDraft {
   temperature: number | null
 }
 const editing = ref<NodeDraft | null>(null)
-
-function startAddNode() {
-  editing.value = {
-    index: -1,
-    nodeName: '',
-    description: '',
-    systemPrompt: '',
-    toolsArr: [],
-    model: '',
-    temperature: 0.7,
-  }
-}
 
 function startEditNode(i: number) {
   const n = nodes.value[i]
@@ -224,14 +261,126 @@ function cancelEdit() {
 }
 
 /** 编辑器内工具行操作 */
-function editAddTool() {
-  editing.value?.toolsArr.push({ name: '', desc: '' })
-}
+const toolEditing = ref<ToolItem | null>(null)   // 行内编辑中的工具（null = 未展开）
+const toolEditingIndex = ref(-1)                  // toolsArr 下标；-1 = 新增
+
 function editRemoveTool(i: number) {
   editing.value?.toolsArr.splice(i, 1)
+  if (toolEditingIndex.value === i) toolEditCancel()
 }
 
-/** 编辑器保存 → 写回工作区节点（不落库） */
+function toolEditAdd() {
+  toolEditing.value = emptyTool()
+  toolEditingIndex.value = -1
+}
+
+function toolEditStart(i: number) {
+  const t = editing.value?.toolsArr[i]
+  if (!t) return
+  toolEditing.value = { ...t }
+  toolEditingIndex.value = i
+}
+
+function toolEditCancel() {
+  toolEditing.value = null
+  toolEditingIndex.value = -1
+}
+
+/** 参数模板：一键填入基础 JSON Schema */
+function applyParamTemplate() {
+  if (!toolEditing.value) return
+  toolEditing.value.parameters = JSON.stringify(
+    { type: 'object', properties: {}, required: [] },
+    null,
+    2,
+  )
+}
+
+/** 保存工具：校验通过写回 toolsArr，已落库的节点即时更新 API */
+async function toolEditSave() {
+  const d = toolEditing.value
+  if (!d) return
+  if (!d.name.trim()) {
+    ElMessage.warning('请填写函数名')
+    return
+  }
+  if (!d.description.trim()) {
+    ElMessage.warning('请填写作用描述')
+    return
+  }
+  if (d.parameters.trim()) {
+    try {
+      JSON.parse(d.parameters)
+    } catch {
+      ElMessage.warning('参数声明不是合法 JSON')
+      return
+    }
+  }
+  if (!isValidFunctionCode(d.code)) {
+    ElMessage.warning('函数体不是合法的函数表达式（需是箭头函数）')
+    return
+  }
+  const saved: ToolItem = {
+    name: d.name.trim(),
+    description: d.description.trim(),
+    parameters: d.parameters.trim(),
+    code: d.code.trim(),
+  }
+  if (toolEditingIndex.value >= 0 && editing.value) {
+    editing.value.toolsArr[toolEditingIndex.value] = saved
+  } else {
+    editing.value?.toolsArr.push(saved)
+  }
+  // 已落库的节点 → 工具变更即时写库；新增节点无 id，等保存节点时一起落
+  await persistToolToNode()
+  toolEditing.value = null
+  toolEditingIndex.value = -1
+}
+
+/** 工具变更即时写库：仅当编辑的是已落库节点时调用（池/项目模式对应 API） */
+async function persistToolToNode() {
+  const d = editing.value
+  if (!d || d.index < 0) return
+  const node = nodes.value[d.index]
+  if (!node || node.id == null) return
+  const base = {
+    agentId: isProjectMode.value ? memberAgentId.value : agentPoolId,
+    nodeName: node.nodeName,
+    description: node.description,
+    systemPrompt: node.systemPrompt,
+    tools: toolsCombine(d.toolsArr),
+    model: node.model,
+    temperature: node.temperature,
+  }
+  try {
+    if (isProjectMode.value) {
+      // 项目节点带技术字段（sys_project_agent_node.node_type 是 NOT NULL）
+      await updateProjectAgentNode(node.id, {
+        ...base,
+        projectId,
+        nodeType: node.nodeType ?? 'llm',
+        schemaKey: node.schemaKey ?? null,
+        codeKey: node.codeKey ?? null,
+        output: node.output ?? null,
+      } as projectAgentNodeDTO)
+    } else {
+      // 池节点带技术字段（同 persistNodes：缺了会置 null 覆盖 NOT NULL 列）
+      await updateAgentNode(node.id, {
+        ...base,
+        nodeType: node.nodeType ?? 'llm',
+        schemaKey: node.schemaKey ?? null,
+        codeKey: node.codeKey ?? null,
+        output: node.output ?? null,
+      } as agentNodeDTO)
+    }
+    node.tools = base.tools
+    ElMessage.success(`工具「${toolEditing.value?.name || '已更新'}」已保存`)
+  } catch {
+    ElMessage.error('工具保存失败，请重试')
+  }
+}
+
+/** 编辑器保存 → 写回工作区节点（不落库）；技术字段原样保留 */
 function saveNodeDraft() {
   const d = editing.value
   if (!d) return
@@ -239,6 +388,7 @@ function saveNodeDraft() {
     ElMessage.warning('请填写节点名称')
     return
   }
+  const prev = d.index >= 0 ? nodes.value[d.index] : null
   const node: NodeEdit = {
     id: d.index >= 0 ? nodes.value[d.index].id : null,
     nodeName: d.nodeName.trim(),
@@ -247,26 +397,15 @@ function saveNodeDraft() {
     tools: toolsCombine(d.toolsArr),
     model: d.model,
     temperature: d.temperature ?? 0.7,
+    // 技术字段保留原值（用户不可编辑）
+    nodeType: prev?.nodeType ?? 'llm',
+    schemaKey: prev?.schemaKey ?? null,
+    codeKey: prev?.codeKey ?? null,
+    output: prev?.output ?? null,
   }
   if (d.index >= 0) nodes.value[d.index] = node
   else nodes.value.push(node)
   editing.value = null
-}
-
-/** 删除节点：记下服务端 id（保存时 DELETE），本地移除 */
-async function removeNode(i: number) {
-  const n = nodes.value[i]
-  try {
-    await ElMessageBox.confirm(`确定删除节点「${n.nodeName}」吗？`, '删除确认', {
-      confirmButtonText: '删除',
-      cancelButtonText: '取消',
-      type: 'warning',
-    })
-  } catch {
-    return // 用户取消
-  }
-  if (n.id != null) removedIds.value.push(n.id)
-  nodes.value.splice(i, 1)
 }
 
 /** 文本框随内容自动增高 */
@@ -277,9 +416,6 @@ function autoResize(el: HTMLTextAreaElement) {
 
 // ===== 页面初始化（回显档案 + 节点） =====
 onMounted(async () => {
-  // 项目模式新建：引导页，无需拉取
-  if (showGuide.value) return
-
   if (isProjectMode.value) {
     try {
       // 项目模式：成员档案来自池（JOIN 带出 name/role），节点存项目表
@@ -290,8 +426,8 @@ onMounted(async () => {
       if (memberAgentId.value > 0) {
         nodes.value = (await fetchProjectAgentNodes(projectId, memberAgentId.value)).map(toNodeEdit)
       }
-    } catch {
-      /* 拦截器已提示 */
+    } catch (e) {
+      console.error('[AgentFormView] 项目模式加载失败:', e)
     }
     return
   }
@@ -305,8 +441,8 @@ onMounted(async () => {
     form.value.role = p.role ?? ''
     form.value.status = p.status ?? 0
     nodes.value = (await fetchAgentNodes(agentPoolId)).map(toNodeEdit)
-  } catch {
-    /* 拦截器已提示 */
+  } catch (e) {
+    console.error('[AgentFormView] 池模式加载失败:', e)
   }
 })
 
@@ -326,10 +462,26 @@ async function persistNodes(mode: 'pool' | 'project', agentId: number) {
       temperature: n.temperature,
     }
     if (mode === 'pool') {
-      if (n.id == null) await createAgentNode(base as agentNodeDTO)
-      else await updateAgentNode(n.id, base as agentNodeDTO)
+      // 池节点必须带技术字段：缺了会把 DB 里的 node_type 等置 null（node_type 是 NOT NULL 会报错）
+      const dto = {
+        ...base,
+        nodeType: n.nodeType ?? 'llm',
+        schemaKey: n.schemaKey ?? null,
+        codeKey: n.codeKey ?? null,
+        output: n.output ?? null,
+      } as agentNodeDTO
+      if (n.id == null) await createAgentNode(dto)
+      else await updateAgentNode(n.id, dto)
     } else {
-      const dto = { ...base, projectId } as projectAgentNodeDTO
+      // 项目节点同样要带技术字段（sys_project_agent_node.node_type 也是 NOT NULL）
+      const dto = {
+        ...base,
+        projectId,
+        nodeType: n.nodeType ?? 'llm',
+        schemaKey: n.schemaKey ?? null,
+        codeKey: n.codeKey ?? null,
+        output: n.output ?? null,
+      } as projectAgentNodeDTO
       if (n.id == null) await createProjectAgentNode(dto)
       else await updateProjectAgentNode(n.id, dto)
     }
@@ -358,8 +510,14 @@ async function save() {
         poolId = await createAgentPool({ name, role: form.value.role, status: 1 })
       }
       await persistNodes('pool', poolId)
-      ElMessage.success(isEdit.value ? `Agent「${name}」已更新` : `Agent「${name}」已保存到仓库`)
-      router.push('/agents')
+      if (projectId > 0) {
+        await copyFromPool(projectId, [poolId])
+        ElMessage.success(`Agent「${name}」已创建并加入当前项目`)
+        router.push(`/projects/${projectId}/team`)
+      } else {
+        ElMessage.success(isEdit.value ? `Agent「${name}」已更新` : `Agent「${name}」已保存到仓库`)
+        router.push('/agents')
+      }
     } catch {
       ElMessage.error('保存失败，请重试')
     } finally {
@@ -367,7 +525,7 @@ async function save() {
     }
     return
   }
-  // 项目模式（仅编辑可达，引导页无保存）：只存节点，档案只读不动
+  // 项目模式（仅编辑可达）：只存节点，档案只读不动
   if (memberAgentId.value <= 0) return
   saving.value = true
   try {
@@ -400,19 +558,7 @@ async function save() {
 
     <main class="main">
       <div class="form-panel">
-        <!-- ===== 项目模式新建：无池关联的成员无法配置 → 引导 ===== -->
-        <div v-if="showGuide" class="guide">
-          <div class="guide-ico">▣</div>
-          <h1>成员从 Agent 仓库拉取</h1>
-          <p class="guide-desc">
-            项目成员必须来自 Agent 仓库（池 Agent），拉取时会把节点的配置复制一份进项目。
-            请回到团队配置页，点击「从仓库拉取」选择成员。
-          </p>
-          <button class="btn-save" @click="router.push(`/projects/${projectId}/team`)">去团队配置</button>
-        </div>
-
         <!-- ===== 正常表单：档案（只读/可编辑）+ 节点管理 ===== -->
-        <template v-else>
           <div class="card-head">
             <h1>
               {{ isProjectMode ? '编辑成员' : isEdit ? '编辑 Agent' : '新建 Agent' }}
@@ -439,7 +585,7 @@ async function save() {
                 :readonly="isProjectMode"
                 :class="{ readonly: isProjectMode }"
               />
-              <p class="field-hint">{{ isProjectMode ? '档案来自 Agent 仓库' : '同一仓库内不重名' }}</p>
+              <p class="field-hint">{{ isProjectMode ? '档案来自 Agent 仓库' : '名称可重复，以 ID 区分' }}</p>
             </div>
 
             <!-- 职位：池模式可编辑；项目模式只读 -->
@@ -460,8 +606,7 @@ async function save() {
           <div class="node-section">
             <div class="node-head">
               <h2>节点配置</h2>
-              <span class="node-hint">{{ nodes.length }} 个节点 · 每节点一套提示词/工具/模型</span>
-              <button class="btn-add-node" @click="startAddNode">+ 添加节点</button>
+              <span class="node-hint">{{ nodes.length }} 个节点 · 模板预置，可编辑提示词/工具/模型</span>
             </div>
 
             <!-- 无池关联（手动添加的成员） -->
@@ -471,16 +616,15 @@ async function save() {
 
             <!-- 节点列表 -->
             <div v-else-if="nodes.length === 0 && !editing" class="node-empty">
-              还没有节点，点击「+ 添加节点」为这个 {{ isProjectMode ? '成员' : 'Agent' }} 配置第一套提示词
+              暂无节点配置（节点由模板预置，如有需要请联系开发者初始化）
             </div>
 
             <div v-else class="node-list">
-              <div v-for="(n, i) in nodes" :key="i" class="node-card">
+              <div v-for="(n, i) in nodes" :key="i" class="node-card" @click="startEditNode(i)">
                 <div class="node-top">
                   <span class="node-name">{{ n.nodeName }}</span>
                   <span class="node-ops">
-                    <button class="op-btn" title="编辑" @click="startEditNode(i)">✎</button>
-                    <button class="op-btn del" title="删除" @click="removeNode(i)">✕</button>
+                    <button class="op-btn" title="编辑" @click.stop="startEditNode(i)">✎</button>
                   </span>
                 </div>
                 <p class="node-desc">{{ n.description || '（无描述）' }}</p>
@@ -492,7 +636,7 @@ async function save() {
                 <!-- 工具明细 -->
                 <div v-if="toolsParse(n.tools).length" class="node-tools">
                   <span v-for="t in toolsParse(n.tools)" :key="t.name" class="tool-tag">
-                    {{ t.name }}{{ t.desc ? `：${t.desc}` : '' }}
+                    {{ t.name }}{{ t.description ? `：${t.description}` : '' }}{{ t.code ? ' ·可执行' : '' }}
                   </span>
                 </div>
                 <!-- 提示词：默认截断，点击展开完整内容 -->
@@ -509,77 +653,136 @@ async function save() {
               </div>
             </div>
 
-            <!-- 节点编辑器（内嵌） -->
-            <div v-if="editing" class="node-editor">
-              <div class="ed-head">
-                <h3>{{ editing.index >= 0 ? '编辑节点' : '新增节点' }}</h3>
-                <button class="op-btn" title="关闭" @click="cancelEdit">✕</button>
-              </div>
-              <div class="ed-grid">
-                <div class="form-field">
-                  <label>节点名称 <span class="req">*</span> <span class="field-hint">如"规划节点"、"编码节点"</span></label>
-                  <input v-model="editing.nodeName" class="input" type="text" placeholder="如：规划节点" />
-                </div>
-                <div class="form-field">
-                  <label>作用描述</label>
-                  <input v-model="editing.description" class="input" type="text" placeholder="该节点负责什么" />
-                </div>
-                <div class="form-field ed-prompt">
-                  <label>System Prompt</label>
-                  <textarea
-                    v-model="editing.systemPrompt"
-                    class="prompt-area"
-                    rows="5"
-                    placeholder="该节点的角色设定与行为规则..."
-                    @input="autoResize($event.target as HTMLTextAreaElement)"
-                  ></textarea>
-                </div>
-                <div class="form-field ed-tools">
-                  <div class="tools-head">
-                    <label>工具</label>
-                    <button class="btn-add-tool" @click="editAddTool">+ 添加</button>
+            <!-- 节点编辑器（弹窗） -->
+            <el-dialog
+              :model-value="!!editing"
+              title="编辑节点"
+              width="680px"
+              class="cf-dialog"
+              :close-on-click-modal="false"
+              @update:model-value="(v: boolean) => { if (!v) cancelEdit() }"
+            >
+              <div v-if="editing" class="dlg-body">
+                <div class="dlg-grid">
+                  <div class="form-field">
+                    <label>节点名称 <span class="req">*</span> <span class="field-hint">如"规划节点"、"编码节点"</span></label>
+                    <input v-model="editing.nodeName" class="input" type="text" placeholder="如：规划节点" />
                   </div>
-                  <div class="tools-list">
-                    <div v-for="(t, ti) in editing.toolsArr" :key="ti" class="tool-row">
-                      <input v-model="t.name" class="input tool-name" type="text" placeholder="函数名" />
-                      <input v-model="t.desc" class="input tool-desc" type="text" placeholder="作用" />
-                      <button class="tool-del" title="删除" @click="editRemoveTool(ti)">✕</button>
+                  <div class="form-field">
+                    <label>作用描述</label>
+                    <input v-model="editing.description" class="input" type="text" placeholder="该节点负责什么" />
+                  </div>
+                  <div class="form-field dlg-full">
+                    <label>System Prompt</label>
+                    <textarea
+                      v-model="editing.systemPrompt"
+                      class="input prompt-area"
+                      rows="6"
+                      placeholder="该节点的角色设定与行为规则..."
+                      @input="autoResize($event.target as HTMLTextAreaElement)"
+                    ></textarea>
+                  </div>
+                  <div class="form-field dlg-full">
+                    <div class="tools-head">
+                      <label>工具 <span class="field-hint">函数体在运行时执行</span></label>
+                      <button class="btn-add-tool" @click="toolEditAdd">+ 添加工具</button>
+                    </div>
+                    <div class="tools-list">
+                      <div v-if="editing.toolsArr.length === 0" class="tools-empty">
+                        还没有工具，点「+ 添加工具」编写第一个函数
+                      </div>
+                      <div v-for="(t, ti) in editing.toolsArr" :key="ti" class="tool-row">
+                        <span class="tool-tag">{{ t.name || '未命名' }}</span>
+                        <span class="tool-desc-text">{{ t.description || '（无描述）' }}</span>
+                        <span v-if="t.code" class="tool-exec" title="已配置函数体，运行时执行">可执行</span>
+                        <button class="tool-edit-btn" @click="toolEditStart(ti)">编辑</button>
+                        <button class="tool-del" title="删除" @click="editRemoveTool(ti)">✕</button>
+                      </div>
+                    </div>
+                  </div>
+                  <div class="form-field">
+                    <label>大模型 <span class="field-hint">跟随全局 = 使用首页配置的默认模型</span></label>
+                    <select v-model="editing.model" class="select">
+                      <option value="">跟随全局（{{ modelLabel(globalDefaultModel) }}）</option>
+                      <optgroup v-for="g in enabledModelOptions" :key="g.group" :label="g.group">
+                        <option v-for="m in g.items" :key="m" :value="m">{{ m.split('/').slice(1).join('/') }}</option>
+                      </optgroup>
+                    </select>
+                  </div>
+                  <div class="form-field">
+                    <label>采样温度 <span class="field-hint">0.0-2.0，越大越随机</span></label>
+                    <input
+                      v-model.number="editing.temperature"
+                      class="input"
+                      type="number"
+                      min="0"
+                      max="2"
+                      step="0.1"
+                    />
+                  </div>
+                </div>
+              </div>
+              <template #footer>
+                <button class="btn-cancel" @click="cancelEdit">取消</button>
+                <button class="btn-save" @click="saveNodeDraft">保存节点</button>
+              </template>
+            </el-dialog>
+
+            <!-- 工具编辑器（弹窗） -->
+            <el-dialog
+              :model-value="!!toolEditing"
+              :title="toolEditingIndex >= 0 ? `编辑工具 · ${toolEditing?.name || '未命名'}` : '添加工具'"
+              width="560px"
+              class="cf-dialog"
+              :close-on-click-modal="false"
+              @update:model-value="(v: boolean) => { if (!v) toolEditCancel() }"
+            >
+              <div v-if="toolEditing" class="dlg-body">
+                <div class="dlg-grid">
+                  <div class="form-field">
+                    <label>函数名 <span class="req">*</span> <span class="field-hint">LLM 调用标识</span></label>
+                    <input v-model="toolEditing.name" class="input tool-code-input" type="text" placeholder="如：web_search" />
+                  </div>
+                  <div class="form-field">
+                    <label>作用描述 <span class="req">*</span> <span class="field-hint">发给 LLM，说明何时调用</span></label>
+                    <input v-model="toolEditing.description" class="input" type="text" placeholder="联网搜索，返回摘要" />
+                  </div>
+                  <div class="form-field dlg-full">
+                    <div class="param-row">
+                      <label class="param-label">参数声明 <span class="field-hint">JSON Schema，留空 = 无参数</span></label>
+                      <button class="btn-add-tool" title="填入基础参数模板" @click="applyParamTemplate">模板</button>
+                    </div>
+                    <textarea
+                      v-model="toolEditing.parameters"
+                      class="input param-area"
+                      rows="3"
+                      placeholder='{"type":"object","properties":{},"required":[]}'
+                      @input="autoResize($event.target as HTMLTextAreaElement)"
+                    ></textarea>
+                  </div>
+                  <div class="form-field dlg-full">
+                    <label>函数体 <span class="field-hint">箭头函数，入参为 LLM 提取的参数对象；留空 = 仅声明</span></label>
+                    <div class="code-editor-wrap">
+                      <MonacoEditor
+                        language="javascript"
+                        :value="toolEditing.code"
+                        @change="(v: string) => { if (toolEditing) toolEditing.code = v }"
+                      />
                     </div>
                   </div>
                 </div>
-                <div class="form-field">
-                  <label>大模型 <span class="field-hint">跟随全局 = 使用首页配置的默认模型</span></label>
-                  <select v-model="editing.model" class="select">
-                    <option value="">跟随全局（{{ modelLabel(globalDefaultModel) }}）</option>
-                    <optgroup v-for="g in enabledModelOptions" :key="g.group" :label="g.group">
-                      <option v-for="m in g.items" :key="m" :value="m">{{ m.split('/').slice(1).join('/') }}</option>
-                    </optgroup>
-                  </select>
-                </div>
-                <div class="form-field">
-                  <label>采样温度 <span class="field-hint">0.0-2.0，越大越随机</span></label>
-                  <input
-                    v-model.number="editing.temperature"
-                    class="input"
-                    type="number"
-                    min="0"
-                    max="2"
-                    step="0.1"
-                  />
-                </div>
               </div>
-              <div class="ed-actions">
-                <button class="btn-cancel" @click="cancelEdit">取消</button>
-                <button class="btn-save" @click="saveNodeDraft">保存节点</button>
-              </div>
-            </div>
+              <template #footer>
+                <button class="btn-cancel" @click="toolEditCancel">取消</button>
+                <button class="btn-save" @click="toolEditSave">保存工具</button>
+              </template>
+            </el-dialog>
           </div>
 
           <div class="form-actions">
             <button class="btn-cancel" @click="router.back()">取消</button>
             <button class="btn-save" :disabled="saving" @click="save">{{ saving ? '保存中...' : '保存' }}</button>
           </div>
-        </template>
       </div>
     </main>
   </div>
@@ -780,10 +983,12 @@ async function save() {
   border-radius: 10px;
   border: 1px solid var(--border);
   background: var(--bg3);
-  transition: border-color 0.2s;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
 }
 .node-card:hover {
   border-color: var(--blue);
+  background: rgba(69, 184, 255, 0.05);
 }
 .node-top {
   display: flex;
@@ -887,37 +1092,26 @@ async function save() {
   text-decoration: underline;
 }
 
-/* ===== 节点编辑器 ===== */
-.node-editor {
+/* ===== 节点/工具弹窗 ===== */
+.dlg-body {
   display: flex;
   flex-direction: column;
   gap: 14px;
-  padding: 18px 20px;
-  border-radius: 12px;
-  border: 1px solid var(--blue);
-  background: var(--bg3);
 }
-.ed-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-}
-.ed-head h3 {
-  font-size: 14px;
-  font-weight: 600;
-}
-.ed-grid {
+.dlg-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 14px 20px;
 }
-.ed-prompt {
+.dlg-full {
   grid-column: 1 / -1;
 }
-.ed-tools {
-  grid-column: 1 / -1;
-  display: flex;
-  flex-direction: column;
+.param-label {
+  flex: 1;
+  font-size: 12.5px;
+  font-weight: 500;
+  color: var(--text2);
+  margin-bottom: 5px;
 }
 .tools-head {
   display: flex;
@@ -955,15 +1149,51 @@ async function save() {
   display: flex;
   align-items: center;
   gap: 8px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  transition: border-color 0.2s, background 0.2s;
 }
-.tool-name {
-  flex: 2;
-  font-family: 'Consolas', 'JetBrains Mono', monospace;
-  font-size: 12.5px;
+.tool-row.editing {
+  border-color: var(--blue);
+  background: rgba(69, 184, 255, 0.06);
 }
-.tool-desc {
-  flex: 3;
+.tools-empty {
+  padding: 14px 0;
+  text-align: center;
+  font-size: 12px;
+  color: var(--text3);
+}
+.tool-desc-text {
+  flex: 1;
   font-size: 12.5px;
+  color: var(--text2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tool-exec {
+  flex: none;
+  font-size: 11px;
+  color: var(--green, #3fbf7f);
+  padding: 1px 7px;
+  border-radius: 6px;
+  border: 1px solid rgba(63, 191, 127, 0.35);
+  background: rgba(63, 191, 127, 0.08);
+}
+.tool-edit-btn {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: var(--blue);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 6px;
+  transition: background 0.2s;
+}
+.tool-edit-btn:hover {
+  background: rgba(69, 184, 255, 0.15);
 }
 .tool-del {
   flex: none;
@@ -981,10 +1211,36 @@ async function save() {
   background: rgba(240, 80, 80, 0.15);
   color: var(--red);
 }
-.ed-actions {
+
+.tool-code-input {
+  font-family: 'Consolas', 'JetBrains Mono', monospace;
+  font-size: 12.5px;
+}
+.param-row {
   display: flex;
-  justify-content: flex-end;
-  gap: 10px;
+  align-items: center;
+  gap: 8px;
+}
+.param-row .btn-add-tool {
+  flex: none;
+  align-self: flex-end;
+}
+.param-area {
+  resize: none;
+  overflow: hidden;
+  font-family: 'Consolas', 'JetBrains Mono', monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.code-editor-wrap {
+  height: 220px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  overflow: hidden;
+  background: #1e1e1e;
+}
+.code-editor-wrap :deep(.monaco-container) {
+  min-height: 0;
 }
 
 /* ===== 底部按钮 ===== */
@@ -1066,6 +1322,47 @@ async function save() {
   color: var(--text3);
   font-weight: 400;
   margin-left: 4px;
+}
+
+/* ===== 弹窗深色主题（覆盖 Element Plus 默认亮色，匹配项目深色变量） ===== */
+:deep(.cf-dialog) {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  color: var(--text);
+  overflow: hidden;
+}
+:deep(.cf-dialog .el-dialog__header) {
+  padding: 18px 22px 0;
+  margin-right: 0;
+}
+:deep(.cf-dialog .el-dialog__title) {
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 600;
+}
+:deep(.cf-dialog .el-dialog__body) {
+  padding: 16px 22px;
+  color: var(--text);
+}
+:deep(.cf-dialog .el-dialog__footer) {
+  padding: 0 22px 18px;
+}
+:deep(.cf-dialog .el-dialog__headerbtn) {
+  top: 14px;
+  right: 14px;
+  width: 28px;
+  height: 28px;
+}
+:deep(.cf-dialog .el-dialog__close) {
+  color: var(--text3);
+  font-size: 16px;
+}
+:deep(.cf-dialog .el-dialog__headerbtn:hover .el-dialog__close) {
+  color: var(--text);
+}
+:deep(.el-overlay:has(> .cf-dialog)) {
+  background: rgba(5, 8, 16, 0.6);
 }
 
 @media (max-width: 900px) {

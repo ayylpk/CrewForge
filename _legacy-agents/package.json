@@ -1,0 +1,26 @@
+{
+  "name": "agents-crewforge",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "bun run start.ts",
+    "start:bun": "bun run start.ts",
+    "build:node": "esbuild start.ts --bundle --platform=node --format=esm --target=node24 --external:undici --outfile=dist-node/start.mjs",
+    "start:node": "node --env-file=.env dist-node/start.mjs",
+    "test:client": "node --experimental-strip-types --test httpClient.test.ts deepseekClient.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "esbuild": "^0.28.2"
+  },
+  "dependencies": {
+    "@langchain/core": "^1.2.5",
+    "@langchain/deepseek": "^1.1.6",
+    "@langchain/langgraph": "^1.4.9",
+    "@langchain/tavily": "^1.2.0",
+    "langchain": "^1.5.5",
+    "mysql2": "^3.23.3",
+    "undici": "^7.29.0",
+    "zod": "^4.4.3"
+  }
+}

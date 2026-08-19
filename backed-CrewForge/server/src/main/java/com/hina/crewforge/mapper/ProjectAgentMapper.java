@@ -29,4 +29,7 @@ public interface ProjectAgentMapper {
 
     void deleteByIds(@Param("ids") List<Long> ids, @Param("projectId") Long projectId,
                      @Param("userId") Long userId, @Param("updateTime") LocalDateTime updateTime);
+
+    /** 项目内指定角色（JOIN sys_agent 的 role）的成员数——单例角色（经理/架构师）校验用 */
+    long countByRole(@Param("projectId") Long projectId, @Param("role") String role);
 }

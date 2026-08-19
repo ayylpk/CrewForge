@@ -16,11 +16,10 @@ export interface JsonResponse<T> {
     body: T;
 }
 
-// Each call owns its Client. A timed-out request therefore cannot poison a
-// shared pool used by later Agent calls.
+// Each request owns its Client so a timed-out request cannot poison later calls.
 export async function requestJson<T>(
     origin: string,
-    path: string,
+    requestPath: string,
     options: JsonRequestOptions,
 ): Promise<JsonResponse<T>> {
     const client = new Client(origin, {
@@ -34,6 +33,7 @@ export async function requestJson<T>(
     const abortRequest = () => client.destroy(new Error("HTTP 请求已取消"));
     options.signal?.addEventListener("abort", abortRequest, { once: true });
     if (options.signal?.aborted) abortRequest();
+
     const timer = setTimeout(() => {
         timeoutError = new Error(`HTTP 请求超时 ${Math.round(options.timeoutMs / 1000)}s`);
         client.destroy(timeoutError);
@@ -41,10 +41,11 @@ export async function requestJson<T>(
 
     try {
         const response = await client.request({
-            path,
+            path: requestPath,
             method: options.method,
             headers: options.headers,
             body: options.body,
+            signal: options.signal,
         });
         const text = await response.body.text();
         return {

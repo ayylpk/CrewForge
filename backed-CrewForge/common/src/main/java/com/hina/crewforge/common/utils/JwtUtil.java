@@ -18,6 +18,7 @@ import java.util.Map;
  * 团队用请求头 X-Tenant-Id 携带，角色查库获取。
  * 这样切换团队/角色变化都无需重新签发 token。
  */
+
 public class JwtUtil {
 
     /**

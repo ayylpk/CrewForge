@@ -33,5 +33,8 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # Finder (MacOS) folder config
 .DS_Store
 
-# generated code workspace
-workspace
+# agent 工作日志（含敏感信息，不入库）
+.workbuddy/
+
+# 一次性 smoke 脚本
+smoke-*

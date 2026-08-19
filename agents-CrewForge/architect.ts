@@ -1,189 +1,44 @@
-import { DirectChatDeepSeek } from "./deepseekClient.ts";
+// ============================================================
+// architect.ts —— 架构师（单例 "architect"）
+//
+//   完整逻辑移植自 _legacy-agents/architect.ts，结构参照 manager.ts：
+//     phase_plan → 拆分图（业务分解 → 技术栈 → 确认门 → 基础架构 → 接口拆分 → 下发）
+//     phase_done → 转告 PM 请求下一阶段
+//
+//   拆分图走 GraphFactory 的 stitch()：DB 存声明（DEFAULT_NODES/EDGES），
+//   实现注册进 codeRegistry / schemaRegistry / condRegistry。
+//   确认门用 human 交互（runWithInteraction + CliQuestioner；AUTO_CONFIRM=1 自动 y）。
+//   接口拆分失败/被拒 → 声明 0 对并 final，阶段直接完成（不卡死）。
+// ============================================================
+
+import { z } from "zod";
 import { SystemMessage } from "@langchain/core/messages";
-import * as z from "zod";
-import { Annotation, StateGraph, START, END, MemorySaver, type GraphNode } from "@langchain/langgraph";
-import fs from "node:fs";
-import readline from "readline";
-import { TransferStation, roles, llmWithTimeout } from "./Hub.ts";   // 架构师与 PM 的消息中转站 + 角色枚举 + 超时兜底
+import { Annotation } from "@langchain/langgraph";
+import { randomUUID } from "node:crypto";
+import { BaseAgent } from "./BaseAgent";
+import { roles, type TransferStation } from "./Hub";
+import { initModels } from "./models";
+import { retryStructured } from "./llm";
+import {
+    stitch, runWithInteraction, CliQuestioner,
+    codeRegistry, schemaRegistry, condRegistry,
+    type StateNodeFn, type CondFn,
+} from "./GraphFactory";
+import { type Node, type Edge, saveArchitectOutput } from "./Node";
+import { type ExecTask, type Plan, type planItem } from "./common";
 
-// ============================================================
-// 架构师链路（v1）：PM 阶段计划 → 拆分下发为止
-//
-//   PM阶段划分 → agent1详细计划(业务分解) → agent2技术栈(中间件裁剪+表结构+绑定)`
-//   → 用户确认 → agent3基础架构 → agent4接口拆分 → 交接（tasks.json）
-//
-// 边界（重要）：架构师只负责到拆分下发，之后是开发/测试/维护的事（executor.ts）
-// 交接物：tasks.json（ExecTask[]，任务=原子）—— 未来换成 sys_task 表
-//
-// 关键约定：
-//   - 技术决策单一归属 agent2（agent1 只出业务分解，不含技术）
-//   - agent4 拆接口：LLM 出接口形态（RESTful），id/验收标准代码机械补（契约不发明）
-//   - 防死循环：确认门最多拒绝 1 次重计划
-// ============================================================
+// ---------- 模型 ----------
 
-const model = new DirectChatDeepSeek({
+const ARCHITECT_MODEL_JSON = JSON.stringify({
+    provider: "deepseek",
     model: "deepseek-v4-flash",
-    timeout: 180000,   // 单次调用 120s 超时：thinking 模型大输出可能很慢，但必须有界（挂起走重试）
-})
-
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
+    temperature: 0.3,
+    thinking: false,
 });
 
-// ---------- 类型定义 ----------
+// ---------- 提示词（移植自 _legacy-agents/architect.ts） ----------
 
-interface typeOfTasks{
-  name: string,
-  description: string,
-  priority: string,
-  acceptance: string
-}
-
-interface planItem {
-  phase: number;
-  name: string;
-  goal: string;
-  features: string[];      // 该阶段包含的功能名
-  dependencies: string[];  // 依赖的阶段名
-  relative_effort: string; // 大 | 中 | 小（不评估人天）
-  risk: string;            // 高 | 中 | 低
-}
-
-// PM 产出：结构化 PRD + 阶段规划（manager.ts 的输出，经 phase_plan 消息携带传入）
-interface Plan {
-  project: string;
-  features: typeOfTasks[]; // 详细功能清单原样放回
-  phases: planItem[];
-  mvp_scope: string[];
-  risks: string[];
-}
-
-// agent1 产出：业务分解版详细计划（不含技术）
-interface DetailedPlan {
-  phase: number;
-  summary: string;
-  modules: ModulePlan[];
-  risks: string[];
-  deliverables: string[];
-}
-
-// 业务模块：dataNeeds 是 agent2 出表结构的原料
-interface ModulePlan {
-  name: string;        // 模块名
-  business: string;    // 对应功能名（Plan.features 里的名字，agent4 抄验收用）
-  description: string; // 业务逻辑/流程
-  dataNeeds: string[]; // 要存什么数据 —— agent2 据此设计表结构
-  points: string[];    // 业务子步骤 —— agent4 据此拆 ExecTask
-}
-
-// agent2 产出：技术栈（全技术唯一归属：选型 + 表结构 + 按模块绑定）
-interface TechStack {
-  techniques: {
-    middleware: { name: string; purpose: string }[];
-    database: { type: string; why: string };
-  };
-  tables: TablePlan[];
-  // 按层绑定：backend = 服务端技术，frontend = 客户端技术（agent4 拆任务时各抄各的）
-  moduleTech: { module: string; backend: string; frontend: string }[];
-  why: string;
-}
-
-interface TablePlan {
-  name: string;                    // 表名
-  purpose: string;                 // 服务哪个数据需求
-  fields: {
-    name: string;
-    type: string;                  // varchar/int/datetime…
-    required: boolean;
-    remark: string;                // 业务含义
-  }[];
-}
-
-// agent3 产出：基础架构动作
-interface BasePlan {
-  actions: string[];
-  ddl: string;
-}
-
-// agent4 产出：可执行任务（任务 = 一个接口的一层 = 原子，交接给执行层）
-// 每个接口拆成两个任务：[0]后端 + [1]前端，layer 区分；method/path 仅后端任务有
-// 交接形态：只留定义性字段；status/output/retries/review_comment 是执行层运行字段，
-// 等 executor（开发/测试）写的时候再定义，架构师不关心
-interface ExecTask {
-  id: string;
-  layer: "backend" | "frontend";  // 归属层（backendEngineer 只筛 backend）
-  method: string;        // GET/POST/PUT/DELETE（前端任务为空串）
-  path: string;          // 接口路径（前端任务为空串）
-  files: string[];       // 架构师指定的文件清单（按技术栈约定列全，如 Java 三层 Controller/Service/Mapper）——开发照做不探索
-  title: string;         // "POST /api/tasks：创建任务" / "任务创建页：表单+列表刷新"
-  description: string;   // 任务描述（含模块/业务/对应层技术栈/要素，自包含）
-  parameters: {
-    name: string;
-    type: string;        // string/number/boolean…
-    required: boolean;
-    description: string; // 业务含义
-  }[];
-  acceptance: string;    // 验收标准（从 Plan.features 原样抄 —— 任务的验收契约，交接给执行层用）
-}
-
-// ---------- 状态通道 ----------
-// 通道名不能和节点名重名（老约定）；执行层无对话，所以没有 messages 通道
-const MessageState = Annotation.Root({
-    plans: Annotation<Plan | null>({
-        default: () => null,
-        reducer: (_, u) => u,
-    }),
-    phaseIdx: Annotation<number>({
-        default: () => 0,
-        reducer: (_, u) => u,  // 阶段指针（v1 固定 0，v2 套阶段循环）
-    }),
-    detailedPlan: Annotation<DetailedPlan | null>({
-        default: () => null,
-        reducer: (_, u) => u,  // 每阶段覆盖写
-    }),
-    stack: Annotation<TechStack | null>({
-        default: () => null,
-        reducer: (_, u) => u,
-    }),
-    userConfirm: Annotation<boolean>({
-        default: () => false,
-        reducer: (_, u) => u,
-    }),
-    confirmPending: Annotation<boolean>({
-        default: () => false,
-        reducer: (_, u) => u,  // true = 图停了，等 main() 问用户
-    }),
-    feedback: Annotation<string | null>({
-        default: () => null,
-        reducer: (_, u) => u,  // 确认门拒绝原因
-    }),
-    baseReady: Annotation<boolean>({
-        default: () => false,
-        reducer: (_, u) => u,
-    }),
-    basePlan: Annotation<BasePlan | null>({
-        default: () => null,
-        reducer: (_, u) => u,
-    }),
-    exeTasks: Annotation<ExecTask[]>({
-        default: () => [],
-        reducer: (_, u) => u,  // 交接物（任务=原子）
-    }),
-    handoffMsg: Annotation<string | null>({
-        default: () => null,
-        reducer: (_, u) => u,  // 交接提示（main 据此写 tasks.json）
-    }),
-    llmCalls: Annotation<number>({
-        default: () => 0,
-        reducer: (x, y) => x + y, // debug 用
-    }),
-});
-
-// ---------- 系统提示词 ----------
-
-// agent1：业务分解（先跑，不含技术）
-const plan_prompt: string = `
+export const plan_prompt: string = `
 # 角色
 你是 CrewForge 项目的架构师-业务规划 Agent。你的输出是当前阶段的业务模块蓝图，供技术栈设计和接口拆分继续使用。
 
@@ -217,8 +72,7 @@ const plan_prompt: string = `
 }
 `;
 
-// agent2：技术落地（后跑，技术唯一归属）
-const stack_prompt: string = `
+export const stack_prompt: string = `
 # 角色
 你是 CrewForge 项目的架构师-技术落地 Agent。你的输出是当前阶段唯一的技术基线，供基础架构和开发 Agent 使用。
 
@@ -249,8 +103,7 @@ const stack_prompt: string = `
 }
 `;
 
-// agent3：基础架构（对照 tables/deliverables 检查补缺）
-const base_prompt: string = `
+export const base_prompt: string = `
 # 角色
 你是 CrewForge 项目的架构师-基础架构 Agent，负责把当前阶段需要的工程基础动作整理成可执行清单。
 
@@ -268,8 +121,7 @@ const base_prompt: string = `
 { "actions": ["基建动作"], "ddl": "建表 SQL" }
 `;
 
-// agent4：接口拆分（LLM 出接口形态；id/验收标准由代码机械补，验收契约不发明）
-const api_prompt: string = `
+export const api_prompt: string = `
 # 角色
 你是 CrewForge 项目的架构师-接口设计 Agent。你的输出是原子的接口任务对，供后端和前端开发 Agent 直接执行。
 
@@ -302,441 +154,315 @@ const api_prompt: string = `
 }
 `;
 
-// ---------- 结构化输出模型 ----------
+// ---------- 结构化 schema（schemaRegistry，DB 的 schema_key 引用） ----------
 
-// agent1：业务分解（无兜底：schema 校验失败即抛错，外层 catch 接住）
-const planModel = model.withStructuredOutput(
-  z.object({
+export const detailedPlanSchema = z.object({
     summary: z.string(),
     modules: z.array(z.object({
-      name: z.string(),
-      business: z.string(),
-      description: z.string(),
-      dataNeeds: z.array(z.string()),
-      points: z.array(z.string()),
+        name: z.string(),
+        business: z.string(),
+        description: z.string(),
+        dataNeeds: z.array(z.string()),
+        points: z.array(z.string()),
     })),
     risks: z.array(z.string()),
     deliverables: z.array(z.string()),
-  }),
-  { method: "jsonMode", name: "extract_detailed_plan" }
-);
+});
 
-// agent2：技术栈
-const stackModel = model.withStructuredOutput(
-  z.object({
+export const stackSchema = z.object({
     techniques: z.object({
-      middleware: z.array(z.object({ name: z.string(), purpose: z.string() })),
-      database: z.object({ type: z.string(), why: z.string() }),
+        middleware: z.array(z.object({ name: z.string(), purpose: z.string() })),
+        database: z.object({ type: z.string(), why: z.string() }),
     }),
     tables: z.array(z.object({
-      name: z.string(),
-      purpose: z.string(),
-      fields: z.array(z.object({ name: z.string(), type: z.string(), required: z.boolean(), remark: z.string() })),
+        name: z.string(),
+        purpose: z.string(),
+        fields: z.array(z.object({ name: z.string(), type: z.string(), required: z.boolean(), remark: z.string() })),
     })),
     moduleTech: z.array(z.object({ module: z.string(), backend: z.string(), frontend: z.string() })),
     why: z.string(),
-  }),
-  { method: "jsonMode", name: "extract_stack" }
-);
+});
 
-// agent3：基础架构
-const baseModel = model.withStructuredOutput(
-  z.object({
+export const baseSchema = z.object({
     actions: z.array(z.string()),
     ddl: z.string(),
-  }),
-  { method: "jsonMode", name: "extract_base_plan" }
-);
+});
 
-// agent4：接口拆分（LLM 出接口/页面形态；id/验收标准在 dispatch 节点里机械补）
-// tasks 二维数组：每个接口一对 [后端任务, 前端任务]（z.tuple 定长 2）
-const resolutionModel = model.withStructuredOutput(
-  z.object({
+// 接口拆分：二维数组，每对固定 [后端任务, 前端任务]
+export const resolutionSchema = z.object({
     tasks: z.array(z.tuple([
-      // [0] 后端任务：接口形态
-      z.object({
-        method: z.string(),
-        path: z.string(),
-        module: z.string(),      // 模块名必须和 detailedPlan 一致（代码据此抄验收标准）
-        purpose: z.string(),
-        files: z.array(z.string()), // 文件清单（技术栈约定，开发照做不探索）
-        parameters: z.array(z.object({
-          name: z.string(),
-          type: z.string(),
-          required: z.boolean(),
-          description: z.string(),
-        })),
-        response: z.string(),
-      }),
-      // [1] 前端任务：页面形态
-      z.object({
-        module: z.string(),
-        page: z.string(),        // 页面/组件名
-        files: z.array(z.string()), // 文件清单（页面组件文件）
-        interactions: z.string(), // 页面交互
-        api: z.string(),         // 调用的接口（method + path，与同对后端一致）
-      }),
+        z.object({
+            method: z.string(),
+            path: z.string(),
+            module: z.string(),
+            purpose: z.string(),
+            files: z.array(z.string()),
+            parameters: z.array(z.object({
+                name: z.string(),
+                type: z.string(),
+                required: z.boolean(),
+                description: z.string(),
+            })),
+            response: z.string(),
+        }),
+        z.object({
+            module: z.string(),
+            page: z.string(),
+            files: z.array(z.string()),
+            interactions: z.string(),
+            api: z.string(),
+        }),
     ])),
-  }),
-  { method: "jsonMode", name: "extract_api_tasks" }
-);
+});
 
-// ---------- 节点 ----------
+type ResolutionBack = z.infer<typeof resolutionSchema>["tasks"][number][0];
+type ResolutionFront = z.infer<typeof resolutionSchema>["tasks"][number][1];
 
-// agent1：详细计划（业务分解）
-const architectPlan: GraphNode<typeof MessageState.State> = async (state) => {
-  const plan = state.plans!;
-  const phase = plan.phases[state.phaseIdx]!; // phaseIdx 由阶段循环保证有效
-  // 本阶段功能详情：按名字从 plan.features 里筛（带验收标准，架构师不重新发明）
-  const featuresContent = plan.features
-    .filter(f => phase.features.includes(f.name))
-    .map((f, i) => `${i + 1}. ${f.name}（${f.priority}）：${f.description} | 验收：${f.acceptance}`)
-    .join('\n');
+// ---------- 节点实现（codeRegistry，DB 的 code_key 引用） ----------
 
-  // 重试 ≤3：flash 模型 jsonMode 偶发校验失败，重试不崩（样式同 backendEngineer）
-  let parsed: Awaited<ReturnType<typeof planModel.invoke>> | undefined;
-  let ok = false;
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      parsed = await llmWithTimeout(
-        sig => planModel.invoke([
-          new SystemMessage(plan_prompt + `\n\n## 本阶段\n阶段${phase.phase}「${phase.name}」目标：${phase.goal}\n\n## 本阶段功能详情\n${featuresContent}`),
-        ], { signal: sig }),
-        150000, "业务分解"
-      );
-      ok = true;
-      break;
-    } catch (e) {
-      console.log(`业务分解 LLM 失败（第 ${attempt} 次）：${(e as Error).message.slice(0, 80)}`);
+/** 确认门：human 交互（y/n），把答案保留进 confirmAnswer 供条件边判断（humanGate 会清掉 humanAnswer） */
+const confirmNode: StateNodeFn = async (state, node) => {
+    if (state.humanAnswer != null) {
+        return { human: null, confirmAnswer: state.humanAnswer, humanAnswer: null };
     }
-  }
-  if (!ok) throw new Error("业务分解连续 3 次失败");   // 外层 runPhaseSplit catch 接住
-  return { detailedPlan: { ...parsed!, phase: phase.phase }, llmCalls: 1 };
+    return { human: { questionId: randomUUID(), prompt: node?.systemPrompt?.trim() || "技术方案如上，确认开工？(y / n)", options: ["y", "n"] } };
 };
 
-// agent2：技术栈（读业务计划，出全技术）
-const architectStack: GraphNode<typeof MessageState.State> = async (state) => {
-  const d = state.detailedPlan!;
-  const modulesContent = d.modules
-    .map((m, i) => `${i + 1}. ${m.name}（对应功能：${m.business}）\n   业务：${m.description}\n   数据需求：${m.dataNeeds.join("、")}\n   要点：${m.points.join("；")}`)
-    .join('\n');
+/** 接口拆分 + 任务构建 + 下发（station 副作用）。返回 exeTasks。 */
+function makeDispatchNode(station: TransferStation): StateNodeFn {
+    return async (state) => {
+        const plan: Plan = state.plan;
+        const detailed: any = state.detailedPlan;
+        const stack: any = state.stack;
+        if (!plan || !detailed || !stack) throw new Error("接口拆分缺少前置输入（plan/detailedPlan/stack）");
 
-  let parsed: Awaited<ReturnType<typeof stackModel.invoke>> | undefined;
-  let ok = false;
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      parsed = await llmWithTimeout(
-        sig => stackModel.invoke([
-          new SystemMessage(stack_prompt + `\n\n## 业务详细计划（阶段${d.phase}）\n${modulesContent}`),
-        ], { signal: sig }),
-        150000, "技术栈"
-      );
-      ok = true;
-      break;
-    } catch (e) {
-      console.log(`技术栈 LLM 失败（第 ${attempt} 次）：${(e as Error).message.slice(0, 80)}`);
-    }
-  }
-  if (!ok) throw new Error("技术栈连续 3 次失败");
-  return { stack: parsed!, llmCalls: 1 };
-};
+        const phaseNo = plan.phases[0]?.phase ?? 1;
 
-// 用户确认门：userConfirm 没置位就停（confirmPending=true），等 main() 问用户再回来
-const confirmGate: GraphNode<typeof MessageState.State> = async (state) => {
-  if (!state.userConfirm) return { confirmPending: true };
-  return { confirmPending: false };
-};
+        // 1. LLM 接口拆分（api_prompt + 业务模块 + 技术绑定；重试 ≤3 带反馈）
+        const modulesContent = detailed.modules
+            .map((m: any) => `${m.name}（对应功能：${m.business}）\n   数据需求：${(m.dataNeeds ?? []).join("、")}\n   要点：${(m.points ?? []).join("；")}`)
+            .join("\n");
+        const techContent = (stack.moduleTech ?? [])
+            .map((mt: any) => `${mt.module} → 后端：${mt.backend}｜前端：${mt.frontend}`)
+            .join("\n");
 
-// agent3：基础架构（对照表结构和交付物补缺）
-const base: GraphNode<typeof MessageState.State> = async (state) => {
-  const stack = state.stack!;
-  let parsed: Awaited<ReturnType<typeof baseModel.invoke>> | undefined;
-  let ok = false;
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      parsed = await llmWithTimeout(
-        sig => baseModel.invoke([
-          new SystemMessage(
-            base_prompt +
-            `\n\n## 技术栈\n中间件：${stack.techniques.middleware.map(m => `${m.name}（${m.purpose}）`).join("、")}\n数据库：${stack.techniques.database.type}（${stack.techniques.database.why}）` +
-            `\n\n## 表结构\n${stack.tables.map(t => `${t.name}：${t.fields.map(f => f.name).join("、")}`).join("\n")}` +
-            `\n\n## 交付物\n${state.detailedPlan!.deliverables.join("、")}`
-          ),
-        ], { signal: sig }),
-        150000, "基础架构"
-      );
-      ok = true;
-      break;
-    } catch (e) {
-      console.log(`基础架构 LLM 失败（第 ${attempt} 次）：${(e as Error).message.slice(0, 80)}`);
-    }
-  }
-  if (!ok) throw new Error("基础架构连续 3 次失败");
-  return { baseReady: true, basePlan: parsed!, llmCalls: 1 };
-};
-
-// agent4：接口拆分 —— LLM 出接口形态（RESTful），id/验收标准代码机械补（验收契约不发明）
-// 幂等：exeTasks 空才调 LLM，崩溃重启时已拆过就直接返回（结果在 state 里，可恢复）
-const dispatch: GraphNode<typeof MessageState.State> = async (state) => {
-  let tasks = state.exeTasks;
-  if (tasks.length === 0) {
-    const plan = state.plans!;
-    const detailed = state.detailedPlan!;
-    const stack = state.stack!;
-
-    // 输入给 LLM：业务模块（数据需求 + 要点）→ 设计接口
-    const modulesContent = detailed.modules
-      .map((m, i) => `${i + 1}. ${m.name}（对应功能：${m.business}）\n   数据需求：${m.dataNeeds.join("、")}\n   要点：${m.points.join("；")}`)
-      .join('\n');
-    const techContent = stack.moduleTech.map(mt => `${mt.module} → 后端：${mt.backend}｜前端：${mt.frontend}`).join("\n");
-
-    // 重试 ≤3：接口拆分 schema 最复杂（二维数组），flash 模型最容易翻车，必须重试
-    let parsed: Awaited<ReturnType<typeof resolutionModel.invoke>> | undefined;
-    let ok = false;
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        parsed = await llmWithTimeout(
-          sig => resolutionModel.invoke([
-            new SystemMessage(api_prompt + `\n\n## 业务模块（阶段${detailed.phase}）\n${modulesContent}\n\n## 技术绑定\n${techContent}`),
-          ], { signal: sig }),
-          150000, "接口拆分"
+        const parsed = await retryStructured<{ tasks: [ResolutionBack, ResolutionFront][] }>(
+            "接口拆分",
+            async (feedback, sig) => {
+                const model = initModels(ARCHITECT_MODEL_JSON);
+                const result = await model
+                    .withStructuredOutput(resolutionSchema, { method: "jsonMode", name: "extract_resolution" })
+                    .invoke([new SystemMessage(api_prompt + `\n\n## 业务模块（阶段${detailed.phase}）\n${modulesContent}\n\n## 技术绑定\n${techContent}` + feedback)], { signal: sig });
+                return result as { tasks: [ResolutionBack, ResolutionFront][] };
+            },
         );
-        ok = true;
-        break;
-      } catch (e) {
-        console.log(`接口拆分 LLM 失败（第 ${attempt} 次）：${(e as Error).message.slice(0, 80)}`);
-      }
-    }
-    if (!ok) throw new Error("接口拆分连续 3 次失败");
+        if (!parsed || parsed.tasks.length === 0) throw new Error("接口拆分返回空任务（tasks 为空数组）");
 
-    // 完整技术上下文：中间件 + 数据库（agent2 唯一归属，机械抄不发明）
-    const middlewareContent = stack.techniques.middleware.map(m => `${m.name}（${m.purpose}）`).join("、");
-    const dbContent = `${stack.techniques.database.type}（${stack.techniques.database.why}）`;
+        // 2. 机械构建 ExecTasks：id 顺序生成；验收标准从 Plan.features 按模块 business 抄（验收契约不发明）
+        const middlewareContent = (stack.techniques?.middleware ?? []).map((m: any) => `${m.name}（${m.purpose}）`).join("、");
+        const dbContent = `${stack.techniques?.database?.type ?? ""}（${stack.techniques?.database?.why ?? ""}）`;
 
-    // 机械部分：每个接口对拆成后端+前端两个任务；id 顺序生成；验收标准从 Plan.features 按模块 business 原样抄
-    tasks = parsed!.tasks.flatMap((pair, i) => {
-      const [back, front] = pair;
-      // 模块名兜底匹配：LLM 可能在模块名上增删字（如"任务创建"→"任务创建模块"），严格匹配失败时按包含匹配
-      const mod = detailed.modules.find(m => m.name === back.module)
-        ?? detailed.modules.find(m => back.module.includes(m.name) || m.name.includes(back.module));
-      const acceptance = plan.features.find(f => f.name === mod?.business)?.acceptance ?? "功能可正常使用";
-      const mtech = stack.moduleTech.find(mt => mt.module === back.module)
-        ?? stack.moduleTech.find(mt => back.module.includes(mt.module) || mt.module.includes(back.module));
-      const backendTech = mtech?.backend ?? "";
-      const frontendTech = mtech?.frontend ?? "";
+        const tasks: ExecTask[] = parsed.tasks.flatMap((pair, i) => {
+            const [back, front] = pair;
+            const mod = detailed.modules.find((m: any) => m.name === back.module)
+                ?? detailed.modules.find((m: any) => back.module.includes(m.name) || m.name.includes(back.module));
+            const acceptance = plan.features.find((f: any) => f.name === mod?.business)?.acceptance ?? "功能可正常使用";
+            const mtech = (stack.moduleTech ?? []).find((mt: any) => mt.module === back.module)
+                ?? (stack.moduleTech ?? []).find((mt: any) => back.module.includes(mt.module) || mt.module.includes(back.module));
+            const backendTech = mtech?.backend ?? "";
+            const frontendTech = mtech?.frontend ?? "";
 
-      // 后端任务（接口形态）
-      const backendTask: ExecTask = {
-        id: `T${i + 1}`,
-        layer: "backend",
-        method: back.method,
-        path: back.path,
-        files: back.files,
-        title: `${back.method} ${back.path}：${back.purpose}`,
-        description: `模块：${back.module}\n业务：${mod?.business}\n技术：${backendTech}\n中间件：${middlewareContent}\n数据库：${dbContent}\n入参：${back.parameters.map(p => `${p.name}(${p.type}${p.required ? "" : "，可选"})`).join("、")}\n返回：${back.response}`,
-        parameters: back.parameters,
-        acceptance,
-      };
+            const backendTask: ExecTask = {
+                id: `T${i + 1}`,
+                layer: "backend",
+                method: back.method,
+                path: back.path,
+                files: back.files,
+                title: `${back.method} ${back.path}：${back.purpose}`,
+                description: `模块：${back.module}\n业务：${mod?.business}\n技术：${backendTech}\n中间件：${middlewareContent}\n数据库：${dbContent}\n入参：${back.parameters.map(p => `${p.name}(${p.type}${p.required ? "" : "，可选"})`).join("、")}\n返回：${back.response}`,
+                parameters: back.parameters,
+                acceptance,
+            };
 
-      // 前端任务（页面形态，method/path 空串）
-      // 自包含铁律：后端契约机械抄进前端描述（字段名/格式/枚举照抄，前端工程师不探索、不猜）
-      const contract = `\n\n【后端契约（前端必须遵守：字段名/格式/枚举值照抄，不得改名）】\n接口：${back.method} ${back.path}\n入参：${back.parameters.map(p => `${p.name}(${p.type}${p.required ? "" : "，可选"})：${p.description}`).join("、")}\n返回：${back.response}`;
-      const frontendTask: ExecTask = {
-        id: `T${i + 1}-F`,
-        layer: "frontend",
-        method: "",
-        path: "",
-        files: front.files,
-        title: `${front.page}：${front.interactions}`,
-        description: `模块：${front.module}\n业务：${mod?.business}\n技术：${frontendTech}\n页面：${front.page}\n交互：${front.interactions}\n调用接口：${front.api}` + contract,
-        parameters: [],
-        acceptance,
-      };
+            // 自包含铁律：后端契约机械抄进前端描述（字段名/格式照抄，前端不探索）
+            const contract = `\n\n【后端契约（前端必须遵守：字段名/格式/枚举值照抄，不得改名）】\n接口：${back.method} ${back.path}\n入参：${back.parameters.map(p => `${p.name}(${p.type}${p.required ? "" : "，可选"})：${p.description}`).join("、")}\n返回：${back.response}`;
+            const frontendTask: ExecTask = {
+                id: `T${i + 1}-F`,
+                layer: "frontend",
+                method: "",
+                path: "",
+                files: front.files,
+                title: `${front.page}：${front.interactions}`,
+                description: `模块：${front.module}\n业务：${mod?.business}\n技术：${frontendTech}\n页面：${front.page}\n交互：${front.interactions}\n调用接口：${front.api}` + contract,
+                parameters: [],
+                acceptance,
+            };
 
-      return [backendTask, frontendTask];
-    });
-    return { exeTasks: tasks, llmCalls: 1 };
-  }
-  return { exeTasks: tasks };
-};
+            return [backendTask, frontendTask];
+        });
 
-// 交接：拆分完成，提示 main() 把任务清单写进 tasks.json（未来 = sys_task 表）
-const handoff: GraphNode<typeof MessageState.State> = async (state) => {
-  return { handoffMsg: `任务已拆分 ${state.exeTasks.length} 个，交接给执行层` };
-};
+        // 3. 副作用：按层分流下发开发 + 声明给维护（final）+ 通知合并器清配对缓存
+        for (const t of tasks) {
+            const role = t.layer === "backend" ? roles.backendEngineer : roles.frontendEngineer;
+            const target = station.pickLeastBusy(role);
+            if (!target) { console.log(`提示：没有 ${t.layer} 开发注册，任务 ${t.id} 下发失败`); continue; }
+            station.sendMessage("architect", target, JSON.stringify({ type: "task", task: t }));
+            console.log(`[architect] 发送到 ${target}：下发任务 ${t.id}（${t.title}）`);
+        }
+        const pairIds = [...new Set(tasks.map(t => (t.id.endsWith("-F") ? t.id.slice(0, -2) : t.id)))];
+        station.sendMessage("architect", "maintainer", JSON.stringify({ type: "tasks_declared", phase: phaseNo, pairIds, final: true }));
+        console.log(`[architect] 声明阶段 ${phaseNo} 任务 ${pairIds.length} 对（final）`);
+        station.sendMessage("architect", "merger", JSON.stringify({ type: "phase_reset", phase: phaseNo }));
+        console.log(`[architect] 通知合并器：阶段 ${phaseNo} 配对缓存重置`);
 
-// ---------- 路由（条件边）----------
-
-// START 断点路由：崩溃/重启后按状态续跑
-const resume = (state: typeof MessageState.State): string => {
-  if (state.confirmPending) return "confirmGate";              // 确认门待决
-  if (state.baseReady || state.exeTasks.length > 0) return "dispatch"; // 已过确认 → 直接到拆分（幂等）
-  if (state.detailedPlan && state.stack) return "confirmGate"; // 计划+选型就绪未确认
-  if (state.detailedPlan) return "architectStack";
-  return "architectPlan";
-};
-
-// 确认门后：确认 → 基建；拒绝带原因 → 架构师带 feedback 重计划；没表态（confirmPending）→ 结束等 main
-const afterConfirm = (state: typeof MessageState.State): string => {
-  if (state.userConfirm) return "base";
-  if (state.feedback) return "architectPlan";
-  return "__end__";
-};
-
-// ---------- 组装图 ----------
-// 架构师职责到此为止：计划 → 选型 → 确认 → 基建 → 拆分 → 交接
-const graph = new StateGraph(MessageState)
-  .addNode("architectPlan", architectPlan)   // agent1 业务分解
-  .addNode("architectStack", architectStack) // agent2 技术落地
-  .addNode("confirmGate", confirmGate)       // 用户确认门
-  .addNode("base", base)                     // agent3 基础架构
-  .addNode("dispatch", dispatch)             // agent4 拆分（纯代码）
-  .addNode("handoff", handoff)               // 交接（任务清单落盘）
-  .addConditionalEdges(START, resume)
-  .addEdge("architectPlan", "architectStack")
-  .addEdge("architectStack", "confirmGate")
-  .addConditionalEdges("confirmGate", afterConfirm)
-  .addEdge("base", "dispatch")
-  .addEdge("dispatch", "handoff")
-  .addEdge("handoff", END)
-  .compile({ checkpointer: new MemorySaver() });
-
-// ---------- 交互 ----------
-
-function ask(question: string): Promise<string> {
-  return new Promise((resolve) => rl.question(question + " ", resolve));
-}
-
-// 确认门：把方案概要打印给用户看
-function printConfirm(state: typeof MessageState.State) {
-  const d = state.detailedPlan!;
-  const s = state.stack!;
-  console.log("\n========== 技术方案（待确认）==========");
-  console.log(`方案：${d.summary}`);
-  console.log("模块与技术绑定：");
-  s.moduleTech.forEach(mt => console.log(`  ${mt.module}：后端 ${mt.backend}；前端 ${mt.frontend}`));
-  console.log("中间件：");
-  s.techniques.middleware.forEach(m => console.log(`  ${m.name}（${m.purpose}）`));
-  console.log(`数据库：${s.techniques.database.type}（${s.techniques.database.why}）`);
-  console.log("表结构：");
-  s.tables.forEach(t => console.log(`  ${t.name}：${t.fields.map(f => f.name).join("、")}`));
-  if (d.risks.length) console.log(`风险：${d.risks.join("；")}`);
-  console.log("========================================");
-}
-
-// ============================================================
-// 架构师消息收发（参照 manager.ts 模板）
-//   消息协议（content 为 JSON 字符串）：
-//     PM → 架构师:       {"type": "phase_plan", "phase": {...}}   下发阶段计划
-//     维护 → 架构师:     {"type": "phase_done", "phase": N}       汇报阶段完成（任务全做完）
-//     架构师 → PM:       {"type": "phase_request", "phase": N}    请求下一阶段（收到维护的完成才发）
-// ============================================================
-
-// 拆分一个阶段：拿消息携带的全量 plan → 只给当前阶段的 features → 跑拆分图 → 确认门 → tasks.json
-// 纯消息化：plan 由 phase_plan 消息携带（不再读 plan.json）；阶段=原子，一次只拆一个阶段
-// station：下发给开发/维护用（由 runArchitect 传入）
-async function runPhaseSplit(plan: Plan, phase: planItem, station: TransferStation) {
-    // 只把当前阶段的 features 丢给拆分图（验收标准从全量 features 里按名抄）
-    const planForPhase: Plan = {
-        project: plan.project,
-        features: plan.features.filter(f => phase.features.includes(f.name)),
-        phases: [phase],
-        mvp_scope: plan.mvp_scope,
-        risks: plan.risks,
+        return { exeTasks: tasks, llmCalls: 1 };
     };
-
-    const thread = { configurable: { thread_id: `architect-phase-${phase.phase}` } };  // 每阶段独立断点
-    let rejects = 0; // 防死循环：确认门最多拒绝 1 次重计划
-
-    try {
-        let state = await graph.invoke({ plans: planForPhase }, thread);
-        while (true) {
-            if (state.handoffMsg) break; // 拆分交接完成
-            if (state.confirmPending) {
-                printConfirm(state);   // 给用户看方案
-                // 测试钩子：AUTO_CONFIRM=1 时自动确认（CI/脚本验证用，不影响手动交互）
-                if (process.env.AUTO_CONFIRM === "1") { state = await graph.invoke({ userConfirm: true }, thread); continue; }
-                const ans = await ask("技术方案如上，确认开工？(y / n+原因)");
-                if (/^y/i.test(ans.trim())) {
-                    state = await graph.invoke({ userConfirm: true }, thread);
-                    continue;
-                }
-                rejects += 1;
-                if (rejects >= 2) { console.log("连续两次拒绝，结束（防死循环）。"); break; }
-                const reason = ans.replace(/^n/i, "").trim() || "方案不满足需求";
-                state = await graph.invoke({ userConfirm: false, feedback: reason }, thread);
-                continue;
-            }
-            break; // 兜底
-        }
-
-        if (state.exeTasks.length > 0) {
-            // 交接物落盘：任务=原子，执行层按它接手（未来 = sys_task 表）
-            fs.writeFileSync("tasks.json", JSON.stringify(state.exeTasks, null, 2));
-            console.log(`\n${state.handoffMsg}`);
-            console.log(`交接物：tasks.json（${state.exeTasks.length} 个任务，含验收标准和技术绑定）`);
-
-            // 按 layer 分流 + 负载均衡下发给前后端开发（确定性路由，代码决定，不需要 LLM）
-            // 协议：{"type": "task", "task": ExecTask}
-            // 多开发场景：同一角色有多个注册（backend1/backend2），pickLeastBusy 选待处理最少的那个
-            state.exeTasks.forEach(t => {
-                const role = t.layer === "backend" ? roles.backendEngineer : roles.frontendEngineer;
-                const target = station.pickLeastBusy(role);
-                if (!target) {
-                    console.log(`提示：没有 ${t.layer} 开发注册，任务 ${t.id} 下发失败`);
-                    return;
-                }
-                station.sendMessage("architect", target, JSON.stringify({ type: "task", task: t }));
-                console.log(`架构师发送到 ${target}：下发任务 ${t.id}（${t.title}）`);
-            });
-
-            // 任务全部下发完 → 向维护声明本阶段任务清单（当前一次性拆完：final=true）
-            // 维护按"已声明对全部通过 + final"判断阶段完成（集合收敛，不依赖预定的 N；
-            // 以后流水线分批拆分时：每批发一次声明（final=false），最后一批发 final=true）
-            const pairIds = [...new Set(state.exeTasks.map(t => t.id.endsWith("-F") ? t.id.slice(0, -2) : t.id))];
-            station.sendMessage("architect", "maintainer", JSON.stringify({ type: "tasks_declared", phase: phase.phase, pairIds, final: true }));
-            console.log(`架构师发送到维护：声明本阶段任务 ${pairIds.length} 对（final=true，阶段 ${phase.phase}）`);
-
-            // 通知合并器清配对缓存：任务 id 每阶段从 T1 重新编号，阶段 2 的 T1 不能撞阶段 1 的缓存
-            station.sendMessage("architect", "merger", JSON.stringify({ type: "phase_reset", phase: phase.phase }));
-            console.log(`架构师发送到合并器：阶段 ${phase.phase} 配对缓存重置`);
-
-            console.log(`[debug] llmCalls=${state.llmCalls}`);
-        }
-    } catch (error) {
-        // 阶段拆分失败（LLM 连续失败）：静默卡死最糟——进程内 checkpoint 随进程退出丢失，
-        // 无续跑价值，明确报错退出，让启动方（平台/用户）重跑
-        console.error(`阶段 ${phase.phase} 拆分失败（重试耗尽）：`, (error as Error).message);
-        process.exit(1);
-    }
 }
 
-// 架构师入口（函数化：单例，名字写死 "architect"；由 start.ts 拉起）
-export async function runArchitect(station: TransferStation) {
-    // 架构师消息循环：收两方消息——PM 的阶段计划 + 维护的完成信号
-    // 收到维护的"完成"之后，才向 PM 请求下一阶段
-    async function messageLoop() {
-        console.log("[architect] 消息监听已启动：等 PM 下发阶段计划 / 维护汇报完成");
-        while (true) {
-            const msg = await station.waitForMessage("architect");
-            if (!msg) continue;
-            let data: { type?: string; phase?: planItem; plan?: Plan };
-            try { data = JSON.parse(msg.content); } catch { continue; }
+// ---------- 条件（condRegistry，条件边的 cond 引用） ----------
 
-            if (msg.sender === "manager" && data.type === "phase_plan") {
-                // PM 下发阶段计划（消息带全量 plan）→ 跑拆分（只拆消息里这个阶段，阶段=原子）
-                console.log(`[architect] 收到 PM 的阶段计划（阶段 ${data.phase?.phase}）`);
-                if (data.phase && data.plan) await runPhaseSplit(data.plan, data.phase, station);
-            } else if (msg.sender === "maintainer" && data.type === "phase_done") {
-                // 维护汇报：本阶段任务全部完成 → 转告 PM 请求下一阶段
-                console.log(`[architect] 收到维护通知：阶段 ${data.phase?.phase} 全部完成`);
-                station.sendMessage("architect", "manager", JSON.stringify({ type: "phase_request", phase: data.phase?.phase }));
-                console.log(`[architect] 发送到 PM：请求下一阶段（阶段 ${data.phase?.phase} 已完成）`);
-            }
-            station.markDone("architect");   // 处理完记账（负载均衡的数据基础：pendingCount -1）
-        }
+/** 确认门：回答 y → 去基础架构；n / 未答 → 结束（本阶段跳过，runPhaseSplit 声明 0 对） */
+const confirmYes: CondFn = (state) => String(state.confirmAnswer ?? "").trim().toLowerCase().startsWith("y");
+
+// ---------- 默认声明（模板可直接 new Architect(station)；生产用 DB 声明 + fromDb） ----------
+
+export const DEFAULT_NODES: Node[] = [
+    {
+        nodeName: "architectPlan",
+        nodeType: "llm",
+        description: "业务分解：功能 → 业务模块蓝图",
+        systemPrompt: plan_prompt,
+        temperature: 0.3,
+        tools: "",
+        model: ARCHITECT_MODEL_JSON,
+        schemaKey: "architect_detailed_plan",
+        codeKey: "",
+        output: "detailedPlan",
+    },
+    {
+        nodeName: "architectStack",
+        nodeType: "llm",
+        description: "技术栈：技术基线",
+        systemPrompt: stack_prompt,
+        temperature: 0.3,
+        tools: "",
+        model: ARCHITECT_MODEL_JSON,
+        schemaKey: "architect_stack",
+        codeKey: "",
+        output: "stack",
+    },
+    {
+        nodeName: "confirmGate",
+        nodeType: "code",
+        description: "确认门：y/n 开工确认",
+        systemPrompt: "技术方案如上，确认开工？(y / n)",
+        temperature: 0.3,
+        tools: "",
+        model: ARCHITECT_MODEL_JSON,
+        schemaKey: "",
+        codeKey: "architect_confirm",
+        output: "",
+    },
+    {
+        nodeName: "base",
+        nodeType: "llm",
+        description: "基础架构：基建动作 + DDL",
+        systemPrompt: base_prompt,
+        temperature: 0.3,
+        tools: "",
+        model: ARCHITECT_MODEL_JSON,
+        schemaKey: "architect_base",
+        codeKey: "",
+        output: "basePlan",
+    },
+    {
+        nodeName: "dispatch",
+        nodeType: "code",
+        description: "接口拆分 + 任务构建 + 下发",
+        systemPrompt: api_prompt,
+        temperature: 0.3,
+        tools: "",
+        model: ARCHITECT_MODEL_JSON,
+        schemaKey: "architect_resolution",
+        codeKey: "architect_dispatch",
+        output: "",
+    },
+];
+
+export const DEFAULT_EDGES: Edge[] = [
+    { fromNode: "__start__", type: "direct", toNodes: "architectPlan" },
+    { fromNode: "architectPlan", type: "direct", toNodes: "architectStack" },
+    { fromNode: "architectStack", type: "direct", toNodes: "confirmGate" },
+    { fromNode: "confirmGate", type: "conditional", toNodes: JSON.stringify({ cond: "architect_confirm_yes", true: "base", false: "__end__" }) },
+    { fromNode: "base", type: "direct", toNodes: "dispatch" },
+    { fromNode: "dispatch", type: "direct", toNodes: "__end__" },
+];
+
+// ============================================================
+// Architect —— 架构师（固定类，消息驱动 + 拆分图）
+// ============================================================
+
+export class Architect extends BaseAgent {
+    private graph: any;
+
+    constructor(station: TransferStation, nodes: Node[] = DEFAULT_NODES, edges: Edge[] = DEFAULT_EDGES) {
+        super("architect", roles.architect, station);
+        this.build(nodes, edges);
+
+        // phase_plan → 拆分当前阶段；phase_done → 转告 PM 请求下一阶段
+        this.on("phase_plan", { fromNames: ["manager"] }, ({ data }) => {
+            void this.runPhaseSplit(data.plan as Plan, data.phase as planItem, data.projectId as number | undefined);
+        });
+        this.on("phase_done", { fromNames: ["maintainer"] }, ({ data }) => {
+            this.send("manager", { type: "phase_request", phase: data.phase });
+            console.log(`[architect] 发送到 PM：请求下一阶段（阶段 ${data.phase} 已完成）`);
+        });
     }
 
-    // 挂住等消息（进程保持存活；拆分在 messageLoop 里由消息触发）
-    await messageLoop();
+    /** 注册实现（schema/code/cond）→ stitch() 拼接编译 → this.graph */
+    private build(nodes: Node[], edges: Edge[]): void {
+        schemaRegistry.register("architect_detailed_plan", detailedPlanSchema);
+        schemaRegistry.register("architect_stack", stackSchema);
+        schemaRegistry.register("architect_base", baseSchema);
+        schemaRegistry.register("architect_resolution", resolutionSchema);
+        codeRegistry.register("architect_confirm", confirmNode);
+        codeRegistry.register("architect_dispatch", makeDispatchNode(this.station));
+        condRegistry.register("architect_confirm_yes", confirmYes);
+
+        console.log(`[architect] 拼接编译拆分图：${nodes.map(n => n.nodeName).join(" → ")}`);
+        this.graph = stitch(nodes, edges, {
+            stateExtra: {
+                plan: Annotation<any>({ default: () => null, reducer: (_: any, u: any) => u }),
+                confirmAnswer: Annotation<any>({ default: () => null, reducer: (_: any, u: any) => u }),
+                exeTasks: Annotation<any[]>({ default: () => [], reducer: (_: any[], u: any[]) => u }),
+            },
+        });
+    }
+
+    /** 拆分一个阶段：跑图（含确认门交互）→ 有任务已由 dispatch 下发；无任务则声明 0 对，阶段直接完成 */
+    private async runPhaseSplit(plan: Plan, phase: planItem, projectId?: number): Promise<void> {
+        console.log(`[architect] 拆分阶段 ${phase.phase}「${phase.name}」`);
+        const planForPhase: Plan = {
+            ...plan,
+            features: plan.features.filter(f => phase.features.includes(f.name)),
+            phases: [phase],
+        };
+        const state = await runWithInteraction(this.graph, { plan: planForPhase }, `architect-phase-${phase.phase}`, new CliQuestioner());
+        // 落库：业务模块(detailedPlan) + 技术选型(stack) + status=executing
+        if (projectId) {
+            try {
+                await saveArchitectOutput(projectId, state?.detailedPlan ?? null, state?.stack ?? null);
+            } catch (e) {
+                console.warn("[architect] 产出落库失败:", (e as Error).message);
+            }
+        }
+        const tasks: ExecTask[] = state?.exeTasks ?? [];
+        if (tasks.length > 0) {
+            console.log(`[architect] 阶段 ${phase.phase} 拆出 ${tasks.length} 个任务并下发`);
+        } else {
+            // 方案被拒 / 拆分失败 → 声明 0 对并 final，维护据此直接完成本阶段（不卡死流水线）
+            console.log(`[architect] 阶段 ${phase.phase} 无任务（被拒或拆分失败），声明 0 对完成`);
+            this.send("maintainer", { type: "tasks_declared", phase: phase.phase, pairIds: [], final: true });
+        }
+    }
 }

@@ -26,13 +26,25 @@ public class AgentNodeServiceImpl implements AgentNodeService {
     @Autowired
     private AgentPoolMapper agentPoolMapper;
 
-    /** 空字符串转 null：tools 是 JSON 列不能存 ''；model 空串=跟随全局（存 NULL） */
+    /** 空字符串转 null：tools 是 JSON 列不能存 ''；model 空串=跟随全局（存 NULL）；可选声明字段同理 */
     private void normalize(AgentNode entity) {
         if (entity.getTools() != null && entity.getTools().trim().isEmpty()) {
             entity.setTools(null);
         }
         if (entity.getModel() != null && entity.getModel().trim().isEmpty()) {
             entity.setModel(null);
+        }
+        if (entity.getNodeType() != null && entity.getNodeType().trim().isEmpty()) {
+            entity.setNodeType(null);
+        }
+        if (entity.getSchemaKey() != null && entity.getSchemaKey().trim().isEmpty()) {
+            entity.setSchemaKey(null);
+        }
+        if (entity.getCodeKey() != null && entity.getCodeKey().trim().isEmpty()) {
+            entity.setCodeKey(null);
+        }
+        if (entity.getOutput() != null && entity.getOutput().trim().isEmpty()) {
+            entity.setOutput(null);
         }
     }
 
@@ -69,9 +81,12 @@ public class AgentNodeServiceImpl implements AgentNodeService {
         LocalDateTime now = LocalDateTime.now();
         entity.setCreateTime(now);
         entity.setUpdateTime(now);
-        // 不传温度时给默认 0.7
+        // 不传温度时给默认 0.7；不传节点类型时给默认 llm（老数据/前端未传）
         if (entity.getTemperature() == null) {
             entity.setTemperature(0.7);
+        }
+        if (entity.getNodeType() == null) {
+            entity.setNodeType("llm");
         }
         agentNodeMapper.insert(entity);
     }

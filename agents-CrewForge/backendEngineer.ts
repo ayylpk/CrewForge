@@ -1,215 +1,215 @@
-import { DirectChatDeepSeek } from "./deepseekClient.ts";
+// ============================================================
+// backendEngineer.ts —— 后端开发（多实例 "backend1"/"backend2"...）
+//
+//   双队列流水线：任务 → 伪代码 → 代码
+//     queue1(taskQueue)  ← A 工位消费：任务 → 伪代码骨架
+//     queue2(pseudoQueue) ← B 工位消费：伪代码 → 完整代码 → 写盘 → task_result
+//
+//   关键约定（生产-消费流水线）：
+//     - A 只管自己的队列，伪代码 push 进 queue2 后立即回头处理下一个，
+//       完全不关心下游堆积（WorkQueue.push 异步入队不等待）
+//     - B 在下游队列独立消费，节奏与 A 无关
+//     - 每个工位可起多个 worker 提升并行度（瓶颈在哪个队列就加哪个）
+//     - 伪代码失败 → 传 null 降级：B 直接单步生成完整代码（不卡流水线）
+// ============================================================
+
 import { SystemMessage } from "@langchain/core/messages";
-import * as z from "zod";
-import fs from "node:fs";
-import path from "node:path";
-import { TransferStation, roles, WorkQueue, llmWithTimeout } from "./Hub.ts";   // 中转站 + 角色枚举 + 工位队列 + 超时兜底
+import { BaseAgent } from "./BaseAgent";
+import { roles, type TransferStation, WorkQueue } from "./Hub";
+import { initModels } from "./models";
+import { invokeWithTimeout } from "./llm";
+import { writeWorkspace, type ExecTask } from "./common";
+import { nodePrompt, type Node } from "./Node";
 
-// 后端任务一次生成完整文件，避免将首轮产物整体注入第二次模型调用。
-const model = new DirectChatDeepSeek({
+const BACKEND_MODEL_JSON = JSON.stringify({
+    provider: "deepseek",
     model: "deepseek-v4-flash",
-    timeout: 120000,   // 单次调用 120s 超时：thinking 模型大输出可能很慢，但必须有界（挂起走重试）
-})
+    temperature: 0.1,
+    thinking: false,
+});
 
-//   [
-//     {
-//       "id": "T1",
-//       "method": "POST",
-//       "path": "/api/tasks",
-//       "title": "POST /api/tasks：创建新任务，校验必填字段和格式，保存并生成ID和创建时间",
-//       "description": "模块：任务创建\n业务：任务创建\n技术：Node.js + Express + express-validator + PostgreSQL（或
-//   Fastify + zod + Prisma 均可）\n入参：title(string)、priority(string)、dueTime(string)\n返回：返回创建成功的任务对象，包
-//   含任务ID、标题、优先级、截止时间、创建时间",
-//       "parameters": [
-//         { "name": "title", "type": "string", "required": true, "description": "任务标题，必填" },
-//         { "name": "priority", "type": "string", "required": true, "description": "优先级，必填，取值如 high/medium/low"
-//   },
-//         { "name": "dueTime", "type": "string", "required": true, "description": "截止时间，必填，格式为ISO 8601" }
-//       ],
-//       "acceptance": "创建后列表出现且字段完整"
-//     },
-//     {
-//       "id": "T2",
-//       "method": "GET",
-//       "path": "/api/tasks",
-//       "title": "GET /api/tasks：获取任务列表，用于创建后刷新列表展示",
-//       "description": "模块：任务创建\n业务：任务创建\n技术：Node.js + Express + express-validator + PostgreSQL（或
-//   Fastify + zod + Prisma 均可）\n入参：\n返回：返回任务列表数组，每个任务包含任务ID、标题、优先级、截止时间、创建时间",
-//       "parameters": [],
-//       "acceptance": "创建后列表出现且字段完整"
-//     }
-//   ]
+// ---------- 提示词 ----------
 
-interface ExecTask {
-  id: string;
-  layer: "backend" | "frontend";  // 归属层（backendEngineer 只处理 backend）
-  method: string;        // GET/POST/PUT/DELETE（前端任务为空串）
-  path: string;          // 接口路径（前端任务为空串）
-  files: string[];       // 架构师指定的文件清单（只写这些文件，不得另起）
-  title: string;         // "POST /api/tasks：创建任务"
-  description: string;   // 任务描述（含模块/业务/技术/入参/返回，自包含）
-  parameters: {
-    name: string;
-    type: string;        // string/number/boolean…
-    required: boolean;
-    description: string; // 业务含义
-  }[];
-  acceptance: string;    // 验收标准（从 Plan.features 原样抄 —— 任务的验收契约，交接给执行层用）
-}
+// 工位 A：伪代码骨架（先想清楚结构，再让 B 补实现）
+export const skeleton_prompt: string = `
+# 角色
+你是 CrewForge 项目的后端设计 Agent。为指定任务产出"伪代码骨架"，不做完整实现。
 
-// 单个文件结构
-interface CodeFile {
-  description: string;  
-  filePath: string;
-  code: string;
-}
+## 任务
+1. 根据任务契约（method/path/入参/返回/验收）设计各文件的结构。
+2. 输出：文件清单、函数签名、关键字段、流程步骤（伪代码）、依赖的调用（DB/中间件/工具类）。
+3. 不要写完整实现体，用注释/伪代码占位即可；但签名和流程必须精确。
 
-// ---------- 后端实现提示词 ----------
+## 输出
+只输出伪代码骨架文本，不要 JSON、Markdown 围栏或额外说明。
+`;
 
-const pseudo_prompt: string = `
+// 工位 B：带骨架补全完整实现（移植自 _legacy-agents/backendEngineer.ts）
+export const pseudo_prompt: string = `
 # 角色
 你是 CrewForge 项目的后端文件实现 Agent。当前任务已经由架构师定义，你负责为指定文件产出完整、可运行的代码。
 
 ## 输入
 1. 当前任务（接口信息 + 技术栈：技术/中间件/数据库，任务描述里已自包含）
-2. 项目路径（决定 filePath 写哪个文件）
+2. 伪代码骨架（已确定的结构，必须严格遵循并补全实现体）
 
 ## 工作目标
-1. 为任务 files 中的每个文件产出完整、可运行的实现；filePath 必须逐字复制。
+1. 为当前任务 files 中的文件产出完整、可运行的实现。
 2. 补齐校验、错误处理、数据转换和必要的持久化调用。
 3. 严格遵循任务中给出的技术、依赖、中间件和数据库，不自行换栈。
-4. 已有文件内容存在时，只做完成任务所需的最小修改。
 
 ## 边界
 - 只实现当前任务描述和验收标准，不发明字段、接口行为或额外功能。
-- 不新增 files 之外的文件路径，不遗漏任务文件。
-- 任务契约不明确的地方保留为风险或最小假设，不要编造业务规则。
+- 不新增 files 之外的文件路径。
 - 输出中的代码必须与 method、path、参数、返回契约保持一致。
-
-## 输出格式（必须遵守）
-只输出一段 JSON，不要夹带讨论：
-{
-  "description": "本次产出说明",
-  "files": [
-    { "description": "文件职责", "filePath": "src/routes/tasks.ts", "code": "完整可运行代码" }
-  ]
-}
+- 只输出目标文件的完整源代码，不要 JSON、Markdown 代码围栏或额外说明。
 `;
 
-// ---------- 结构化输出模型 ----------
+// ---------- 工具：从回复里提取代码（去一个外层代码围栏） ----------
 
-const implementationModel = model.withStructuredOutput(
-  z.object({
-    description: z.string(),
-    files: z.array(z.object({
-      description: z.string(),
-      filePath: z.string(),
-      code: z.string(),
-    })),
-  }),
-  { method: "jsonMode", name: "extract_implementation" }
-);
-
-// ============================================================
-// 后端开发消息收发（参照 architect.ts 模板）
-//   消息协议（content 为 JSON 字符串）：
-//     架构师/合并器 → 后端: {"type": "task", "task": ExecTask}                 下发任务（layer 已筛过）/ 返工
-//     后端 → 合并器:        {"type": "task_result", "task": ExecTask, "success": bool} 干完活交合并器配对
-// ============================================================
-
-// 后端开发入口（函数化：接收 agent 名 + 共享中转站，由 start.ts 拉起）
-// name = "backend1"/"backend2"…（多开发负载均衡），station 是进程内全局唯一的站
-//
-// 单次实现队列：每个后端任务只调用一次模型，写盘后交给合并器。
-export async function runBackend(name: string, station: TransferStation) {
-    const implementationQueue = new WorkQueue<{ task: ExecTask }>();
-    const writtenFiles = new Map<string, string>();
-
-    async function implementationWorker() {
-        while (true) {
-            const { task } = await implementationQueue.pop();
-            const existing = [...writtenFiles.entries()]
-                .filter(([filePath]) => task.files.includes(filePath))
-                .map(([filePath, code]) => `--- ${filePath} ---\n${code}`)
-                .join("\n");
-            const existingContent = existing ? `\n\n## 已存在的文件\n${existing}` : "";
-            let implementation: CodeFile[] | null = null;
-            for (let attempt = 1; attempt <= 3; attempt++) {
-                const ts = Date.now();
-                try {
-                    const r = await llmWithTimeout(
-                        sig => implementationModel.invoke([
-                            new SystemMessage(
-                                pseudo_prompt +
-                                `\n\n## 当前任务\n${JSON.stringify(task, null, 2)}` +
-                                `\n\n## 项目路径\nworkspace` +
-                                existingContent
-                            ),
-                        ], { signal: sig }),
-                        150000,
-                        `[${task.id}] 后端实现`
-                    );
-                    console.log(`[${task.id}] 后端实现 ${Date.now() - ts}ms`);
-                    if (r.files.length > 0) { implementation = r.files; break; }
-                    console.log(`提示：${task.id} 后端实现产出为空，重试 ${attempt}/3`);
-                } catch (e) {
-                    console.log(`${task.id} 后端实现 LLM 失败（第 ${attempt} 次，${Date.now() - ts}ms）：${(e as Error).message.slice(0, 80)}`);
+function extractGeneratedCode(content: unknown): string | null {
+    const text = typeof content === "string"
+        ? content
+        : Array.isArray(content)
+            ? content.map(part => {
+                if (typeof part === "string") return part;
+                if (part && typeof part === "object" && "text" in part && typeof (part as { text?: unknown }).text === "string") {
+                    return (part as { text: string }).text;
                 }
-            }
-            if (!implementation) {
-                console.log(`${task.id} 后端实现连续 3 次失败，上报合并器`);
-                station.sendMessage(name, "merger", JSON.stringify({ type: "task_result", task, success: false }));
-                continue;
-            }
-            for (const f of implementation) {
-                const safePath = f.filePath.replace(/^[/\\]+/, "").replace(/\.\./g, "");
-                const full = path.join("workspace", safePath);
-                fs.mkdirSync(path.dirname(full), { recursive: true });
-                fs.writeFileSync(full, f.code, "utf-8");
-                console.log(`已写入 ${full}`);
-            }
-            for (const f of implementation) writtenFiles.set(f.filePath, f.code);
-            console.log(`${task.id} 后端实现已写入 workspace/`);
-            station.sendMessage(name, "merger", JSON.stringify({ type: "task_result", task, success: true }));
-            console.log(`[${name}] 发送到合并器：任务 ${task.id} 完成，等配对`);
-        }
-    }
-
-    void implementationWorker();
-
-    async function messageLoop() {
-        console.log(`[${name}] 消息监听已启动：等架构师下发任务`);
-        while (true) {
-            const msg = await station.waitForMessage(name);
-            if (!msg) continue;
-            let data: { type?: string; task?: ExecTask; success?: boolean; issues?: string[] };
-            try { data = JSON.parse(msg.content); } catch { continue; }
-
-            // 用角色检测发送方（多实例场景名字可能是 test1/test2，role 才是身份）
-            const senderRole = station.status[msg.sender]?.role;
-
-            if ((msg.sender === "architect" || msg.sender === "merger") && data.type === "task") {
-                // 架构师下发 / 合并器返工 → 入实现队列。
-                console.log(`[${name}] 收到 ${msg.sender} 的任务：${data.task?.id}（${data.task?.title}）`);
-                if (data.task) implementationQueue.push({ task: data.task });
-            }
-
-            // 测试返工：revision（带问题清单）→ issues 拼进任务描述针对性修改 → 重进实现队列。
-            if (senderRole === roles.testEngineer && data.type === "revision" && data.task) {
-                console.log(`[${name}] 收到测试返工：任务 ${data.task.id}（${data.issues?.length ?? 0} 条意见）`);
-                const revised = {
-                    ...data.task,
-                    description: data.task.description + "\n\n【测试返工意见（必须逐条解决）】\n" + (data.issues ?? []).join("\n"),
-                };
-                implementationQueue.push({ task: revised });
-            }
-            station.markDone(name);   // 处理完记账（负载均衡的数据基础：pendingCount -1）
-        }
-    }
-
-    // 挂住等消息，后端实现工位在后台按队列处理任务。
-    await messageLoop();
+                return "";
+            }).join("")
+            : "";
+    const trimmed = text.trim();
+    if (!trimmed) return null;
+    const fenced = trimmed.match(/^```[^\r\n]*\r?\n([\s\S]*?)\r?\n?```$/);
+    const code = (fenced?.[1] ?? trimmed).trim();
+    return code || null;
 }
 
+// ============================================================
+// BackendEngineer —— 双队列流水线（任务 → 伪代码 → 代码）
+// ============================================================
 
+export class BackendEngineer extends BaseAgent {
+    /** queue1：等伪代码的任务 */
+    private readonly taskQueue = new WorkQueue<{ task: ExecTask }>();
+    /** queue2：伪代码完成、等代码的任务 */
+    private readonly pseudoQueue = new WorkQueue<{ task: ExecTask; pseudo: string | null }>();
+    /** 工位 A 提示词（节点「伪代码」优先，空回退内置默认） */
+    private readonly skeletonPrompt: string;
+    /** 工位 B 提示词（节点「代码实现」优先，空回退内置默认） */
+    private readonly codePrompt: string;
 
+    constructor(name: string, station: TransferStation, nodes: Node[] = []) {
+        super(name, roles.backendEngineer, station);
+        this.skeletonPrompt = nodePrompt(nodes, "伪代码", skeleton_prompt);
+        this.codePrompt = nodePrompt(nodes, "代码实现", pseudo_prompt);
+        this.on("task", { fromNames: ["architect", "merger"] }, ({ data }) => {
+            this.taskQueue.push({ task: data.task as ExecTask });
+        });
+        this.on("revision", { fromRoles: [roles.testEngineer] }, ({ data }) => {
+            this.taskQueue.push({
+                task: {
+                    ...(data.task as ExecTask),
+                    description: (data.task as ExecTask).description + "\n\n【测试返工意见（必须逐条解决）】\n" + (data.issues ?? []).join("\n"),
+                },
+            });
+        });
+    }
+
+    override async onStart(): Promise<void> {
+        // A 工位 ×2 + B 工位 ×2（并行度：瓶颈在 queue2 就多加 B，反之加 A）
+        void this.pseudoWorker();
+        void this.pseudoWorker();
+        void this.codeWorker();
+        void this.codeWorker();
+    }
+
+    // ---------- 工位 A：任务 → 伪代码 ----------
+
+    private async pseudoWorker(): Promise<void> {
+        while (true) {
+            const { task } = await this.taskQueue.pop();
+            console.log(`[${this.name}] ${task.id} 进入伪代码工位`);
+            const pseudo = await this.generatePseudo(task);   // 失败返回 null（降级）
+            this.pseudoQueue.push({ task, pseudo });          // 塞进下游，立即回去处理下一个
+        }
+    }
+
+    private async generatePseudo(task: ExecTask): Promise<string | null> {
+        const model = initModels(BACKEND_MODEL_JSON);
+        let feedback = "";
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            const ts = Date.now();
+            try {
+                const res = await invokeWithTimeout<any>(`${task.id} 伪代码`, 120_000, sig => model.invoke([
+                    new SystemMessage(this.skeletonPrompt + `\n\n## 当前任务\n${JSON.stringify(task, null, 2)}` + feedback),
+                ], { signal: sig }));
+                console.log(`[${this.name}] ${task.id} 伪代码 ${Date.now() - ts}ms`);
+                const pseudo = extractGeneratedCode(res.content);
+                if (pseudo) return pseudo;
+                feedback = "\n\n## 上次没有提取到骨架：请只输出伪代码骨架文本。";
+            } catch (error) {
+                feedback = `\n\n## 上次调用失败，请重试：${(error as Error).message.slice(0, 200)}`;
+                console.log(`[${this.name}] ${task.id} 伪代码失败（第 ${attempt} 次）：${(error as Error).message.slice(0, 80)}`);
+            }
+        }
+        return null;   // 连续 3 次失败：降级，让 B 单步生成
+    }
+
+    // ---------- 工位 B：伪代码 → 代码 → 写盘 → 交付 ----------
+
+    private async codeWorker(): Promise<void> {
+        while (true) {
+            const { task, pseudo } = await this.pseudoQueue.pop();
+            console.log(`[${this.name}] ${task.id} 进入代码工位${pseudo ? "" : "（伪代码缺失，单步生成）"}`);
+            if (task.files.length === 0) {
+                this.send("merger", { type: "task_result", task, success: true });
+                continue;
+            }
+
+            const code = await this.generateCode(task, pseudo);
+            if (!code) {
+                console.log(`[${this.name}] ${task.id} 代码生成失败，上报合并器`);
+                this.send("merger", { type: "task_result", task, success: false });
+                continue;
+            }
+            for (const fp of task.files) {
+                const full = writeWorkspace(fp, code);
+                console.log(`已写入 ${full}`);
+            }
+            console.log(`[${this.name}] ${task.id} 后端实现已写入 workspace/`);
+            this.send("merger", { type: "task_result", task, success: true });
+        }
+    }
+
+    private async generateCode(task: ExecTask, pseudo: string | null): Promise<string | null> {
+        const model = initModels(BACKEND_MODEL_JSON);
+        const hint = pseudo
+            ? `\n\n## 伪代码骨架（必须严格遵循，补全实现体）\n${pseudo}`
+            : "\n\n## 提示\n伪代码生成失败，请一次性输出完整可运行的源代码。";
+        let feedback = "";
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            const ts = Date.now();
+            try {
+                const res = await invokeWithTimeout<any>(`${task.id} 代码`, 120_000, sig => model.invoke([
+                    new SystemMessage(
+                        this.codePrompt +
+                        `\n\n## 当前任务\n${JSON.stringify(task, null, 2)}` +
+                        `\n\n## 项目路径\nworkspace` +
+                        hint +
+                        feedback
+                    ),
+                ], { signal: sig }));
+                console.log(`[${this.name}] ${task.id} 代码 ${Date.now() - ts}ms`);
+                const code = extractGeneratedCode(res.content);
+                if (code) return code;
+                feedback = "\n\n## 上次输出没有提取到代码：请只输出目标文件的完整源代码，不要 Markdown 围栏、JSON 或说明。";
+            } catch (error) {
+                feedback = `\n\n## 上次调用失败，请重试：${(error as Error).message.slice(0, 200)}`;
+                console.log(`[${this.name}] ${task.id} 代码失败（第 ${attempt} 次）：${(error as Error).message.slice(0, 80)}`);
+            }
+        }
+        return null;
+    }
+}

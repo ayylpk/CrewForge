@@ -2,13 +2,16 @@ package com.hina.crewforge.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.hina.crewforge.common.exception.BaseException;
 import com.hina.crewforge.mapper.ProjectFileMapper;
 import com.hina.crewforge.pojo.dto.ProjectFileDTO;
 import com.hina.crewforge.pojo.entity.ProjectFile;
 import com.hina.crewforge.pojo.vo.ProjectFileVO;
 import com.hina.crewforge.service.ProjectFileService;
+import com.hina.crewforge.service.ProjectService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -18,6 +21,9 @@ import java.util.stream.Collectors;
 @Service
 @Slf4j
 public class ProjectFileServiceImpl extends ServiceImpl<ProjectFileMapper, ProjectFile> implements ProjectFileService {
+
+    @Autowired
+    private ProjectService projectService;
 
     @Override
     public List<ProjectFileVO> listByProjectId(Long projectId) {
@@ -68,6 +74,11 @@ public class ProjectFileServiceImpl extends ServiceImpl<ProjectFileMapper, Proje
     @Override
     public ProjectFileVO getById(Long id) {
         ProjectFile entity = baseMapper.selectById(id);
+        if (entity == null) {
+            throw new BaseException("文件不存在: " + id);
+        }
+        // 文件归属项目 → 借项目归属校验（个人=创建者, 团队=成员），防 IDOR 越权读取
+        projectService.getById(entity.getProjectId());
         return toVO(entity);
     }
 

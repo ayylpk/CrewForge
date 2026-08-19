@@ -36,7 +36,6 @@ public class JwtInterceptor implements HandlerInterceptor {
 
     /** 成员关系表（校验 X-Tenant-Id 归属用） */
     private final UserTenantMapper userTenantMapper;
-
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
         // 非 Controller 方法（静态资源等）直接放行
@@ -63,15 +62,14 @@ public class JwtInterceptor implements HandlerInterceptor {
         }
 
         // 3. 团队 ID 从请求头读取（多团队切换，无需重新签发 token）
-        // ⚠️ 传了就必须属于该团队（sys_user_tenant 正常成员），防伪造头越权
         String tenantIdHeader = request.getHeader(TENANT_HEADER);
         if (tenantIdHeader != null && !tenantIdHeader.isEmpty()) {
             try {
                 Long tenantId = Long.valueOf(tenantIdHeader);
                 Long memberCount = userTenantMapper.selectCount(new LambdaQueryWrapper<UserTenant>()
-                        .eq(UserTenant::getUserId, userId)
-                        .eq(UserTenant::getTenantId, tenantId)
-                        .eq(UserTenant::getStatus, 1));
+                    .eq(UserTenant::getUserId, userId)
+                    .eq(UserTenant::getTenantId, tenantId)
+                    .eq(UserTenant::getStatus, 1));
                 if (memberCount == null || memberCount == 0) {
                     log.warn("X-Tenant-Id 越权拦截: userId={}, tenantId={}", userId, tenantId);
                     response.setStatus(403);
@@ -88,6 +86,7 @@ public class JwtInterceptor implements HandlerInterceptor {
         return true;
     }
 
+
     /**
      * 双密钥解析：先 user 密钥，失败换 admin 密钥
      */
@@ -102,7 +101,6 @@ public class JwtInterceptor implements HandlerInterceptor {
     @Override
     public void afterCompletion(HttpServletRequest request, HttpServletResponse response,
                                 Object handler, Exception ex) {
-        // 清空 ThreadLocal，防止线程池复用导致串数据
         BaseContext.remove();
     }
 }

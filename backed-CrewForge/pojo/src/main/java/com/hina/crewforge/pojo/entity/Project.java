@@ -36,7 +36,7 @@ public class Project {
     private String name;
     /** 项目描述(原始需求) */
     private String description;
-    /** 需求澄清后的结构化文档(Markdown) */
+    /** 需求澄清后的结构化文档 */
     private String clarifiedReq;
     /** AI拆分的业务模块列表(JSON) */
     private String businessModules;

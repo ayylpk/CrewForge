@@ -5,6 +5,8 @@ import com.github.pagehelper.PageHelper;
 import com.hina.crewforge.common.context.BaseContext;
 import com.hina.crewforge.common.exception.BaseException;
 import com.hina.crewforge.common.result.PageResult;
+import com.hina.crewforge.common.template.AgentTemplate;
+import com.hina.crewforge.mapper.AgentEdgeMapper;
 import com.hina.crewforge.mapper.AgentNodeMapper;
 import com.hina.crewforge.mapper.AgentPoolMapper;
 import com.hina.crewforge.mapper.ProjectAgentMapper;
@@ -12,6 +14,7 @@ import com.hina.crewforge.mapper.ProjectAgentNodeMapper;
 import com.hina.crewforge.pojo.QueryParam.ProjectAgentQueryParam;
 import com.hina.crewforge.pojo.dto.ProjectAgentCopyDTO;
 import com.hina.crewforge.pojo.dto.ProjectAgentDTO;
+import com.hina.crewforge.pojo.entity.AgentEdge;
 import com.hina.crewforge.pojo.entity.AgentNode;
 import com.hina.crewforge.pojo.entity.AgentPool;
 import com.hina.crewforge.pojo.entity.ProjectAgent;
@@ -41,6 +44,9 @@ public class ProjectAgentServiceImpl implements ProjectAgentService {
 
     @Autowired
     private ProjectAgentNodeMapper projectAgentNodeMapper;
+
+    @Autowired
+    private AgentEdgeMapper agentEdgeMapper;
 
     @Override
     public PageResult<ProjectAgentVO> page(ProjectAgentQueryParam projectAgentQueryParam) {
@@ -101,8 +107,15 @@ public class ProjectAgentServiceImpl implements ProjectAgentService {
 
     @Override
     public ProjectAgentVO getById(Long id) {
-        // Mapper 已 JOIN sys_agent 带出 name/role
-        return projectAgentMapper.getById(id);
+        // 存在 + 所有权校验（项目 Agent 按用户隔离, 只能读自己的）—— 防 IDOR 越权读取
+        ProjectAgentVO existing = projectAgentMapper.getById(id);
+        if (existing == null) {
+            throw new BaseException("项目 Agent 不存在: " + id);
+        }
+        if (!existing.getUserId().equals(BaseContext.getCurrentUserId())) {
+            throw new BaseException("无权查看他人的项目 Agent");
+        }
+        return existing;
     }
 
     @Override
@@ -125,6 +138,7 @@ public class ProjectAgentServiceImpl implements ProjectAgentService {
     /**
      * 从 Agent 池拉取到项目团队（成员行存 agentId 引用池, 节点复制一份进项目）
      * 一个事务：查池 → 逐条插入成员行 + 复制节点 → 全成或全败
+     * 单例角色（项目经理/架构师）：项目缺则自动补模板；用户再拉同角色则拒绝
      */
     @Override
     @Transactional
@@ -134,45 +148,127 @@ public class ProjectAgentServiceImpl implements ProjectAgentService {
         }
         // ⚠️ 不信任前端传的 userId, 从 JWT 解析当前登录用户
         Long currentUserId = BaseContext.getCurrentUserId();
-        // 池里的 Agent 只允许拉取自己的（防拿别人的池模板）
+        LocalDateTime now = LocalDateTime.now();
+
+        // 0. 单例角色自动补：确保项目有且仅有一个 项目经理 / 架构师（模板池 Agent + 节点 + 边）
+        autoEnsureSingleton(dto.getProjectId(), "项目经理", currentUserId, now);
+        autoEnsureSingleton(dto.getProjectId(), "架构师", currentUserId, now);
+
+        // 1. 池里的 Agent 只允许拉取自己的（防拿别人的池模板）
         List<AgentPool> pool = agentPoolMapper.selectByIds(dto.getAgentIds()).stream()
                 .filter(p -> p.getUserId().equals(currentUserId))
                 .collect(Collectors.toList());
-        // 批量查池节点, 按 agentId 分组, 供逐成员复制
+        // 2. 单例校验：用户拉的经理/架构师，项目已有同角色 → 拒绝
+        for (AgentPool p : pool) {
+            if (AgentTemplate.SINGLETON_ROLES.contains(p.getRole())
+                    && projectAgentMapper.countByRole(dto.getProjectId(), p.getRole()) > 0) {
+                throw new BaseException("项目已有一个「" + p.getRole() + "」，一个项目只能有一个");
+            }
+        }
+        // 3. 批量查池节点, 按 agentId 分组, 供逐成员复制
         List<AgentNode> poolNodes = agentNodeMapper.selectByAgentIds(dto.getAgentIds());
         Map<Long, List<AgentNode>> nodesByAgent = poolNodes.stream()
                 .collect(Collectors.groupingBy(AgentNode::getAgentId));
-        LocalDateTime now = LocalDateTime.now();
         int count = 0;
         for (AgentPool p : pool) {
-            ProjectAgent entity = new ProjectAgent();
-            entity.setProjectId(dto.getProjectId());
-            entity.setUserId(currentUserId);
-            entity.setAgentId(p.getId());
-            // 拉取进项目默认参与
-            entity.setStatus(1);
-            entity.setCreateTime(now);
-            entity.setUpdateTime(now);
-            projectAgentMapper.insert(entity);
+            insertProjectMember(dto.getProjectId(), currentUserId, p.getId(), now);
             count++;
-            // 复制池节点到项目节点表（复制非引用: 项目内修改不影响池）
-            for (AgentNode n : nodesByAgent.getOrDefault(p.getId(), Collections.emptyList())) {
-                ProjectAgentNode pn = new ProjectAgentNode();
-                pn.setProjectId(dto.getProjectId());
-                pn.setAgentId(p.getId());
-                pn.setUserId(currentUserId);
-                pn.setNodeName(n.getNodeName());
-                pn.setDescription(n.getDescription());
-                pn.setSystemPrompt(n.getSystemPrompt());
-                pn.setTemperature(n.getTemperature());
-                pn.setTools(n.getTools());
-                pn.setModel(n.getModel());
-                pn.setCreateTime(now);
-                pn.setUpdateTime(now);
-                projectAgentNodeMapper.insert(pn);
-            }
+            // 复制池节点到项目节点表（复制非引用: 项目内修改不影响池；含新 4 技术列）
+            copyNodesToProject(dto.getProjectId(), p.getId(), currentUserId, now,
+                    nodesByAgent.getOrDefault(p.getId(), Collections.emptyList()));
         }
         return count;
+    }
+
+    /** 自动补单例角色：项目缺经理/架构师 → 池里找模板 Agent（没有则创建并插模板节点+边）→ 拉进项目 */
+    private void autoEnsureSingleton(Long projectId, String role, Long userId, LocalDateTime now) {
+        if (projectAgentMapper.countByRole(projectId, role) > 0) return;
+        AgentPool poolAgent = agentPoolMapper.findByRoleAndUser(role, userId);
+        if (poolAgent == null) {
+            poolAgent = new AgentPool();
+            poolAgent.setUserId(userId);
+            poolAgent.setName(role);
+            poolAgent.setRole(role);
+            poolAgent.setStatus(1);
+            poolAgent.setCreateTime(now);
+            poolAgent.setUpdateTime(now);
+            agentPoolMapper.insert(poolAgent);
+            insertTemplateNodes(poolAgent.getId(), role, now);   // 模板节点 + 边
+        }
+        insertProjectMember(projectId, userId, poolAgent.getId(), now);
+        copyNodesToProject(projectId, poolAgent.getId(), userId, now,
+                agentNodeMapper.selectByAgentIds(Collections.singletonList(poolAgent.getId())));
+        System.out.println("[ProjectAgent] 自动补项目单例角色：" + role);
+    }
+
+    /** 模板角色池 Agent：插入节点 + 边（AgentTemplate 数据，prompt 预填） */
+    private void insertTemplateNodes(Long agentId, String role, LocalDateTime now) {
+        for (AgentTemplate.NodeTpl t : AgentTemplate.ROLE_NODE_TEMPLATES.getOrDefault(role, List.of())) {
+            AgentNode node = new AgentNode();
+            node.setAgentId(agentId);
+            node.setNodeName(t.name());
+            node.setDescription("");
+            node.setSystemPrompt(t.prompt());
+            node.setTemperature(0.3);
+            node.setTools(null);
+            node.setModel(AgentTemplate.MODEL_JSON);
+            node.setNodeType(t.nodeType());
+            node.setSchemaKey(blankToNull(t.schemaKey()));
+            node.setCodeKey(blankToNull(t.codeKey()));
+            node.setOutput(blankToNull(t.output()));
+            node.setCreateTime(now);
+            node.setUpdateTime(now);
+            agentNodeMapper.insert(node);
+        }
+        for (AgentTemplate.EdgeTpl e : AgentTemplate.ROLE_EDGE_TEMPLATES.getOrDefault(role, List.of())) {
+            AgentEdge edge = new AgentEdge();
+            edge.setAgentId(agentId);
+            edge.setFromNode(e.from());
+            edge.setType(e.type());
+            edge.setToNodes(e.to());
+            edge.setCreateTime(now);
+            edge.setUpdateTime(now);
+            agentEdgeMapper.insert(edge);
+        }
+    }
+
+    private void insertProjectMember(Long projectId, Long userId, Long agentId, LocalDateTime now) {
+        ProjectAgent member = new ProjectAgent();
+        member.setProjectId(projectId);
+        member.setUserId(userId);
+        member.setAgentId(agentId);
+        // 拉取进项目默认参与
+        member.setStatus(1);
+        member.setCreateTime(now);
+        member.setUpdateTime(now);
+        projectAgentMapper.insert(member);
+    }
+
+    /** 复制池节点到项目节点表（复制非引用：项目内修改不影响池；含新 4 技术列） */
+    private void copyNodesToProject(Long projectId, Long agentId, Long userId, LocalDateTime now, List<AgentNode> poolNodes) {
+        for (AgentNode n : poolNodes) {
+            ProjectAgentNode pn = new ProjectAgentNode();
+            pn.setProjectId(projectId);
+            pn.setAgentId(agentId);
+            pn.setUserId(userId);
+            pn.setNodeName(n.getNodeName());
+            pn.setDescription(n.getDescription());
+            pn.setSystemPrompt(n.getSystemPrompt());
+            pn.setTemperature(n.getTemperature());
+            pn.setTools(n.getTools());
+            pn.setModel(n.getModel());
+            pn.setNodeType(n.getNodeType());
+            pn.setSchemaKey(n.getSchemaKey());
+            pn.setCodeKey(n.getCodeKey());
+            pn.setOutput(n.getOutput());
+            pn.setCreateTime(now);
+            pn.setUpdateTime(now);
+            projectAgentNodeMapper.insert(pn);
+        }
+    }
+
+    private static String blankToNull(String s) {
+        return s == null || s.isBlank() ? null : s;
     }
 
     private ProjectAgentVO toVO(ProjectAgent projectAgent) {

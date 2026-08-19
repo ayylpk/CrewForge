@@ -73,4 +73,14 @@
         </foreach>
     </update>
 
+    <select id="findByRoleAndUser" resultType="com.hina.crewforge.pojo.entity.AgentPool">
+        SELECT id, user_id, name, role, status, create_time, update_time
+        FROM sys_agent
+        WHERE user_id = #{userId}
+          AND role = #{role}
+          AND deleted = 0
+        ORDER BY id ASC
+        LIMIT 1
+    </select>
+
 </mapper>

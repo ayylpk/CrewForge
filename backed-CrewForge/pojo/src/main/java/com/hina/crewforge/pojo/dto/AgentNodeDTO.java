@@ -16,4 +16,9 @@ public class AgentNodeDTO {
     private Double temperature;
     private String tools;
     private String model;
+    /** 节点类型: llm/code/human（不传默认 llm） */
+    private String nodeType;
+    private String schemaKey;
+    private String codeKey;
+    private String output;
 }

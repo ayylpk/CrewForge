@@ -169,11 +169,14 @@ function roleMetaByLabel(label: string) {
   return hit ? ROLE_META[hit] : { label, color: '#8890a8', bg: 'rgba(136,144,168,.12)', icon: '' }
 }
 
-// ===== 添加/编辑成员（复用 AgentFormView 页面，带 ?projectId= 即项目模式） =====
+// ===== 添加/编辑成员（复用 AgentFormView 页面） =====
 
-/** 添加成员：成员必须来自 Agent 仓库（节点随拉取复制），直接打开仓库拉取弹窗 */
+/** 添加成员：新建仓库 Agent 后自动复制到当前项目 */
 function addMember() {
-  openPoolModal()
+  router.push({
+    name: 'agent-new',
+    query: { projectId: String(route.params.id) },
+  })
 }
 
 /** 编辑成员：跳编辑表单（项目模式 + 项目 Agent id） */
@@ -258,10 +261,27 @@ function poolSearch() {
   loadPool()
 }
 
+/** 项目已占用的单例角色（一个项目只能有一个项目经理/架构师） */
+const occupiedRoles = computed(() => {
+  const roles = new Set<string>()
+  for (const m of existingAgents.value) {
+    if (m.role === '项目经理' || m.role === '架构师') roles.add(m.role)
+  }
+  return roles
+})
+
+function isOccupied(a: agentPoolVO): boolean {
+  return occupiedRoles.value.has(a.role)
+}
+
 function toggleSelect(id: number) {
   const i = selectedIds.value.indexOf(id)
   if (i >= 0) selectedIds.value.splice(i, 1)
-  else selectedIds.value.push(id)
+  else {
+    const target = poolAgents.value.find((p) => p.id === id)
+    if (target && isOccupied(target)) return
+    selectedIds.value.push(id)
+  }
 }
 
 /** 拉取：一个事务批量复制，完成后刷新成员列表 */
@@ -541,11 +561,22 @@ function confirmTeam() {
           仓库是空的，先去 Agent 仓库新建吧
         </div>
         <div v-else class="pool-list">
-          <label v-for="a in poolAgents" :key="a.id" class="pool-item" :class="{ checked: selectedIds.includes(a.id) }">
-            <input type="checkbox" :checked="selectedIds.includes(a.id)" @change="toggleSelect(a.id)" />
+          <label
+            v-for="a in poolAgents"
+            :key="a.id"
+            class="pool-item"
+            :class="{ checked: selectedIds.includes(a.id), disabled: isOccupied(a) }"
+          >
+            <input
+              type="checkbox"
+              :disabled="isOccupied(a)"
+              :checked="selectedIds.includes(a.id)"
+              @change="toggleSelect(a.id)"
+            />
             <span class="pool-item-name">{{ a.name }}</span>
             <span class="pool-item-role">{{ a.role || '通用' }}</span>
             <span class="pool-item-meta">{{ a.model ? modelLabel(a.model) : '跟随全局' }}</span>
+            <span v-if="isOccupied(a)" class="pool-item-lock">项目已有，单例角色</span>
           </label>
         </div>
 
@@ -1474,6 +1505,23 @@ function confirmTeam() {
 .pool-item.checked {
   border-color: var(--blue);
   background: rgba(69, 184, 255, 0.06);
+}
+.pool-item.disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  border-color: var(--border);
+}
+.pool-item.disabled:hover {
+  border-color: var(--border);
+}
+.pool-item-lock {
+  flex: none;
+  font-size: 11px;
+  color: var(--text3);
+  padding: 1px 6px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg3);
 }
 .pool-item input[type='checkbox'] {
   accent-color: var(--blue);

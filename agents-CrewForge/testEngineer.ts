@@ -1,86 +1,44 @@
-import { DirectChatDeepSeek } from "./deepseekClient.ts";
-import { SystemMessage } from "@langchain/core/messages";
-import * as z from "zod";
-import { Annotation, StateGraph, START, END, MemorySaver, type GraphNode } from "@langchain/langgraph";
+// ============================================================
+// testEngineer.ts —— 测试（多实例 "test1"/"test2"...）
+//
+//   完整逻辑移植自 _legacy-agents/testEngineer.ts，结构参照 manager.ts：
+//     pair_ready → 机械预检（文件缺失直接 fail）→ LLM 契约判定（schema + 带反馈重试）
+//     → 通过：task_passed 给维护；失败：revision 按 blame 发回对应开发返工
+//
+//   判定轮次上限：同一对同一阶段 ≥3 次未过 → 放弃（上报维护 + 通知合并器停止配对）。
+//   计数按 阶段:pairId 键控（任务 id 每阶段从 T1 重新编号，跨阶段不得累加）。
+// ============================================================
+
 import fs from "node:fs";
 import path from "node:path";
-import { TransferStation, roles, llmWithTimeout } from "./Hub.ts";   // 测试与合并器/开发/维护的消息中转站 + 角色枚举 + 超时兜底
+import { z } from "zod";
+import { SystemMessage } from "@langchain/core/messages";
+import { BaseAgent } from "./BaseAgent";
+import { roles, type TransferStation } from "./Hub";
+import { initModels } from "./models";
+import { retryStructured } from "./llm";
+import { type Pair, type ExecTask } from "./common";
+import { nodePrompt, type Node } from "./Node";
 
-// ============================================================
-// 测试工程师：配对契约检查（纯 L3，LLM 模拟执行，零环境）
-//
-//   消息驱动：合并器配好对（pair_ready）→ 每组一次 LLM 判断
-//   → 判过发维护计数；判错按 blame 发回对应开发（带问题清单，开发据此修代码）
-//
-// 消息协议（content 为 JSON 字符串）：
-//   合并器 → 测试:  {"type": "pair_ready", "pair": {"back": ExecTask, "front": ExecTask|null}}
-//   测试 → 开发:    {"type": "revision", "task": ExecTask, "issues": [问题清单]}  返工（blame 决定发给谁）
-//   测试 → 维护:    {"type": "task_passed", "pair": {...}}  判过，维护计数
-//
-// 关键约定：
-//   - 文件缺失 → 机械 fail，不调 LLM（反馈明确且省一次调用）
-//   - 匹配问题（前端调的接口/传参/字段 vs 后端定义）由 LLM 归入出错的那一侧
-// ============================================================
-
-const model = new DirectChatDeepSeek({
+const TEST_MODEL_JSON = JSON.stringify({
+    provider: "deepseek",
     model: "deepseek-v4-flash",
-    timeout: 120000,   // 单次调用 120s 超时：thinking 模型大输出可能很慢，但必须有界（挂起走重试）
-})
-
-// ---------- 类型定义 ----------
-
-// 与架构师/工程师一致的 ExecTask
-interface ExecTask {
-  id: string;
-  layer: "backend" | "frontend";
-  method: string;
-  path: string;
-  files: string[];
-  title: string;
-  description: string;
-  parameters: {
-    name: string;
-    type: string;
-    required: boolean;
-    description: string;
-  }[];
-  acceptance: string;
-}
-
-// 配对：一个接口的后端 + 前端（前端可能落单为空）
-interface Pair {
-  back: ExecTask;
-  front: ExecTask | null;
-}
-
-// 测试结果（LLM 输出 + 机械预检）
-interface Verdict {
-  pass: boolean;
-  blame: "backend" | "frontend" | "both";   // 归责：后端错 / 前端错 / 两边都错
-  backendIssues: string[];
-  frontendIssues: string[];
-}
-
-// ---------- 状态通道 ----------
-
-const MessageState = Annotation.Root({
-    pair: Annotation<Pair | null>({
-        default: () => null,
-        reducer: (_, u) => u,   // 每组一对任务
-    }),
-    verdict: Annotation<Verdict | null>({
-        default: () => null,
-        reducer: (_, u) => u,
-    }),
-    llmCalls: Annotation<number>({
-        default: () => 0,
-        reducer: (x, y) => x + y,
-    }),
+    temperature: 0.2,
+    thinking: false,
 });
 
-// ---------- 提示词 ----------
+// ---------- 类型（移植自 _legacy-agents/testEngineer.ts） ----------
 
-const test_prompt: string = `
+export interface Verdict {
+    pass: boolean;
+    blame: "backend" | "frontend" | "both";
+    backendIssues: string[];
+    frontendIssues: string[];
+}
+
+// ---------- 提示词（移植自 _legacy-agents/testEngineer.ts） ----------
+
+export const test_prompt: string = `
 # 角色
 你是 CrewForge 项目的测试-契约检查 Agent。你只通过阅读任务契约和代码判断实现是否满足要求，不执行代码，也不替换开发者做设计。
 
@@ -107,161 +65,137 @@ const test_prompt: string = `
 - pass=false 时，每条 issue 写清楚位置、期望行为和实际行为；问题应足够具体，使开发 Agent 可以直接修改。
 `;
 
-// ---------- 结构化输出模型 ----------
+// ---------- 结构化 schema ----------
 
-const verdictModel = model.withStructuredOutput(
-  z.object({
+const verdictSchema = z.object({
     pass: z.boolean(),
     blame: z.enum(["backend", "frontend", "both"]),
     backendIssues: z.array(z.string()),
     frontendIssues: z.array(z.string()),
-  }),
-  { method: "jsonMode", name: "extract_verdict" }
-);
+});
 
-// ---------- 工具 ----------
+// ---------- 工具：读任务产出文件 ----------
 
-// 读任务产物文件（缺文件返回占位标记，机械预检会拦住）
 function readTaskFiles(t: ExecTask): { filePath: string; content: string }[] {
-  return t.files.map(fp => {
-    const full = path.join("workspace", fp);
-    if (!fs.existsSync(full)) return { filePath: fp, content: "（文件缺失：未产出）" };
-    return { filePath: fp, content: fs.readFileSync(full, "utf-8") };
-  });
+    return t.files.map(fp => {
+        const full = path.join("workspace", fp);
+        if (!fs.existsSync(full)) return { filePath: fp, content: "（文件缺失：未产出）" };
+        return { filePath: fp, content: fs.readFileSync(full, "utf-8") };
+    });
 }
 
-// ---------- 节点 ----------
+// ============================================================
+// TestEngineer —— 测试（固定类，消息驱动）
+// ============================================================
 
-// 测试节点：机械预检（文件缺失直接 fail，省 LLM 调用）→ LLM 契约判断
-const TestNode: GraphNode<typeof MessageState.State> = async (state) => {
-    const pair = state.pair!;
+export class TestEngineer extends BaseAgent {
+    private readonly judgements = new Map<string, number>();
+    /** 判定提示词（节点「测试判定」优先，空回退内置默认） */
+    private readonly judgePrompt: string;
 
-    // 机械预检：文件缺失 → 直接 fail，不调 LLM（反馈明确）
-    const missingBack = pair.back.files.filter(fp => !fs.existsSync(path.join("workspace", fp)));
-    const missingFront = pair.front ? pair.front.files.filter(fp => !fs.existsSync(path.join("workspace", fp))) : [];
-    if (missingBack.length > 0 || missingFront.length > 0) {
-        // 归责按缺哪侧文件定：只缺后端→backend，只缺前端→frontend，都缺→both
-        return {
-            verdict: {
-                pass: false,
-                blame: missingBack.length > 0 && missingFront.length > 0 ? "both" : missingBack.length > 0 ? "backend" : "frontend",
-                backendIssues: missingBack.map(fp => `文件未产出：${fp}`),
-                frontendIssues: missingFront.map(fp => `文件未产出：${fp}`),
-            },
-        };
+    constructor(name: string, station: TransferStation, nodes: Node[] = []) {
+        super(name, roles.testEngineer, station);
+        this.judgePrompt = nodePrompt(nodes, "测试判定", test_prompt);
+        this.on("pair_ready", { fromNames: ["merger"] }, ({ data }) => {
+            void this.judge(data.pair as Pair, data.phase as number);
+        });
     }
 
-    const backFiles = readTaskFiles(pair.back);
-    const frontFiles = pair.front ? readTaskFiles(pair.front) : [];
+    private async judge(pair: Pair, phase: number): Promise<void> {
+        const pairKey = pair.back.id;
+        const label = `${pairKey}${pair.front ? `+${pair.front.id}` : ""} ${pair.back.method} ${pair.back.path}`;
+        console.log(`[${this.name}] 收到接口对：${label}`);
 
-    // LLM 调用失败（空输出/解析失败）→ 按 fail 处理，不崩流水线
-    let parsed;
-    try {
-        parsed = await llmWithTimeout(
-            sig => verdictModel.invoke([
-                new SystemMessage(
-                    test_prompt +
-                    `\n\n## 后端任务（契约）\n${JSON.stringify(pair.back, null, 2)}` +
-                    `\n\n## 后端产出代码\n${backFiles.map(f => `--- ${f.filePath} ---\n${f.content}`).join("\n")}` +
-                    (pair.front
-                        ? `\n\n## 前端任务（契约）\n${JSON.stringify(pair.front, null, 2)}` +
-                          `\n\n## 前端产出代码\n${frontFiles.map(f => `--- ${f.filePath} ---\n${f.content}`).join("\n")}`
-                        : "")
-                ),
-            ], { signal: sig }),
-            150000, `测试判定 ${pair.back.id}`
-        );
-    } catch (e) {
-        // LLM 失败无法归责，保守按 both（issue 文案已写明是调用失败而非代码错误）
-        return { verdict: { pass: false, blame: "both", backendIssues: [`LLM 调用失败：${(e as Error).message.slice(0, 100)}`], frontendIssues: [] } };
+        // 1. 机械预检：文件缺失直接 fail（省 LLM 调用；归责按缺哪侧定）
+        const missingBack = pair.back.files.filter(fp => !fs.existsSync(path.join("workspace", fp)));
+        const missingFront = pair.front ? pair.front.files.filter(fp => !fs.existsSync(path.join("workspace", fp))) : [];
+        if (missingBack.length > 0 || missingFront.length > 0) {
+            const blame: "backend" | "frontend" | "both" =
+                missingBack.length > 0 && missingFront.length > 0 ? "both"
+                    : missingBack.length > 0 ? "backend" : "frontend";
+            await this.fail(pair, phase, pairKey, blame,
+                missingBack.map(fp => `文件未产出：${fp}`),
+                missingFront.map(fp => `文件未产出：${fp}`),
+                label);
+            return;
+        }
+
+        // 2. LLM 契约判定（失败带反馈重试；LLM 调用失败按 fail 处理，不崩流水线）
+        const backFiles = readTaskFiles(pair.back);
+        const frontFiles = pair.front ? readTaskFiles(pair.front) : [];
+        let verdict: Verdict;
+        try {
+            verdict = await retryStructured<Verdict>(
+                `测试判定 ${pairKey}`,
+                async (feedback, sig) => {
+                    const model = initModels(TEST_MODEL_JSON);
+                    const result = await model
+                        .withStructuredOutput(verdictSchema, { method: "jsonMode", name: "extract_verdict" })
+                        .invoke([
+                            new SystemMessage(
+                                this.judgePrompt +
+                                `\n\n## 后端任务（契约）\n${JSON.stringify(pair.back, null, 2)}` +
+                                `\n\n## 后端产出代码\n${backFiles.map(f => `--- ${f.filePath} ---\n${f.content}`).join("\n")}` +
+                                (pair.front
+                                    ? `\n\n## 前端任务（契约）\n${JSON.stringify(pair.front, null, 2)}` +
+                                      `\n\n## 前端产出代码\n${frontFiles.map(f => `--- ${f.filePath} ---\n${f.content}`).join("\n")}`
+                                    : "") +
+                                feedback
+                            ),
+                        ], { signal: sig });
+                    return result as Verdict;
+                },
+            );
+        } catch (error) {
+            // LLM 失败无法归责，保守按 both（文案已写明是调用失败而非代码错误）
+            verdict = { pass: false, blame: "both", backendIssues: [`LLM 调用失败：${(error as Error).message.slice(0, 100)}`], frontendIssues: [] };
+        }
+
+        if (verdict.pass) {
+            this.send("maintainer", { type: "task_passed", phase, pair });
+            console.log(`[${this.name}] 发送到维护：${label} 通过`);
+            return;
+        }
+        await this.fail(pair, phase, pairKey, verdict.blame, verdict.backendIssues, verdict.frontendIssues, label);
     }
-    return { verdict: parsed, llmCalls: 1 };
-};
 
-// ---------- 组装图 ----------
-// 单节点图：每组一对任务一次 invoke（每对独立 thread_id 断点）
-const graph = new StateGraph(MessageState)
-    .addNode("test", TestNode)
-    .addEdge(START, "test")
-    .addEdge("test", END)
-    .compile({ checkpointer: new MemorySaver() });
+    /** 判失败：按 阶段:pairId 计数；≥3 放弃（上报维护 + 通知合并器），否则 revision 发回对应开发 */
+    private async fail(
+        pair: Pair, phase: number, pairKey: string,
+        blame: Verdict["blame"], backendIssues: string[], frontendIssues: string[], label: string,
+    ): Promise<void> {
+        const countKey = `${phase}:${pairKey}`;
+        const count = (this.judgements.get(countKey) ?? 0) + 1;
+        this.judgements.set(countKey, count);
 
-// ---------- 消息驱动主流程 ----------
+        if (count >= 3) {
+            this.send("maintainer", { type: "task_failed", phase, pairId: pairKey });
+            this.send("merger", { type: "task_failed", pairId: pairKey });
+            console.log(`[${this.name}] 提示：${label} 判定 ${count} 次仍未通过，放弃并上报维护`);
+            return;
+        }
 
-// 测试入口（函数化：接收 agent 名 + 共享中转站，由 start.ts 拉起）
-// name = "testEngineer"/"test2"…（多测试负载均衡）
-export async function runTest(name: string, station: TransferStation) {
-    const judgementCount = new Map<string, number>();   // pairId → 判定次数：≥3 次未过放弃（防 revision 无限循环）
-
-    async function messageLoop() {
-        console.log(`[${name}] 消息监听已启动：等合并器送配好的接口对`);
-        while (true) {
-            const msg = await station.waitForMessage(name);
-            if (!msg) continue;
-            let data: { type?: string; pair?: Pair };
-            try { data = JSON.parse(msg.content); } catch { continue; }
-            if (msg.sender !== "merger" || data.type !== "pair_ready" || !data.pair) continue;
-
-            const pair = data.pair;
-            const pairKey = pair.back.id;
-            const label = `${pairKey}${pair.front ? `+${pair.front.id}` : ""} ${pair.back.method} ${pair.back.path}`;
-                console.log(`[${name}] 收到合并器的接口对：${label}`);
-
-            // 契约判断（图：机械预检 + LLM；每对独立断点，可续跑）
-            let v: Verdict;
-            try {
-                const state = await graph.invoke(
-                    { pair },
-                    { configurable: { thread_id: `t-${pair.back.id}` } }
-                );
-                v = state.verdict!;
-                console.log(`[debug] llmCalls=${state.llmCalls}`);
-            } catch (e) {
-                v = { pass: false, blame: "both", backendIssues: [`测试图调用失败：${(e as Error).message.slice(0, 100)}`], frontendIssues: [] };
-            }
-
-            if (v.pass) {
-                // 判过 → 维护计数（维护收齐任务才报阶段完成）
-                station.sendMessage(name, "maintainer", JSON.stringify({ type: "task_passed", pair }));
-                console.log(`[${name}] 发送到维护：${label} 通过`);
+        const blameText = blame === "both" ? "前后端都错" : blame === "backend" ? "后端错" : "前端错";
+        console.log(`[${this.name}]：${label} 未通过（${blameText}，第 ${count} 次判定）`);
+        if (blame === "backend" || blame === "both") {
+            const target = this.station.pickLeastBusy(roles.backendEngineer);
+            if (target) {
+                this.send(target, { type: "revision", task: pair.back, issues: backendIssues });
+                backendIssues.forEach(i => console.log(`   后端：${i}`));
             } else {
-                // 判定轮次上限：同一对 ≥3 次未过 → 放弃（防开发修不好无限循环），上报维护记失败
-                const count = (judgementCount.get(pairKey) ?? 0) + 1;
-                judgementCount.set(pairKey, count);
-                if (count >= 3) {
-                    station.sendMessage(name, "maintainer", JSON.stringify({ type: "task_failed", pairId: pairKey }));
-                    console.log(`[${name}] 提示：${label} 判定 ${count} 次仍未通过，放弃并上报维护`);
+                console.log(`提示：没有后端开发注册，返工发送失败：${pair.back.id}`);
+            }
+        }
+        if (blame === "frontend" || blame === "both") {
+            if (pair.front) {
+                const target = this.station.pickLeastBusy(roles.frontendEngineer);
+                if (target) {
+                    this.send(target, { type: "revision", task: pair.front, issues: frontendIssues });
+                    frontendIssues.forEach(i => console.log(`   前端：${i}`));
                 } else {
-                    // 判错 → 按 blame 发回对应开发（revision 带问题清单，开发据此修改代码）
-                    // 多开发场景：目标用 pickLeastBusy(role) 选该角色负载最低的（不写死名字）
-                    const blame = v.blame === "both" ? "前后端都错" : v.blame === "backend" ? "后端错" : "前端错";
-                    console.log(`[${name}]：${label} 未通过（${blame}，第 ${count} 次判定）`);
-                    if (v.blame === "backend" || v.blame === "both") {
-                    const target = station.pickLeastBusy(roles.backendEngineer);
-                    if (target) {
-                        station.sendMessage(name, target, JSON.stringify({ type: "revision", task: pair.back, issues: v.backendIssues }));
-                        v.backendIssues.forEach(i => console.log(`   后端：${i}`));
-                    } else {
-                            console.log(`提示：没有后端开发注册，返工发送失败：${pair.back.id}`);
-                    }
-                }
-                if (v.blame === "frontend" || v.blame === "both") {
-                    if (pair.front) {
-                        const target = station.pickLeastBusy(roles.frontendEngineer);
-                        if (target) {
-                            station.sendMessage(name, target, JSON.stringify({ type: "revision", task: pair.front, issues: v.frontendIssues }));
-                            v.frontendIssues.forEach(i => console.log(`   前端：${i}`));
-                        } else {
-                            console.log(`提示：没有前端开发注册，返工发送失败：${pair.front.id}`);
-                        }
-                    }
-                }
+                    console.log(`提示：没有前端开发注册，返工发送失败：${pair.front.id}`);
                 }
             }
-            station.markDone(name);   // 处理完记账（负载均衡的数据基础）
         }
     }
-
-    // 挂住等消息（进程保持存活）
-    await messageLoop();
 }

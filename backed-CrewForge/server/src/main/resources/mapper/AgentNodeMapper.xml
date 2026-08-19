@@ -3,7 +3,8 @@
 <mapper namespace="com.hina.crewforge.mapper.AgentNodeMapper">
 
     <select id="listByAgentId" resultType="com.hina.crewforge.pojo.entity.AgentNode">
-        SELECT id, agent_id, node_name, description, system_prompt, temperature, tools, model, create_time, update_time
+        SELECT id, agent_id, node_name, description, system_prompt, temperature, tools, model,
+               node_type, schema_key, code_key, output, create_time, update_time
         FROM sys_agent_node
         WHERE agent_id = #{agentId}
           AND deleted = 0
@@ -11,7 +12,8 @@
     </select>
 
     <select id="selectByAgentIds" resultType="com.hina.crewforge.pojo.entity.AgentNode">
-        SELECT id, agent_id, node_name, description, system_prompt, temperature, tools, model, create_time, update_time
+        SELECT id, agent_id, node_name, description, system_prompt, temperature, tools, model,
+               node_type, schema_key, code_key, output, create_time, update_time
         FROM sys_agent_node
         WHERE deleted = 0
           AND agent_id IN
@@ -31,6 +33,10 @@
             temperature,
             tools,
             model,
+            node_type,
+            schema_key,
+            code_key,
+            output,
             create_time,
             update_time
         ) VALUES (
@@ -41,6 +47,10 @@
             #{temperature},
             #{tools},
             #{model},
+            #{nodeType},
+            #{schemaKey},
+            #{codeKey},
+            #{output},
             #{createTime},
             #{updateTime}
         )
@@ -54,13 +64,18 @@
             temperature = #{temperature},
             tools = #{tools},
             model = #{model},
+            node_type = #{nodeType},
+            schema_key = #{schemaKey},
+            code_key = #{codeKey},
+            output = #{output},
             update_time = #{updateTime}
         WHERE id = #{id}
           AND deleted = 0
     </update>
 
     <select id="getById" resultType="com.hina.crewforge.pojo.entity.AgentNode">
-        SELECT id, agent_id, node_name, description, system_prompt, temperature, tools, model, create_time, update_time
+        SELECT id, agent_id, node_name, description, system_prompt, temperature, tools, model,
+               node_type, schema_key, code_key, output, create_time, update_time
         FROM sys_agent_node
         WHERE id = #{id}
           AND deleted = 0

@@ -1,162 +1,64 @@
-import { DirectChatDeepSeek } from "./deepseekClient.ts";
+// ============================================================
+// frontendEngineer.ts —— 前端开发（多实例 "frontend1"/"frontend2"...）
+//
+//   双队列流水线：任务 → 设计稿 → 代码（与后端"伪代码→代码"对称）
+//     queue1(taskQueue)  ← A 工位消费：任务 → 页面设计稿
+//     queue2(designQueue) ← B 工位消费：设计稿 → 逐文件实现 → 写盘 → task_result
+//
+//   为什么前端拆"设计→实现"而不是"按文件类型分队列"：
+//     - view/api/route 字段一致性由设计稿统一约束（接口字段清单写进设计稿）
+//     - 一个页面多个文件时，先定结构再逐文件实现，质量更稳
+//   关键约定（生产-消费流水线，同后端）：
+//     - A 产出设计稿 push 进 queue2 立即回头，不关心下游堆积
+//     - B 独立消费，逐文件生成（带设计稿 + 任务内已写文件的记忆）
+//     - 每个工位可起多个 worker；设计稿失败 → 传 null 降级单步实现
+// ============================================================
+
 import { SystemMessage } from "@langchain/core/messages";
-import * as z from "zod";
-import fs from "node:fs";
-import path from "node:path";
-import { TransferStation, roles, WorkQueue, llmWithTimeout } from "./Hub.ts";   // 中转站 + 角色枚举 + 工位队列 + 超时兜底
+import { BaseAgent } from "./BaseAgent";
+import { roles, type TransferStation, WorkQueue } from "./Hub";
+import { initModels } from "./models";
+import { invokeWithTimeout } from "./llm";
+import { writeWorkspace, type ExecTask } from "./common";
+import { nodePrompt, type Node } from "./Node";
 
-// 前端全程非思考：契约自包含（后端契约照抄），执行性最强，要速度
-// thinking: {type:"disabled"} 是 DeepSeek v4 API 的关闭思考参数（实测有效）
-const model = new DirectChatDeepSeek({
+const FRONTEND_MODEL_JSON = JSON.stringify({
+    provider: "deepseek",
     model: "deepseek-v4-flash",
-    timeout: 120000,   // 单次调用 120s 超时：thinking 模型大输出可能很慢，但必须有界（挂起走重试）
-    thinking: { type: "disabled" },   // 非思考：代码展开是执行性工作，要速度
-} as any)
+    temperature: 0.1,
+    thinking: false,
+});
 
-// ============================================================
-// 前端工程师链路（v1）：前端任务 → 单文件完整实现 → 聚合交付
-//
-//   execTasks(前端任务) → 单文件实现节点 → 输出组件
-//
-// 关键约定：
-//   - 视图节点一次生成模板、样式和脚本，避免二次调用携带完整组件造成请求不稳定
-//   - 文件按类型进入独立队列，完成后由父任务协调器聚合
-//   - main 只筛 layer === "frontend" 的任务（后端任务留给 backendEngineer.ts）
-// ============================================================
+// ---------- 提示词 ----------
 
-// ---------- 类型定义 ----------
+// 工位 A：页面设计稿（先定结构/交互/接口清单，再让 B 实现）
+export const design_prompt: string = `
+# 角色
+你是 CrewForge 项目的前端设计 Agent。为指定任务产出"页面设计稿"，不做代码实现。
 
-export interface ExecTask {
-  id: string;
-  layer: "backend" | "frontend";  // 归属层（frontendEngineer 只处理 frontend）
-  method: string;        // GET/POST/PUT/DELETE（前端任务为空串）
-  path: string;          // 接口路径（前端任务为空串）
-  files: string[];       // 架构师指定的文件清单（只写这些文件，不得另起）
-  title: string;         // 页面/组件任务标题
-  description: string;   // 任务描述（含页面/交互/调用接口，自包含）
-  parameters: {
-    name: string;
-    type: string;        // string/number/boolean…
-    required: boolean;
-    description: string; // 业务含义
-  }[];
-  acceptance: string;    // 验收标准（从 Plan.features 原样抄 —— 任务的验收契约）
-}
+## 任务
+1. 根据任务契约（页面/交互/调用的接口/验收标准）设计页面结构。
+2. 输出：文件清单与各文件职责、组件层级、页面交互流程、需要调用的接口（method/path/入参/出参字段，字段名必须精确）。
+3. 接口字段清单是本任务所有文件的唯一契约来源，后续实现必须照抄，不得改名。
 
-// 单个文件结构
-interface CodeFile {
-  description: string;
-  filePath: string;
-  code: string;
-}
+## 输出
+只输出设计稿文本，不要 JSON、Markdown 围栏或额外说明。
+`;
 
-// 单文件实现节点产出：组件文件集合
-interface CodeContent {
-  description: string;
-  files: CodeFile[];
-}
+// 工位 B：带设计稿实现单个文件（移植自 _legacy-agents/frontendEngineer.ts）
+export const file_prompt: string = `
+# 角色
+你是 CrewForge 项目的前端文件实现 Agent。你只负责输入任务中指定的一个文件，并返回这个文件的完整代码。
 
-export type FrontendSubtaskKind = "view" | "api" | "route" | "support";
+## 规则
+- 只输出任务 files 中的唯一文件，不新增、不遗漏、不改名。
+- 遵循任务中的前端技术栈、设计稿（接口字段/组件结构必须照抄）和验收标准。
+- 先理解下方已有文件内容，再在必要时最小修改；没有已有内容时从零产出完整文件。
+- 不发明任务之外的接口、字段、交互或业务规则。
+- 只输出目标文件的完整源代码，不要 JSON、Markdown 代码围栏或额外说明。
+`;
 
-export interface FrontendSubtask {
-  id: string;
-  parentId: string;
-  kind: FrontendSubtaskKind;
-  filePath: string;
-  task: ExecTask;
-}
-
-export type FrontendRunStatus = "pending" | "success" | "failure" | "ignored";
-
-export interface FrontendRunResult {
-  status: FrontendRunStatus;
-  parentTask?: ExecTask;
-}
-
-interface FrontendRunState {
-  parentTask: ExecTask;
-  expected: Set<string>;
-  completed: Set<string>;
-  settled: boolean;
-}
-
-export function classifyFrontendFile(filePath: string): FrontendSubtaskKind {
-  const normalized = filePath.replace(/\\/g, "/").toLowerCase();
-  const segments = normalized.split("/");
-  const baseName = segments[segments.length - 1] ?? normalized;
-
-  if (segments.includes("router") || /^router(?:\.[^./]+)?$/.test(baseName)) return "route";
-  if (segments.some(segment => ["api", "apis", "service", "services"].includes(segment))) return "api";
-  if (/\.(vue|tsx|jsx|svelte)$/.test(baseName) || segments.some(segment => ["views", "pages", "components"].includes(segment))) return "view";
-  return "support";
-}
-
-export function splitFrontendTask(task: ExecTask): FrontendSubtask[] {
-  const files = [...new Set(task.files)];
-  return files.map((filePath, index) => {
-    const kind = classifyFrontendFile(filePath);
-    const id = `${task.id}-part-${index + 1}`;
-    return {
-      id,
-      parentId: task.id,
-      kind,
-      filePath,
-      task: {
-        ...task,
-        id,
-        files: [filePath],
-        title: `${task.title}（${kind}：${filePath}）`,
-        description: `${task.description}\n\n【前端子任务】类型：${kind}；只负责文件：${filePath}`,
-      },
-    };
-  });
-}
-
-export class FrontendRunCoordinator {
-  private runSequence = 0;
-  private readonly runs = new Map<string, FrontendRunState>();
-  private readonly activeRunByParent = new Map<string, string>();
-
-  start(parentTask: ExecTask, subtasks: FrontendSubtask[]): string {
-    const runId = `${parentTask.id}:run-${++this.runSequence}`;
-    this.activeRunByParent.set(parentTask.id, runId);
-    this.runs.set(runId, {
-      parentTask,
-      expected: new Set(subtasks.map(subtask => subtask.id)),
-      completed: new Set(),
-      settled: false,
-    });
-    return runId;
-  }
-
-  isActive(runId: string): boolean {
-    const run = this.runs.get(runId);
-    return Boolean(run && !run.settled && this.activeRunByParent.get(run.parentTask.id) === runId);
-  }
-
-  record(runId: string, subtaskId: string, success: boolean): FrontendRunResult {
-    const run = this.runs.get(runId);
-    if (!run || run.settled || this.activeRunByParent.get(run.parentTask.id) !== runId || !run.expected.has(subtaskId) || run.completed.has(subtaskId)) {
-      return { status: "ignored" };
-    }
-
-    if (!success) {
-      run.settled = true;
-      this.activeRunByParent.delete(run.parentTask.id);
-      return { status: "failure", parentTask: run.parentTask };
-    }
-
-    run.completed.add(subtaskId);
-    if (run.completed.size < run.expected.size) return { status: "pending" };
-
-    run.settled = true;
-    this.activeRunByParent.delete(run.parentTask.id);
-    return { status: "success", parentTask: run.parentTask };
-  }
-}
-
-// ---------- 基建占位（演示版） ----------
-// 正式版：架构师搭目录时产出 theme.css 和 request 封装，节点从 workspace 读取
+// ---------- 基建占位（移植自 _legacy-agents；正式版架构师产出 theme.css / request 封装） ----------
 
 const DEFAULT_THEME = `
 :root {
@@ -176,198 +78,173 @@ const request = axios.create({ baseURL: '/api', timeout: 10000 });
 export default request;
 `;
 
-// ---------- 提示词 ----------
+// ---------- 工具：从回复里提取代码（去一个外层代码围栏） ----------
 
-// 视图文件一次生成完整组件，避免把首轮完整代码再次注入第二次模型调用。
-const file_prompt: string = `
-# 角色
-你是 CrewForge 项目的前端文件实现 Agent。你只负责输入任务中指定的一个文件，并返回这个文件的完整代码。
-
-## 规则
-- 只输出任务 files 中的唯一文件，不新增、不遗漏、不改名。
-- 遵循任务中的前端技术栈、接口契约和验收标准。
-- 先理解下方已有文件内容，再在必要时最小修改；没有已有内容时从零产出完整文件。
-- 不发明任务之外的接口、字段、交互或业务规则。
-- 输出必须是合法 JSON，不要 Markdown 代码围栏或额外说明。
-
-## 输出格式
-{ "description": "本次文件产出说明", "files": [{ "description": "文件职责", "filePath": "任务指定的文件路径", "code": "完整可运行代码" }] }
-`;
-
-// ---------- 结构化输出模型 ----------
-
-const contentModel = model.withStructuredOutput(
-  z.object({
-    description: z.string(),
-    files: z.array(z.object({
-      description: z.string(),
-      filePath: z.string(),
-      code: z.string(),
-    })),
-  }),
-  { method: "jsonMode", name: "extract_component" }
-);
+function extractGeneratedCode(content: unknown): string | null {
+    const text = typeof content === "string"
+        ? content
+        : Array.isArray(content)
+            ? content.map(part => {
+                if (typeof part === "string") return part;
+                if (part && typeof part === "object" && "text" in part && typeof (part as { text?: unknown }).text === "string") {
+                    return (part as { text: string }).text;
+                }
+                return "";
+            }).join("")
+            : "";
+    const trimmed = text.trim();
+    if (!trimmed) return null;
+    const fenced = trimmed.match(/^```[^\r\n]*\r?\n([\s\S]*?)\r?\n?```$/);
+    const code = (fenced?.[1] ?? trimmed).trim();
+    return code || null;
+}
 
 // ============================================================
-// 前端开发消息收发（参照 backendEngineer.ts 模板）
-//   消息协议（content 为 JSON 字符串）：
-//     架构师/合并器 → 前端: {"type": "task", "task": ExecTask}                 下发任务（layer 已筛过）/ 返工
-//     前端 → 合并器:        {"type": "task_result", "task": ExecTask, "success": bool} 干完活交合并器配对
+// FrontendEngineer —— 双队列流水线（任务 → 设计稿 → 代码）
 // ============================================================
 
-// 前端开发入口（函数化：接收 agent 名 + 共享中转站，由 start.ts 拉起）
-// name = "frontend1"/"frontend2"…（多开发负载均衡），station 是进程内全局唯一的站
-//
-// 按文件类型分流的内部队列，所有子任务完成后一次性交给合并器。
-interface FrontendJob {
-    runId: string;
-    subtask: FrontendSubtask;
-}
+export class FrontendEngineer extends BaseAgent {
+    /** queue1：等设计稿的任务 */
+    private readonly taskQueue = new WorkQueue<{ task: ExecTask }>();
+    /** queue2：设计稿完成、等实现的任务 */
+    private readonly designQueue = new WorkQueue<{ task: ExecTask; design: string | null }>();
+    /** 工位 A 提示词（节点「页面设计」优先，空回退内置默认） */
+    private readonly designPrompt: string;
+    /** 工位 B 提示词（节点「代码实现」优先，空回退内置默认） */
+    private readonly filePrompt: string;
 
-function normalizedPath(filePath: string): string {
-    return filePath.replace(/\\/g, "/").replace(/^\/+/, "");
-}
-
-function selectExpectedFile(content: CodeContent, expectedPath: string): CodeFile | null {
-    const expected = normalizedPath(expectedPath);
-    return content.files.find(file => normalizedPath(file.filePath) === expected && file.code.trim().length > 0) ?? null;
-}
-
-export async function runFrontend(name: string, station: TransferStation) {
-    const viewQueue = new WorkQueue<FrontendJob>();
-    const fileQueue = new WorkQueue<FrontendJob>();
-    const routeQueue = new WorkQueue<FrontendJob>();
-    const writtenFiles = new Map<string, string>();
-    const coordinator = new FrontendRunCoordinator();
-
-    function existingContent(filePath: string): string {
-        const code = writtenFiles.get(filePath);
-        return code ? `\n\n## 已存在的文件\n--- ${filePath} ---\n${code}` : "";
+    constructor(name: string, station: TransferStation, nodes: Node[] = []) {
+        super(name, roles.frontendEngineer, station);
+        this.designPrompt = nodePrompt(nodes, "页面设计", design_prompt);
+        this.filePrompt = nodePrompt(nodes, "代码实现", file_prompt);
+        this.on("task", { fromNames: ["architect", "merger"] }, ({ data }) => {
+            this.taskQueue.push({ task: data.task as ExecTask });
+        });
+        this.on("revision", { fromRoles: [roles.testEngineer] }, ({ data }) => {
+            this.taskQueue.push({
+                task: {
+                    ...(data.task as ExecTask),
+                    description: (data.task as ExecTask).description + "\n\n【测试返工意见（必须逐条解决）】\n" + (data.issues ?? []).join("\n"),
+                },
+            });
+        });
     }
 
-    function sendAggregate(result: FrontendRunResult): void {
-        if ((result.status !== "success" && result.status !== "failure") || !result.parentTask) return;
-        station.sendMessage(name, "merger", JSON.stringify({
-            type: "task_result",
-            task: result.parentTask,
-            success: result.status === "success",
-        }));
-        console.log(`[${name}] 前端父任务 ${result.parentTask.id} 聚合${result.status === "success" ? "成功" : "失败"}，发送到合并器`);
+    override async onStart(): Promise<void> {
+        // A 工位 ×1 + B 工位 ×2（B 是逐文件生成，通常是瓶颈，多起几个）
+        void this.designWorker();
+        void this.codeWorker();
+        void this.codeWorker();
     }
 
-    function completeSubtask(job: FrontendJob, file: CodeFile | null): void {
-        if (!coordinator.isActive(job.runId)) {
-            console.log(`[${name}] 忽略过期子任务 ${job.subtask.id}`);
-            return;
+    // ---------- 工位 A：任务 → 设计稿 ----------
+
+    private async designWorker(): Promise<void> {
+        while (true) {
+            const { task } = await this.taskQueue.pop();
+            console.log(`[${this.name}] ${task.id} 进入设计工位`);
+            const design = await this.generateDesign(task);   // 失败返回 null（降级）
+            this.designQueue.push({ task, design });          // 塞进下游，立即回头
         }
-        if (!file) {
-            console.log(`[${name}] 子任务 ${job.subtask.id} 没有生成指定文件`);
-            sendAggregate(coordinator.record(job.runId, job.subtask.id, false));
-            return;
-        }
-
-        const safePath = normalizedPath(job.subtask.filePath).replace(/\.\./g, "");
-        const full = path.join("workspace", safePath);
-        fs.mkdirSync(path.dirname(full), { recursive: true });
-        fs.writeFileSync(full, file.code, "utf-8");
-        writtenFiles.set(job.subtask.filePath, file.code);
-        console.log(`[${name}] 子任务 ${job.subtask.id} 已写入 ${full}`);
-        sendAggregate(coordinator.record(job.runId, job.subtask.id, true));
     }
 
-    async function invokeWithRetries(job: FrontendJob, prompt: string, extra: string, stage: string): Promise<CodeContent | null> {
+    private async generateDesign(task: ExecTask): Promise<string | null> {
+        const model = initModels(FRONTEND_MODEL_JSON);
+        let feedback = "";
         for (let attempt = 1; attempt <= 3; attempt++) {
             const ts = Date.now();
             try {
-                const result = await llmWithTimeout(
-                    signal => contentModel.invoke([
-                        new SystemMessage(
-                            prompt +
-                            `\n\n## 当前子任务\n${JSON.stringify(job.subtask.task, null, 2)}` +
-                            extra
-                        ),
-                    ], { signal }),
-                    150000,
-                    `[${job.subtask.id}] ${stage}`
-                );
-                console.log(`[${job.subtask.id}] ${stage} ${Date.now() - ts}ms`);
-                if (result.files.length > 0) return result;
-                console.log(`提示：${job.subtask.id} ${stage} 没有产出文件，重试 ${attempt}/3`);
+                const res = await invokeWithTimeout<any>(`${task.id} 设计稿`, 120_000, sig => model.invoke([
+                    new SystemMessage(this.designPrompt + `\n\n## 当前任务\n${JSON.stringify(task, null, 2)}` + feedback),
+                ], { signal: sig }));
+                console.log(`[${this.name}] ${task.id} 设计稿 ${Date.now() - ts}ms`);
+                const design = extractGeneratedCode(res.content);
+                if (design) return design;
+                feedback = "\n\n## 上次没有提取到设计稿：请只输出设计稿文本。";
             } catch (error) {
-                console.log(`${job.subtask.id} ${stage} 请求失败（第 ${attempt} 次，${Date.now() - ts}ms）：${(error as Error).message.slice(0, 100)}`);
+                feedback = `\n\n## 上次调用失败，请重试：${(error as Error).message.slice(0, 200)}`;
+                console.log(`[${this.name}] ${task.id} 设计稿失败（第 ${attempt} 次）：${(error as Error).message.slice(0, 80)}`);
+            }
+        }
+        return null;   // 连续 3 次失败：降级，让 B 单步实现
+    }
+
+    // ---------- 工位 B：设计稿 → 逐文件实现 → 写盘 → 交付 ----------
+
+    private async codeWorker(): Promise<void> {
+        while (true) {
+            const { task, design } = await this.designQueue.pop();
+            console.log(`[${this.name}] ${task.id} 进入实现工位${design ? "" : "（设计稿缺失，单步实现）"}`);
+            if (task.files.length === 0) {
+                this.send("merger", { type: "task_result", task, success: false });
+                continue;
+            }
+
+            // 任务内已生成文件记忆（同任务后写的文件能看到先写的，跨文件衔接）
+            const writtenFiles = new Map<string, string>();
+            const implementation: { filePath: string; code: string }[] = [];
+            let failed = false;
+
+            for (const filePath of task.files) {
+                const code = await this.generateFile(task, design, filePath, writtenFiles);
+                if (!code) { failed = true; break; }
+                implementation.push({ filePath, code });
+            }
+
+            if (failed) {
+                console.log(`[${this.name}] ${task.id} 前端实现失败，上报合并器`);
+                this.send("merger", { type: "task_result", task, success: false });
+                continue;
+            }
+            for (const f of implementation) {
+                const full = writeWorkspace(f.filePath, f.code);
+                writtenFiles.set(f.filePath, f.code);
+                console.log(`已写入 ${full}`);
+            }
+            console.log(`[${this.name}] ${task.id} 前端实现已写入 workspace/`);
+            this.send("merger", { type: "task_result", task, success: true });
+        }
+    }
+
+    private async generateFile(
+        task: ExecTask,
+        design: string | null,
+        filePath: string,
+        writtenFiles: Map<string, string>,
+    ): Promise<string | null> {
+        const model = initModels(FRONTEND_MODEL_JSON);
+        // 已有文件（本任务内先写的）注入，供最小修改/衔接
+        const existing = [...writtenFiles.entries()]
+            .filter(([knownPath]) => task.files.includes(knownPath))
+            .map(([knownPath, knownCode]) => `--- ${knownPath} ---\n${knownCode}`)
+            .join("\n");
+        const existingContent = existing ? `\n\n## 已存在的文件\n${existing}` : "";
+        const designHint = design ? `\n\n## 页面设计稿（接口字段/组件结构必须照抄）\n${design}` : "";
+        const fileTask = { ...task, files: [filePath] };
+
+        let feedback = "";
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            const ts = Date.now();
+            try {
+                const res = await invokeWithTimeout<any>(`${task.id} ${filePath}`, 120_000, sig => model.invoke([
+                    new SystemMessage(
+                        this.filePrompt +
+                        `\n\n## 当前子任务\n${JSON.stringify(fileTask, null, 2)}` +
+                        designHint +
+                        existingContent +
+                        `\n\n## 主题变量\n${DEFAULT_THEME}\n\n## 请求封装\n${DEFAULT_REQUEST}` +
+                        feedback
+                    ),
+                ], { signal: sig }));
+                console.log(`[${this.name}] ${task.id} ${filePath} ${Date.now() - ts}ms`);
+                const code = extractGeneratedCode(res.content);
+                if (code) return code;
+                feedback = "\n\n## 上次输出没有提取到代码：请只输出目标文件的完整源代码，不要 Markdown 围栏、JSON 或说明。";
+            } catch (error) {
+                feedback = `\n\n## 上次调用失败，请重试：${(error as Error).message.slice(0, 200)}`;
+                console.log(`[${this.name}] ${task.id} ${filePath} 失败（第 ${attempt} 次）：${(error as Error).message.slice(0, 80)}`);
             }
         }
         return null;
     }
-
-    async function viewWorker(): Promise<void> {
-        while (true) {
-            const job = await viewQueue.pop();
-            const content = await invokeWithRetries(
-                job,
-                file_prompt,
-                `\n\n## 主题变量\n${DEFAULT_THEME}\n\n## 请求封装\n${DEFAULT_REQUEST}${existingContent(job.subtask.filePath)}`,
-                "页面实现"
-            );
-            completeSubtask(job, content ? selectExpectedFile(content, job.subtask.filePath) : null);
-        }
-    }
-
-    async function fileWorker(queue: WorkQueue<FrontendJob>, stage: string): Promise<void> {
-        while (true) {
-            const job = await queue.pop();
-            const content = await invokeWithRetries(job, file_prompt, existingContent(job.subtask.filePath), stage);
-            completeSubtask(job, content ? selectExpectedFile(content, job.subtask.filePath) : null);
-        }
-    }
-
-    function enqueueParentTask(task: ExecTask): void {
-        const subtasks = splitFrontendTask(task);
-        if (subtasks.length === 0) {
-            console.log(`提示：前端任务 ${task.id} 没有文件，直接上报失败`);
-            station.sendMessage(name, "merger", JSON.stringify({ type: "task_result", task, success: false }));
-            return;
-        }
-
-        const runId = coordinator.start(task, subtasks);
-        console.log(`[${name}] 前端任务 ${task.id} 拆分为 ${subtasks.length} 个子任务，运行 ${runId}`);
-        for (const subtask of subtasks) {
-            const job = { runId, subtask };
-            if (subtask.kind === "view") viewQueue.push(job);
-            else if (subtask.kind === "route") routeQueue.push(job);
-            else fileQueue.push(job);
-            console.log(`[${name}] 子任务 ${subtask.id} 进入 ${subtask.kind} 队列：${subtask.filePath}`);
-        }
-    }
-
-    void viewWorker();
-    void fileWorker(fileQueue, "文件实现");
-    void fileWorker(routeQueue, "路由实现");
-
-    async function messageLoop(): Promise<void> {
-        console.log(`[${name}] 消息监听已启动：等架构师下发任务`);
-        while (true) {
-            const msg = await station.waitForMessage(name);
-            if (!msg) continue;
-            let data: { type?: string; task?: ExecTask; issues?: string[] };
-            try { data = JSON.parse(msg.content); } catch { continue; }
-
-            const senderRole = station.status[msg.sender]?.role;
-            if ((msg.sender === "architect" || msg.sender === "merger") && data.type === "task" && data.task) {
-                console.log(`[${name}] 收到 ${msg.sender} 的任务：${data.task.id}（${data.task.title}）`);
-                enqueueParentTask(data.task);
-            }
-
-            if (senderRole === roles.testEngineer && data.type === "revision" && data.task) {
-                console.log(`[${name}] 收到测试返工：任务 ${data.task.id}（${data.issues?.length ?? 0} 条意见）`);
-                enqueueParentTask({
-                    ...data.task,
-                    description: data.task.description + "\n\n【测试返工意见（必须逐条解决）】\n" + (data.issues ?? []).join("\n"),
-                });
-            }
-            station.markDone(name);
-        }
-    }
-
-    await messageLoop();
 }

@@ -20,6 +20,10 @@ public class ProjectAgentNodeVO {
     private Double temperature;
     private String tools;
     private String model;
+    private String nodeType;
+    private String schemaKey;
+    private String codeKey;
+    private String output;
     private LocalDateTime createTime;
     private LocalDateTime updateTime;
 }

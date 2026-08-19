@@ -88,4 +88,15 @@
         </foreach>
     </update>
 
+    <!-- 项目内指定角色成员数（单例角色校验/自动补判断；JOIN sys_agent 按 role 过滤） -->
+    <select id="countByRole" resultType="long">
+        SELECT COUNT(*)
+        FROM sys_project_agent pa
+        LEFT JOIN sys_agent sa ON sa.id = pa.agent_id
+        WHERE pa.project_id = #{projectId}
+          AND sa.role = #{role}
+          AND pa.deleted = 0
+          AND sa.deleted = 0
+    </select>
+
 </mapper>

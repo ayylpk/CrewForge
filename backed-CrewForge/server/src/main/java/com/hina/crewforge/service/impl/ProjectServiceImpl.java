@@ -200,6 +200,12 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
     @Override
     public ProjectVO getById(Long id) {
         Project project = baseMapper.selectById(id);
+        if (project == null) {
+            throw new BaseException("项目不存在: " + id);
+        }
+        // 所有权校验: 个人项目只能读自己的; 团队项目必须是所属团队成员
+        // （与 update/delete 同源，复用 checkOwnership，防 IDOR 越权读取）
+        checkOwnership(project, "查看");
         Map<Long, Long> fileCounts = countProjectFiles(Collections.singletonList(id));
         return toVO(project, fileCounts);
     }

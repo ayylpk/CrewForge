@@ -8,21 +8,19 @@ import { spawn } from "node:child_process";
 //   → 前端工程师(frontendEngineer) → 测试(testEngineer) → 维护(maintainer)
 //
 // 关键约定：
-//   - 各阶段是独立脚本（bun run xxx.ts），交接物只有文件：
+//   - 各阶段是独立脚本（Node --experimental-strip-types xxx.ts），交接物只有文件：
 //     plan.json → tasks.json → workspace/（代码落盘）
 //   - agent 间不通信（演示版）：测试/维护结果只输出控制台
 //   - 架构师确认门：默认交互确认；AUTO_CONFIRM=1 跳过（CI/快速验证）
-//   - 用法：bun run executor.ts（或 AUTO_CONFIRM=1 bun run executor.ts）
+//   - 用法：node --experimental-strip-types executor.ts（或 AUTO_CONFIRM=1 node --experimental-strip-types executor.ts）
 // ============================================================
 
 // 子进程跑脚本（继承 stdio，env 透传——AUTO_CONFIRM 直接可用）
-// 注意：用 node:child_process 的 spawn，不用 Bun.spawn——
-// Windows 上 Bun.spawn 的 exited 在子进程异常/显式 exit 时都返回 0（不可靠，实测）
+// 每个阶段使用同一个 Node 运行时，避免混用运行时造成行为差异。
 function run(script: string): Promise<void> {
     return new Promise((resolve, reject) => {
-        const child = spawn("bun", ["run", script], {
+        const child = spawn(process.execPath, ["--experimental-strip-types", script], {
             stdio: "inherit",
-            shell: process.platform === "win32",   // Windows 需要 shell 解析 bun 命令
         });
         child.on("exit", (code) => {
             if (code === 0) resolve();
@@ -46,7 +44,7 @@ async function pipeline(t0: number) {
 
     // 前置：plan.json（manager.ts 产出，缺失则提示）
     if (!fs.existsSync("plan.json")) {
-        console.log("缺少 plan.json。请先运行 bun run manager.ts 产出项目规划，再运行本串联。");
+        console.log("缺少 plan.json。请先运行 node --experimental-strip-types manager.ts 产出项目规划，再运行本串联。");
         process.exit(1);
     }
     console.log("========== CrewForge 执行层串联开工 ==========\n");

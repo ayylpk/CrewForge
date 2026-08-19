@@ -24,4 +24,12 @@ public class ProjectAgentNodeDTO {
     private String tools;
     /** 模型 */
     private String model;
+    /** 节点类型: llm/code/human */
+    private String nodeType;
+    /** 结构化输出 schema 注册名 */
+    private String schemaKey;
+    /** 代码节点注册名 */
+    private String codeKey;
+    /** 输出 state 通道名 */
+    private String output;
 }

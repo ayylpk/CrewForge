@@ -3,12 +3,11 @@ import { requestJson } from "./httpClient.ts";
 
 interface DirectDeepSeekOptions {
     model: string;
+    apiKey?: string;
+    temperature?: number;
     timeout?: number;
     thinking?: { type: string };
     baseUrl?: string;
-    // Kept for source compatibility with existing Agent constructors. The
-    // production path now uses the owned undici Client below.
-    configuration?: { fetch?: typeof fetch };
 }
 
 interface InvokeOptions {
@@ -51,12 +50,16 @@ function parseJsonContent(content: string): unknown {
 
 export class DirectChatDeepSeek {
     private readonly model: string;
+    private readonly apiKey: string;
+    private readonly temperature?: number;
     private readonly thinking?: { type: string };
     private readonly origin: string;
     private readonly timeoutMs: number;
 
     constructor(options: DirectDeepSeekOptions) {
         this.model = options.model;
+        this.apiKey = options.apiKey ?? process.env.DEEPSEEK_API_KEY ?? "";
+        this.temperature = options.temperature;
         this.thinking = options.thinking;
         this.origin = new URL(options.baseUrl ?? "https://api.deepseek.com").origin;
         this.timeoutMs = options.timeout ?? 120_000;
@@ -67,15 +70,20 @@ export class DirectChatDeepSeek {
         return new AIMessage(content);
     }
 
-    withStructuredOutput<T>(schema: JsonSchema<T>, _options?: unknown): { invoke: (messages: BaseMessage[], options?: InvokeOptions) => Promise<T> } {
+    withStructuredOutput<T>(schema: JsonSchema<T>, _options?: unknown): {
+        invoke: (messages: BaseMessage[], options?: InvokeOptions) => Promise<T>;
+    } {
         return {
-            invoke: async (messages, options = {}) => schema.parse(parseJsonContent(await this.request(messages, options, true))),
+            invoke: async (messages, options = {}) => schema.parse(await this.requestParsed(messages, options)),
         };
     }
 
+    private async requestParsed(messages: BaseMessage[], options: InvokeOptions): Promise<unknown> {
+        return parseJsonContent(await this.request(messages, options, true));
+    }
+
     private async request(messages: BaseMessage[], options: InvokeOptions, jsonMode: boolean): Promise<string> {
-        const apiKey = process.env.DEEPSEEK_API_KEY;
-        if (!apiKey) throw new Error("未设置 DEEPSEEK_API_KEY");
+        if (!this.apiKey) throw new Error("未设置 DEEPSEEK_API_KEY");
 
         const response = await requestJson<{
             choices?: Array<{ message?: { content?: string } }>;
@@ -84,11 +92,15 @@ export class DirectChatDeepSeek {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
-                Authorization: `Bearer ${apiKey}`,
+                Authorization: `Bearer ${this.apiKey}`,
             },
             body: JSON.stringify({
                 model: this.model,
-                messages: messages.map(message => ({ role: messageRole(message), content: textContent(message.content) })),
+                messages: messages.map(message => ({
+                    role: messageRole(message),
+                    content: textContent(message.content),
+                })),
+                ...(this.temperature === undefined ? {} : { temperature: this.temperature }),
                 ...(this.thinking ? { thinking: this.thinking } : {}),
                 ...(jsonMode ? { response_format: { type: "json_object" } } : {}),
             }),
@@ -96,13 +108,14 @@ export class DirectChatDeepSeek {
             signal: options.signal,
         });
 
-        const payload = response.body;
         if (response.statusCode < 200 || response.statusCode >= 300) {
-            throw new Error(`DeepSeek HTTP ${response.statusCode}: ${payload.error?.message ?? "未知错误"}`);
+            throw new Error(`DeepSeek HTTP ${response.statusCode}: ${response.body.error?.message ?? "未知错误"}`);
         }
 
-        const content = payload.choices?.[0]?.message?.content;
-        if (typeof content !== "string" || content.length === 0) throw new Error("DeepSeek 响应缺少 choices[0].message.content");
+        const content = response.body.choices?.[0]?.message?.content;
+        if (typeof content !== "string" || content.length === 0) {
+            throw new Error("DeepSeek 响应缺少 choices[0].message.content");
+        }
         return content;
     }
 }

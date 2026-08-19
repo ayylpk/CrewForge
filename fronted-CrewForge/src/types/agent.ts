@@ -13,6 +13,21 @@ export interface PageResult<T> {
 }
 
 /**
+ * 工具函数（对应运行时 agents-CrewForge/tools.ts 的 Tool 结构）
+ * 节点/Agent 的 tools 字段存的是 toolItem[] 的 JSON 字符串
+ */
+export interface toolItem {
+  /** 函数名（LLM 调用标识，必填） */
+  name: string
+  /** 作用描述（发给 LLM，必填） */
+  description: string
+  /** 参数声明（JSON Schema 对象，发给 LLM 用；空 = 无参数） */
+  parameters?: Record<string, unknown> | null
+  /** 函数体（箭头函数代码字符串，运行时 new Function 执行；缺省 = 仅声明不可执行） */
+  code?: string
+}
+
+/**
  * 项目 Agent 实体（对应后端 ProjectAgentVO / sys_project_agent 表）
  * 成员行引用池 Agent（agentId），name/role 由后端 JOIN sys_agent 带出
  * 主键 id 就是项目内成员 id；节点配置在 sys_project_agent_node（复制自池）
@@ -53,7 +68,7 @@ export interface agentDTO {
   role: string
   /** 系统提示词 */
   systemPrompt: string
-  /** 工具列表(JSON 数组字符串) */
+  /** 工具列表(toolItem[] 的 JSON 字符串，含函数体代码) */
   tools: string
   /** 模型 */
   model: string
@@ -72,13 +87,13 @@ export interface agentPoolVO {
   id: number
   /** 所属用户 ID（池按用户隔离，前端调用时传入） */
   userId: number
-  /** Agent 名称（同一用户下唯一，后端 uk_user_name 约束） */
+  /** Agent 名称（可重复，ID 是唯一标识） */
   name: string
   /** 职位描述 */
   role: string
   /** 系统提示词 */
   systemPrompt: string
-  /** 可用工具列表（后端是 JSON 数组字符串） */
+  /** 可用工具列表（toolItem[] 的 JSON 字符串，含函数体代码） */
   tools: string
   /** 模型 */
   model: string
@@ -92,13 +107,13 @@ export interface agentPoolVO {
 
 /** 新建/更新 Agent 池请求（对应后端 AgentPoolDTO；userId 后端从 JWT 取，前端不传） */
 export interface agentPoolDTO {
-  /** Agent 名称（同一用户下不重名） */
+  /** Agent 名称（可重复，ID 是唯一标识） */
   name: string
   /** 职位描述 */
   role?: string
   /** 系统提示词 */
   systemPrompt?: string
-  /** 工具列表(JSON 数组字符串) */
+  /** 工具列表(toolItem[] 的 JSON 字符串，含函数体代码) */
   tools?: string
   /** 模型 */
   model?: string
@@ -145,10 +160,18 @@ export interface agentNodeVO {
   systemPrompt: string
   /** 采样温度 0.0-2.0 */
   temperature: number
-  /** 可用工具列表（后端是 JSON 数组字符串） */
+  /** 可用工具列表（toolItem[] 的 JSON 字符串，含函数体代码） */
   tools: string
   /** 模型，如 deepseek/deepseek-v4-flash；空 = 跟随全局 */
   model: string
+  /** 节点类型: llm=调模型 / code=纯代码(按 codeKey 注册) / human=交互门 */
+  nodeType: string
+  /** 结构化输出 schema 注册名（仅 llm 节点用，可空） */
+  schemaKey: string | null
+  /** 代码节点注册名（仅 code 节点用，对应运行时 CodeRegistry） */
+  codeKey: string | null
+  /** 输出 state 通道名（缺省=nodeName；不能与节点名重名，LangGraph 硬约束） */
+  output: string | null
   createTime: string
   updateTime: string
 }
@@ -163,12 +186,55 @@ export interface agentNodeDTO {
   description?: string
   /** 系统提示词 */
   systemPrompt?: string
-  /** 工具列表(JSON 数组字符串) */
+  /** 工具列表(toolItem[] 的 JSON 字符串，含函数体代码) */
   tools?: string
   /** 模型 */
   model?: string
   /** 采样温度（不传后端给默认 0.7） */
   temperature?: number | null
+  /** 节点类型: llm/code/human（不传后端默认 llm） */
+  nodeType?: string
+  /** 结构化输出 schema 注册名 */
+  schemaKey?: string
+  /** 代码节点注册名 */
+  codeKey?: string
+  /** 输出 state 通道名 */
+  output?: string
+}
+
+/**
+ * Agent 边（对应后端 AgentEdgeVO / sys_agent_edge 表）
+ * 节点连线声明：from_node → type → to_nodes
+ * 设计原则：节点干什么由代码决定，节点怎么连由 DB 决定
+ */
+export interface agentEdgeVO {
+  /** 边 ID */
+  id: number
+  /** 关联池 Agent id（sys_agent.id） */
+  agentId: number
+  /** 起点节点名（__start__ = 图起点） */
+  fromNode: string
+  /** 连接方式: direct=普通边 / conditional=条件边 / parallel=并行分支 */
+  type: 'direct' | 'conditional' | 'parallel'
+  /** 下一批节点(字符串):
+   *  direct → 单个节点名（如 "finish"）
+   *  conditional → JSON {"cond":"条件key","true":"节点","false":"节点"}
+   *  parallel → JSON 数组 ["节点A","节点B"] */
+  toNodes: string
+  createTime: string
+  updateTime: string
+}
+
+/** 新建/更新池 Agent 边请求（对应后端 AgentEdgeDTO；id 走路径，agentId 必传） */
+export interface agentEdgeDTO {
+  /** 关联池 Agent id（必传） */
+  agentId: number
+  /** 起点节点名（必传；__start__ = 图起点） */
+  fromNode: string
+  /** 连接方式: direct / conditional / parallel（不传默认 direct） */
+  type?: 'direct' | 'conditional' | 'parallel'
+  /** 下一批节点（必传；格式见 agentEdgeVO.toNodes 注释） */
+  toNodes: string
 }
 
 /**
@@ -185,8 +251,17 @@ export interface projectAgentNodeVO {
   description: string
   systemPrompt: string
   temperature: number
+  /** 工具列表（toolItem[] 的 JSON 字符串，含函数体代码） */
   tools: string
   model: string
+  /** 节点类型: llm/code/human */
+  nodeType: string
+  /** 结构化输出 schema 注册名 */
+  schemaKey: string | null
+  /** 代码节点注册名 */
+  codeKey: string | null
+  /** 输出 state 通道名 */
+  output: string | null
   createTime: string
   updateTime: string
 }
@@ -200,7 +275,16 @@ export interface projectAgentNodeDTO {
   nodeName: string
   description?: string
   systemPrompt?: string
+  /** 工具列表（toolItem[] 的 JSON 字符串，含函数体代码） */
   tools?: string
   model?: string
   temperature?: number | null
+  /** 节点类型: llm/code/human（不传后端默认 llm） */
+  nodeType?: string
+  /** 结构化输出 schema 注册名 */
+  schemaKey?: string
+  /** 代码节点注册名 */
+  codeKey?: string
+  /** 输出 state 通道名 */
+  output?: string
 }

@@ -32,6 +32,14 @@ public class ProjectAgentNode {
     private String tools;
     /** 模型 */
     private String model;
+    /** 节点类型: llm=调模型 / code=纯代码(按code_key注册) / human=交互门 */
+    private String nodeType;
+    /** 结构化输出 schema 注册名(仅 llm 节点用, 可空) */
+    private String schemaKey;
+    /** 代码节点注册名(仅 code 节点用, 对应运行时 CodeRegistry) */
+    private String codeKey;
+    /** 输出 state 通道名(缺省=node_name; 不能与节点名重名, LangGraph 硬约束) */
+    private String output;
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createTime;
     @TableField(fill = FieldFill.INSERT_UPDATE)
