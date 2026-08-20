@@ -3,7 +3,7 @@ import mysql, { type RowDataPacket } from "mysql2/promise";
 const pool = mysql.createPool({
     host: "localhost",
     user: "root",
-    password: "xxxxxx",
+    password: "qwer1016LPK",
     database: "crewforge",
 })
 

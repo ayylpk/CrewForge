@@ -28,11 +28,19 @@ export class Merger extends BaseAgent {
     constructor(station: TransferStation) {
         super("merger", roles.unknown, station);
         this.on("phase_reset", ({ data }) => {
-            this.pending.clear();
-            this.delivered.clear();
-            this.abandoned.clear();
-            this.currentPhase = data.phase ?? 0;
-            console.log(`[merger] 阶段 ${data.phase} 开始：配对缓存已重置`);
+            if (data.pairId) {
+                // 单对重置：测试 3 次回炉架构师重设计后，清该对的配对/交付/放弃状态（防旧版缓存串新任务）
+                this.pending.delete(data.pairId);
+                this.delivered.delete(data.pairId);
+                this.abandoned.delete(data.pairId);
+                console.log(`[merger] 重设计重置：${data.pairId}`);
+            } else {
+                this.pending.clear();
+                this.delivered.clear();
+                this.abandoned.clear();
+                this.currentPhase = data.phase ?? 0;
+                console.log(`[merger] 阶段 ${data.phase} 开始：配对缓存已重置`);
+            }
         });
         this.on("task_failed", ({ data }) => {
             if (data.pairId) { this.abandoned.add(data.pairId); this.pending.delete(data.pairId); }
@@ -53,10 +61,15 @@ export class Merger extends BaseAgent {
         if (!slot.front && cached?.front) { slot.front = cached.front; slot.frontOk = cached.frontOk; }
         this.pending.set(pairKey, slot);
 
-        // 返工轮次：任一失败 +1；≥3 放弃上报维护
+        // 返工轮次：任一失败 +1；≥3 放弃上报维护（带原因，不静默）
         if (slot.backOk === false || slot.frontOk === false) slot.reworkCount += 1;
         if (slot.reworkCount >= 3) {
-            this.send("maintainer", { type: "task_failed", phase: this.currentPhase, pairId: pairKey });
+            const issues = [`开发自测失败 ${slot.reworkCount} 轮（merger 层放弃，未进入测试判定）`];
+            this.send("maintainer", {
+                type: "task_failed", phase: this.currentPhase, pairId: pairKey,
+                issues, task: { id: pairKey, method: slot.back?.method ?? "", path: slot.back?.path ?? "" },
+                attempts: slot.reworkCount,
+            });
             this.abandoned.add(pairKey);
             this.pending.delete(pairKey);
             console.log(`[merger] ${pairKey} 返工 ${slot.reworkCount} 轮仍失败，放弃并上报维护`);

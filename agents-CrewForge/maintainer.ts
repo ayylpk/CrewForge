@@ -14,6 +14,8 @@ export class Maintainer extends BaseAgent {
     private declaredPairs = new Set<string>();
     private passedPairs = new Set<string>();
     private failedPairs = new Set<string>();
+    /** 失败详情：pairId → { issues, task, attempts }（3 次兜底上报，阶段完成时汇总） */
+    private failedDetails = new Map<string, { issues?: string[]; task?: { id: string; method: string; path: string }; attempts?: number }>();
     private declaredFinal = false;
     private currentPhase = 0;
 
@@ -32,7 +34,14 @@ export class Maintainer extends BaseAgent {
             if (data.pairId && data.phase === this.currentPhase
                 && (msg.sender === "merger" || senderRole === roles.testEngineer)) {
                 this.failedPairs.add(data.pairId);
-                console.log(`[maintainer] 收到 ${msg.sender} 上报：${data.pairId} 放弃`);
+                if (data.issues || data.task) {
+                    this.failedDetails.set(data.pairId, {
+                        issues: data.issues ?? [],
+                        task: data.task ?? { id: data.pairId, method: "", path: "" },
+                        attempts: data.attempts ?? 3,
+                    });
+                }
+                console.log(`[maintainer] 收到 ${msg.sender} 上报：${data.pairId} 放弃${(data.issues?.length ?? 0) > 0 ? `（${data.issues.length} 条原因）` : ""}`);
                 this.checkConverged();
             }
         });
@@ -49,13 +58,23 @@ export class Maintainer extends BaseAgent {
         if (!this.declaredFinal) return;
         if (this.declaredPairs.size > 0 &&
             ![...this.declaredPairs].every(p => this.passedPairs.has(p) || this.failedPairs.has(p))) return;
-        // 阶段完成
+        // 阶段完成：带上失败清单（3 次兜底的接口对 + 原因），不再静默
         const failed = this.failedPairs.size;
-        this.send("architect", { type: "phase_done", phase: this.currentPhase });
+        const failedList = [...this.failedDetails.entries()].map(([pairId, d]) => ({
+            pairId,
+            task: d.task ?? { id: pairId, method: "", path: "" },
+            issues: d.issues ?? [],
+            attempts: d.attempts ?? 3,
+        }));
+        this.send("architect", { type: "phase_done", phase: this.currentPhase, failed: failedList });
         console.log(`[maintainer] 发送到架构师：阶段 ${this.currentPhase} 完成（${this.declaredPairs.size} 对：通过 ${this.declaredPairs.size - failed}，放弃 ${failed}）`);
+        if (failedList.length > 0) {
+            failedList.forEach(f => console.log(`   放弃：${f.task.method || ""} ${f.task.path || f.pairId}（${f.attempts} 次）`));
+        }
         this.declaredPairs = new Set();
         this.passedPairs = new Set();
         this.failedPairs = new Set();
+        this.failedDetails = new Map();
         this.declaredFinal = false;
     }
 }

@@ -6,6 +6,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { currentProjectId, safeRealPath } from "./runEnv";
 
 /** 可执行任务（架构师产出 → 开发执行 → 合并器配对 → 测试判定） */
 export interface ExecTask {
@@ -61,11 +62,16 @@ export function makeTask(no: number, feature: string, layer: "backend" | "fronte
     };
 }
 
-/** 写盘到 workspace/（防路径穿越） */
+// 写盘（沙箱：只能写当前项目的房间，逃逸直接抛错）
 export function writeWorkspace(relative: string, code: string): string {
-    const safe = relative.replace(/^[/\\]+/, "").replace(/\.\./g, "");
-    const full = path.join("workspace", safe);
-    fs.mkdirSync(path.dirname(full), { recursive: true });
-    fs.writeFileSync(full, code, "utf-8");
-    return full;
+  const pid = currentProjectId();
+  if (pid == null) throw new Error("缺少 PROJECT_ID，无法确定写入目录");
+  const full = safeRealPath(pid, relative);          // 保安先检查
+  fs.mkdirSync(path.dirname(full), { recursive: true });
+  fs.writeFileSync(full, code, "utf-8");
+  // 同步落库 sys_project_file（异步 fire-and-forget：失败只 warn，不阻塞写盘）
+  // 动态 import 避免与 Node.ts 的静态循环依赖
+  import("./Node").then(m => m.upsertProjectFile(pid, relative, code)).catch(e =>
+    console.warn("[writeWorkspace] 代码落库失败:", (e as Error).message));
+  return full;
 }

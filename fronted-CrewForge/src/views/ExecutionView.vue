@@ -245,7 +245,8 @@ import FileTree from '../components/FileTree.vue'
 import MonacoEditor from '../components/MonacoEditor.vue'
 import { EXEC_TIMELINE, AGENT_NAMES } from '../mocks/execution'
 import type { ExecEvent } from '../mocks/execution'
-import type { FileNode } from '../types/file'
+import { fetchProjectFiles, fetchProjectFileDetail } from '../api/projectFile'
+import type { FileNode, projectFileVO } from '../types/file'
 
 const router = useRouter()
 const route = useRoute()
@@ -400,12 +401,64 @@ function insertFile(path: string, content: string) {
   return node
 }
 
-/** 打开文件 → 加入 Tab（VS Code 行为） */
-function openFile(node: FileNode) {
+/** 打开文件 → 加入 Tab（VS Code 行为）；落库文件无内容时异步拉详情 */
+async function openFile(node: FileNode) {
   if (!tabs.value.find((t) => t.path === node.path)) {
     tabs.value.push(node)
   }
   activeFile.value = node
+  if (node.id && !node.content) {
+    try {
+      const vo = await fetchProjectFileDetail(node.id)
+      node.content = vo.fileContent ?? ''
+      node.userModified = !!vo.userModified
+    } catch {
+      /* 拦截器已提示 */
+    }
+  }
+}
+
+/** 从数据库加载文件树（sys_project_file）：目录优先展开、文件按路径排序 */
+async function loadFromDb(): Promise<boolean> {
+  try {
+    const list = await fetchProjectFiles(Number(route.params.id))
+    if (!list || list.length === 0) return false
+    fileTree.value = buildTreeFromVO(list)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** VO 列表 → 目录树（复用 insertFile 的建目录逻辑，批量版；目录默认展开） */
+function buildTreeFromVO(list: projectFileVO[]): FileNode[] {
+  const root: FileNode[] = []
+  const sorted = [...list].sort((a, b) => a.filePath.localeCompare(b.filePath))
+  for (const vo of sorted) {
+    const parts = vo.filePath.split('/')
+    const fileName = parts.pop()!
+    let level = root
+    let curPath = ''
+    for (const part of parts) {
+      curPath += (curPath ? '/' : '') + part
+      let dir = level.find((n) => n.type === 'dir' && n.name === part)
+      if (!dir) {
+        dir = { name: part, type: 'dir', path: curPath, open: true, children: [] }
+        level.push(dir)
+      }
+      if (!dir.children) dir.children = []
+      level = dir.children
+    }
+    level.push({
+      id: vo.id,
+      name: fileName,
+      type: 'file',
+      path: vo.filePath,
+      content: '', // 详情点开再拉，列表不含大字段
+      userModified: !!vo.userModified,
+    })
+  }
+  return root
 }
 
 function closeTab(path: string) {
@@ -573,8 +626,19 @@ function togglePause() {
   }
 }
 
-onMounted(() => {
-  // 已有文件则恢复（查看代码模式），否则开始执行
+onMounted(async () => {
+  // 优先从数据库加载真实文件（agent 落库 sys_project_file）
+  if (await loadFromDb()) {
+    done.value = true
+    currentPhase.value = '已完成'
+    overallProgress.value = 100
+    agentStates.forEach((a) => {
+      a.status = 'done'
+      a.task = ''
+    })
+    return
+  }
+  // 数据库无文件 → 兜底：本地缓存恢复，否则 mock 时间线演示执行
   if (restoreFiles()) {
     done.value = true
     currentPhase.value = '已完成'

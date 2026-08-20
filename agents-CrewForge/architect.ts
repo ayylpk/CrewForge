@@ -25,7 +25,7 @@ import {
     type StateNodeFn, type CondFn,
 } from "./GraphFactory";
 import { type Node, type Edge, saveArchitectOutput } from "./Node";
-import { type ExecTask, type Plan, type planItem } from "./common";
+import { writeWorkspace, type Pair, type ExecTask, type Plan, type planItem } from "./common";
 
 // ---------- 模型 ----------
 
@@ -121,6 +121,35 @@ export const base_prompt: string = `
 { "actions": ["基建动作"], "ddl": "建表 SQL" }
 `;
 
+/** bootstrap 提示词：把 basePlan（actions/ddl）变成真实的地基文件内容（脚手架/配置/DDL） */
+export const bootstrap_prompt: string = `
+# 角色
+你是 CrewForge 项目的架构师-工程地基落地 Agent。输入是基础架构清单（actions + ddl），输出是可直接写盘的项目地基文件。
+
+## 输入
+1. actions：需要新建或补齐的脚手架、配置、目录和依赖动作（字符串列表，可能较长）
+2. ddl：与目标数据库匹配的建表 SQL
+3. techStack：技术选型（中间件/数据库/技术绑定），用于生成依赖与配置
+
+## 任务
+把 actions 和 ddl 转成**具体的文件**，每个文件包含完整可直接使用的 content：
+- 依赖/脚手架动作 → 生成对应的构建文件（如 pom.xml、package.json 依赖段）
+- 配置动作 → 生成对应的配置文件（如 application.yml、vite.config、.env.example）
+- 目录动作 → 用空文件占位（content 留空字符串即可，如 src/main/java/.gitkeep）
+- ddl → 生成 ddl.sql 文件，原样保留建表 SQL
+- 无法确定内容的动作 → 跳过，不要编造
+
+## 约束
+- 只写项目地基文件（脚手架/配置/DDL/占位），绝不写业务代码（Controller/Service/页面组件由开发 Agent 负责）
+- path 使用相对路径（如 pom.xml、src/main/resources/application.yml），不含 ../
+- content 必须是完整可用的文件内容；占位文件 content 用空字符串
+- 文件数量控制在合理范围（5-15 个），不要重复造轮子
+
+## 输出
+只输出合法 JSON，不要 Markdown、解释或额外字段：
+{ "files": [ { "path": "pom.xml", "content": "文件完整内容" } ] }
+`;
+
 export const api_prompt: string = `
 # 角色
 你是 CrewForge 项目的架构师-接口设计 Agent。你的输出是原子的接口任务对，供后端和前端开发 Agent 直接执行。
@@ -188,6 +217,14 @@ export const baseSchema = z.object({
     ddl: z.string(),
 });
 
+// 工程地基文件清单：bootstrap 节点把 basePlan 转成可写盘的文件
+export const bootstrapSchema = z.object({
+    files: z.array(z.object({
+        path: z.string(),
+        content: z.string(),
+    })),
+});
+
 // 接口拆分：二维数组，每对固定 [后端任务, 前端任务]
 export const resolutionSchema = z.object({
     tasks: z.array(z.tuple([
@@ -219,6 +256,53 @@ type ResolutionBack = z.infer<typeof resolutionSchema>["tasks"][number][0];
 type ResolutionFront = z.infer<typeof resolutionSchema>["tasks"][number][1];
 
 // ---------- 节点实现（codeRegistry，DB 的 code_key 引用） ----------
+
+/** 工程地基落地：读 basePlan（actions/ddl）→ LLM 转文件清单 → 逐个写盘（沙箱校验） */
+const bootstrapNode: StateNodeFn = async (state, node) => {
+    const basePlan = state?.basePlan;
+    // 没有地基计划（确认门被拒等）→ 跳过，不卡流水线
+    if (!basePlan || !Array.isArray(basePlan.actions)) {
+        console.log("[architect] bootstrap：无 basePlan，跳过地基落地");
+        return {};
+    }
+    const prompt = node?.systemPrompt?.trim() || bootstrap_prompt;
+    const stack = state?.stack ?? {};
+    try {
+        const parsed = await retryStructured<{ files: { path: string; content: string }[] }>(
+            "工程地基落地",
+            async (feedback, sig) => {
+                const model = initModels(ARCHITECT_MODEL_JSON);
+                const result = await model
+                    .withStructuredOutput(bootstrapSchema, { method: "jsonMode", name: "extract_bootstrap" })
+                    .invoke([
+                        new SystemMessage(
+                            prompt +
+                            `\n\n## 基础架构动作（basePlan）\n${JSON.stringify(basePlan, null, 2)}` +
+                            `\n\n## 技术选型（stack）\n${JSON.stringify(stack, null, 2)}` +
+                            feedback,
+                        ),
+                    ], { signal: sig });
+                return result as { files: { path: string; content: string }[] };
+            },
+        );
+        const files = parsed?.files ?? [];
+        for (const f of files) {
+            if (!f?.path) continue;
+            try {
+                writeWorkspace(f.path, f.content ?? "");
+                console.log(`[architect] 地基文件已写入：${f.path}`);
+            } catch (e) {
+                console.warn(`[architect] 地基文件写入失败（跳过）：${f.path} - ${(e as Error).message}`);
+            }
+        }
+        console.log(`[architect] 地基落地完成：${files.length} 个文件`);
+        return { bootstrapFiles: files };
+    } catch (e) {
+        // LLM 失败不阻塞流水线：记录并继续（地基缺失，开发仍按接口任务写代码）
+        console.warn("[architect] 工程地基落地失败（跳过）:", (e as Error).message);
+        return {};
+    }
+};
 
 /** 确认门：human 交互（y/n），把答案保留进 confirmAnswer 供条件边判断（humanGate 会清掉 humanAnswer） */
 const confirmNode: StateNodeFn = async (state, node) => {
@@ -376,6 +460,18 @@ export const DEFAULT_NODES: Node[] = [
         output: "basePlan",
     },
     {
+        nodeName: "bootstrap",
+        nodeType: "code",
+        description: "工程地基落地：basePlan → 文件清单 → 写盘",
+        systemPrompt: bootstrap_prompt,
+        temperature: 0.3,
+        tools: "",
+        model: ARCHITECT_MODEL_JSON,
+        schemaKey: "",
+        codeKey: "architect_bootstrap",
+        output: "",
+    },
+    {
         nodeName: "dispatch",
         nodeType: "code",
         description: "接口拆分 + 任务构建 + 下发",
@@ -394,7 +490,8 @@ export const DEFAULT_EDGES: Edge[] = [
     { fromNode: "architectPlan", type: "direct", toNodes: "architectStack" },
     { fromNode: "architectStack", type: "direct", toNodes: "confirmGate" },
     { fromNode: "confirmGate", type: "conditional", toNodes: JSON.stringify({ cond: "architect_confirm_yes", true: "base", false: "__end__" }) },
-    { fromNode: "base", type: "direct", toNodes: "dispatch" },
+    { fromNode: "base", type: "direct", toNodes: "bootstrap" },
+    { fromNode: "bootstrap", type: "direct", toNodes: "dispatch" },
     { fromNode: "dispatch", type: "direct", toNodes: "__end__" },
 ];
 
@@ -413,7 +510,20 @@ export class Architect extends BaseAgent {
         this.on("phase_plan", { fromNames: ["manager"] }, ({ data }) => {
             void this.runPhaseSplit(data.plan as Plan, data.phase as planItem, data.projectId as number | undefined);
         });
+        // 测试 3 次未过 → 回炉：重设计该接口任务并重新下发
+        this.on("task_rejected", { fromRoles: [roles.testEngineer] }, ({ data }) => {
+            void this.redesignTask(data.pair as Pair, data.issues as string[], data.phase as number);
+        });
         this.on("phase_done", { fromNames: ["maintainer"] }, ({ data }) => {
+            // 3 次兜底汇总：打印放弃清单（哪个接口没做出来 + 原因），不再静默
+            if (Array.isArray(data.failed) && data.failed.length > 0) {
+                console.log(`[architect] 阶段 ${data.phase} 放弃 ${data.failed.length} 个任务：`);
+                data.failed.forEach((f: any) => {
+                    const task = f.task ?? {};
+                    console.log(`   - ${task.method || ""} ${task.path || f.pairId}（尝试 ${f.attempts ?? 3} 次）`);
+                    (f.issues ?? []).forEach((i: string) => console.log(`       原因：${i}`));
+                });
+            }
             this.send("manager", { type: "phase_request", phase: data.phase });
             console.log(`[architect] 发送到 PM：请求下一阶段（阶段 ${data.phase} 已完成）`);
         });
@@ -424,8 +534,10 @@ export class Architect extends BaseAgent {
         schemaRegistry.register("architect_detailed_plan", detailedPlanSchema);
         schemaRegistry.register("architect_stack", stackSchema);
         schemaRegistry.register("architect_base", baseSchema);
+        schemaRegistry.register("architect_bootstrap", bootstrapSchema);
         schemaRegistry.register("architect_resolution", resolutionSchema);
         codeRegistry.register("architect_confirm", confirmNode);
+        codeRegistry.register("architect_bootstrap", bootstrapNode);
         codeRegistry.register("architect_dispatch", makeDispatchNode(this.station));
         condRegistry.register("architect_confirm_yes", confirmYes);
 
@@ -463,6 +575,79 @@ export class Architect extends BaseAgent {
             // 方案被拒 / 拆分失败 → 声明 0 对并 final，维护据此直接完成本阶段（不卡死流水线）
             console.log(`[architect] 阶段 ${phase.phase} 无任务（被拒或拆分失败），声明 0 对完成`);
             this.send("maintainer", { type: "tasks_declared", phase: phase.phase, pairIds: [], final: true });
+        }
+    }
+
+    /** 测试 3 次未过 → 回炉重设计：带问题重新拆分该接口（id 沿用原 pairId 保证计数连续）→ 重新下发 */
+    private async redesignTask(pair: Pair, issues: string[], phase: number): Promise<void> {
+        const back = pair.back;
+        const front = pair.front;
+        console.log(`[architect] 收到测试回炉：${back.id}（${back.method} ${back.path}），重新拆分该接口`);
+        const prompt = api_prompt +
+            `\n\n## 上一版后端任务（契约）\n${JSON.stringify(back, null, 2)}` +
+            (front ? `\n\n## 上一版前端任务\n${JSON.stringify(front, null, 2)}` : "") +
+            `\n\n## 测试判定问题（必须解决，否则同样会被拒）\n${issues.map((s, i) => `${i + 1}. ${s}`).join("\n")}` +
+            `\n\n## 要求\n只重新设计这一个接口（${back.method} ${back.path}）为前后端任务对，修正契约中的问题（method/path/参数/返回/文件清单/前后端一致性），不要新增其他接口。`;
+        try {
+            const parsed = await retryStructured<{ tasks: [ResolutionBack, ResolutionFront][] }>(
+                "接口重设计",
+                async (feedback, sig) => {
+                    const model = initModels(ARCHITECT_MODEL_JSON);
+                    const result = await model
+                        .withStructuredOutput(resolutionSchema, { method: "jsonMode", name: "extract_resolution" })
+                        .invoke([new SystemMessage(prompt + feedback)], { signal: sig });
+                    return result as { tasks: [ResolutionBack, ResolutionFront][] };
+                },
+            );
+            const p0 = parsed?.tasks?.[0];
+            if (!p0) throw new Error("重设计返回空任务");
+            const [nb, nf] = p0;
+            const id = back.id;   // ★ 沿用原 pairId，保证测试计数（阶段:pairId）连续到第 6 次
+
+            // 后端任务：保留原 id/验收，用新契约覆盖 method/path/files/parameters/描述
+            const newBack: ExecTask = {
+                ...back,
+                id,
+                method: nb.method,
+                path: nb.path,
+                files: nb.files,
+                title: `${nb.method} ${nb.path}：${nb.purpose}`,
+                description: `【架构师重设计】原契约问题已修正。\n${back.description}\n修正要点：${nb.purpose}`,
+                parameters: nb.parameters,
+            };
+            const bTarget = this.station.pickLeastBusy(roles.backendEngineer);
+            if (bTarget) {
+                this.station.sendMessage("architect", bTarget, JSON.stringify({ type: "task", task: newBack }));
+                console.log(`[architect] 重设计后下发后端：${id}（${nb.method} ${nb.path}）`);
+            }
+
+            if (front && nf) {
+                const newFront: ExecTask = {
+                    ...front,
+                    id: `${id}-F`,
+                    files: nf.files,
+                    title: `${nf.page}：${nf.interactions}`,
+                    description: `【架构师重设计】原契约问题已修正。\n${front.description}\n修正要点：${nf.interactions} 调用 ${nf.api}`,
+                    parameters: [],
+                };
+                const fTarget = this.station.pickLeastBusy(roles.frontendEngineer);
+                if (fTarget) {
+                    this.station.sendMessage("architect", fTarget, JSON.stringify({ type: "task", task: newFront }));
+                    console.log(`[architect] 重设计后下发前端：${id}-F（${nf.page}）`);
+                }
+            }
+
+            // 通知合并器：清该对的配对/交付缓存（防旧版前端配新版后端）
+            this.station.sendMessage("architect", "merger", JSON.stringify({ type: "phase_reset", phase, pairId: id }));
+            console.log(`[architect] 重设计完成，任务 ${id} 重新进入流水线`);
+        } catch (e) {
+            // 重设计失败 → 直接放弃上报（避免无限循环），不卡流水线
+            console.warn("[architect] 接口重设计失败，放弃该任务:", (e as Error).message);
+            this.send("maintainer", {
+                type: "task_failed", phase, pairId: back.id,
+                issues: issues ?? [], task: { id: back.id, method: back.method, path: back.path }, attempts: 6,
+            });
+            this.send("merger", { type: "task_failed", pairId: back.id });
         }
     }
 }

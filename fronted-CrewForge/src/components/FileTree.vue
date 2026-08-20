@@ -1,6 +1,6 @@
 <template>
   <div class="file-tree">
-    <div v-for="node in nodes" :key="node.path" class="tree-node" :style="{ paddingLeft: (depth) * 14 + 'px' }">
+    <div v-for="node in sortedNodes" :key="node.path" class="tree-node" :style="{ paddingLeft: (depth) * 5 + 'px' }">
       <!-- 目录 -->
       <div
         v-if="node.type === 'dir'"
@@ -62,16 +62,25 @@
  * - user_modified 锁标记（蓝色小锁）
  * - 新文件高亮动画（isNew）
  */
+import { computed } from 'vue'
 import type { FileNode } from '../types/file'
 
 // depth 默认 0，避免根级递归时 undefined * 14 = NaN
-withDefaults(
+const props = withDefaults(
   defineProps<{
     nodes: FileNode[]
     depth?: number
     selected?: string
   }>(),
   { depth: 0 }
+)
+
+/** 展示排序：目录优先、同层按名称字母序（不改原数据） */
+const sortedNodes = computed<FileNode[]>(() =>
+  [...props.nodes].sort((a, b) => {
+    if (a.type !== b.type) return a.type === 'dir' ? -1 : 1
+    return a.name.localeCompare(b.name)
+  })
 )
 
 defineEmits<{
@@ -111,6 +120,18 @@ const FILE_META: Record<string, { color: string; icon: string }> = {
   md: {
     color: '#8890a8',
     icon: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/>',
+  },
+  html: {
+    color: '#f07050',
+    icon: '<path d="M4 6h16v12H4z"/><polyline points="9 10 6.5 12 9 14"/><polyline points="15 10 17.5 12 15 14"/><line x1="12.5" y1="9" x2="11.5" y2="15"/>',
+  },
+  css: {
+    color: '#5ea8f0',
+    icon: '<path d="M4 6h16v12H4z"/><path d="M8 10h8M8 14h5"/>',
+  },
+  js: {
+    color: '#f0d060',
+    icon: '<path d="M4 6h16v12H4z"/><polyline points="9 9.5 6.5 12 9 14.5"/><polyline points="15 9.5 17.5 12 15 14.5"/>',
   },
 }
 
@@ -181,6 +202,7 @@ function toggle(node: FileNode) {
 }
 .node-arrow.spacer {
   visibility: hidden;
+  display: inline-block;
 }
 .node-icon {
   display: flex;

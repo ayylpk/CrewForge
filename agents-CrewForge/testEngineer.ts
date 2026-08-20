@@ -19,6 +19,8 @@ import { initModels } from "./models";
 import { retryStructured } from "./llm";
 import { type Pair, type ExecTask } from "./common";
 import { nodePrompt, type Node } from "./Node";
+import { currentProjectId, safePath, safeExists } from "./runEnv";
+
 
 const TEST_MODEL_JSON = JSON.stringify({
     provider: "deepseek",
@@ -78,7 +80,7 @@ const verdictSchema = z.object({
 
 function readTaskFiles(t: ExecTask): { filePath: string; content: string }[] {
     return t.files.map(fp => {
-        const full = path.join("workspace", fp);
+        const full = safePath(currentProjectId()!, fp); 
         if (!fs.existsSync(full)) return { filePath: fp, content: "（文件缺失：未产出）" };
         return { filePath: fp, content: fs.readFileSync(full, "utf-8") };
     });
@@ -107,8 +109,8 @@ export class TestEngineer extends BaseAgent {
         console.log(`[${this.name}] 收到接口对：${label}`);
 
         // 1. 机械预检：文件缺失直接 fail（省 LLM 调用；归责按缺哪侧定）
-        const missingBack = pair.back.files.filter(fp => !fs.existsSync(path.join("workspace", fp)));
-        const missingFront = pair.front ? pair.front.files.filter(fp => !fs.existsSync(path.join("workspace", fp))) : [];
+        const missingBack = pair.back.files.filter(fp => !safeExists(currentProjectId()!, fp));
+        const missingFront = pair.front ? pair.front.files.filter(fp => !safeExists(currentProjectId()!, fp)) : [];
         if (missingBack.length > 0 || missingFront.length > 0) {
             const blame: "backend" | "frontend" | "both" =
                 missingBack.length > 0 && missingFront.length > 0 ? "both"
@@ -159,7 +161,7 @@ export class TestEngineer extends BaseAgent {
         await this.fail(pair, phase, pairKey, verdict.blame, verdict.backendIssues, verdict.frontendIssues, label);
     }
 
-    /** 判失败：按 阶段:pairId 计数；≥3 放弃（上报维护 + 通知合并器），否则 revision 发回对应开发 */
+    /** 判失败：按 阶段:pairId 计数；升级式修复（3 次回炉架构师 / 6 次真放弃），否则 revision 发回对应开发 */
     private async fail(
         pair: Pair, phase: number, pairKey: string,
         blame: Verdict["blame"], backendIssues: string[], frontendIssues: string[], label: string,
@@ -168,10 +170,23 @@ export class TestEngineer extends BaseAgent {
         const count = (this.judgements.get(countKey) ?? 0) + 1;
         this.judgements.set(countKey, count);
 
-        if (count >= 3) {
-            this.send("maintainer", { type: "task_failed", phase, pairId: pairKey });
+        // count=1,2   → 打回开发返工（下方分支）
+        // count=3     → 回炉架构师：附需求 + 测试问题，要求优化重新拆分前后端
+        // count=4,5   → 重设计后的新任务继续返工
+        // count=6     → 真放弃（上报维护 + 通知合并器）
+        if (count % 3 === 0 && count / 3 === 1) {
+            this.send("architect", { type: "task_rejected", phase, pair, issues: [...backendIssues, ...frontendIssues] });
+            console.log(`[${this.name}] 提示：${label} 判定 3 次未过，回炉架构师重新拆分（附 ${backendIssues.length + frontendIssues.length} 条问题）`);
+            return;
+        }
+        if (count % 3 === 0 && count / 3 === 2) {
+            // 真放弃：原因（最近一次判定问题）+ 任务概要一起上报，不再静默
+            const issues = [...backendIssues, ...frontendIssues];
+            const taskInfo = { id: pairKey, method: pair.back.method, path: pair.back.path };
+            this.send("maintainer", { type: "task_failed", phase, pairId: pairKey, issues, task: taskInfo, attempts: count });
             this.send("merger", { type: "task_failed", pairId: pairKey });
             console.log(`[${this.name}] 提示：${label} 判定 ${count} 次仍未通过，放弃并上报维护`);
+            issues.forEach(i => console.log(`   放弃原因：${i}`));
             return;
         }
 

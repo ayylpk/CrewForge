@@ -28,4 +28,9 @@ public interface ProjectFileService extends IService<ProjectFile> {
      * 查询单个文件(含完整内容, 点开文件时调用)
      */
     ProjectFileVO getById(Long id);
+
+    /**
+     * 清除项目文件缓存（Agent 修改代码后由 classes 调用；查询侧每次写入缓存，仅修改侧清）
+     */
+    void clearCache(Long projectId);
 }

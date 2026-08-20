@@ -238,6 +238,34 @@ public final class AgentTemplate {
             }
             """;
 
+    public static final String BOOTSTRAP_PROMPT = """
+            # 角色
+            你是 CrewForge 项目的架构师-工程地基落地 Agent。输入是基础架构清单（actions + ddl），输出是可直接写盘的项目地基文件。
+
+            ## 输入
+            1. actions：需要新建或补齐的脚手架、配置、目录和依赖动作（字符串列表，可能较长）
+            2. ddl：与目标数据库匹配的建表 SQL
+            3. techStack：技术选型（中间件/数据库/技术绑定），用于生成依赖与配置
+
+            ## 任务
+            把 actions 和 ddl 转成具体的文件，每个文件包含完整可直接使用的 content：
+            - 依赖/脚手架动作 → 生成对应的构建文件（如 pom.xml、package.json 依赖段）
+            - 配置动作 → 生成对应的配置文件（如 application.yml、vite.config、.env.example）
+            - 目录动作 → 用空文件占位（content 留空字符串即可，如 src/main/java/.gitkeep）
+            - ddl → 生成 ddl.sql 文件，原样保留建表 SQL
+            - 无法确定内容的动作 → 跳过，不要编造
+
+            ## 约束
+            - 只写项目地基文件（脚手架/配置/DDL/占位），绝不写业务代码（Controller/Service/页面组件由开发 Agent 负责）
+            - path 使用相对路径（如 pom.xml、src/main/resources/application.yml），不含 ../
+            - content 必须是完整可用的文件内容；占位文件 content 用空字符串
+            - 文件数量控制在合理范围（5-15 个），不要重复造轮子
+
+            ## 输出
+            只输出合法 JSON，不要 Markdown、解释或额外字段：
+            { "files": [ { "path": "pom.xml", "content": "文件完整内容" } ] }
+            """;
+
     public record NodeTpl(String name, String nodeType, String schemaKey, String codeKey, String output, String prompt) {}
 
     /** 边模板：from/type/to（to 支持 direct 单节点名 / conditional JSON / parallel JSON 数组） */
@@ -253,6 +281,7 @@ public final class AgentTemplate {
                     new NodeTpl("architectStack", "llm", "architect_stack", "", "stack", ARCH_STACK_PROMPT),
                     new NodeTpl("confirmGate", "code", "", "architect_confirm", "", "技术方案如上，确认开工？(y / n)"),
                     new NodeTpl("base", "llm", "architect_base", "", "basePlan", ARCH_BASE_PROMPT),
+                    new NodeTpl("bootstrap", "code", "", "architect_bootstrap", "", BOOTSTRAP_PROMPT),
                     new NodeTpl("dispatch", "code", "architect_resolution", "architect_dispatch", "", ARCH_API_PROMPT))
     );
 
@@ -267,7 +296,8 @@ public final class AgentTemplate {
                     new EdgeTpl("architectPlan", "direct", "architectStack"),
                     new EdgeTpl("architectStack", "direct", "confirmGate"),
                     new EdgeTpl("confirmGate", "conditional", "{\"cond\":\"architect_confirm_yes\",\"true\":\"base\",\"false\":\"__end__\"}"),
-                    new EdgeTpl("base", "direct", "dispatch"),
+                    new EdgeTpl("base", "direct", "bootstrap"),
+                    new EdgeTpl("bootstrap", "direct", "dispatch"),
                     new EdgeTpl("dispatch", "direct", "__end__"))
     );
 

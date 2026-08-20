@@ -26,7 +26,8 @@ import { FrontendEngineer } from "./frontendEngineer";
 import { TestEngineer } from "./testEngineer";
 import { Maintainer } from "./maintainer";
 import { getProjectAgents, getProjectNodes, getEdges } from "./Node";
-import type { Questioner } from "./GraphFactory";
+import { CliQuestioner, type Questioner } from "./GraphFactory";
+
 
 export interface TeamBundle {
     station: TransferStation;
@@ -135,4 +136,29 @@ export async function runProject(projectId: number, questioner: Questioner): Pro
     }
 
     console.log("[runner] 流程结束（Ctrl+C 退出）");
+}
+
+// ---------- CLI 入口（沙箱：命令行或 Java spawn 直接启动） ----------
+// 用法：bun run projectRunner.ts 5    或    PROJECT_ID=5 bun run projectRunner.ts
+if (import.meta.main) {
+  const fromArgv = Number(process.argv[2]);
+  const projectId = Number.isInteger(fromArgv) && fromArgv > 0
+    ? fromArgv
+    : Number(process.env.PROJECT_ID);
+
+  if (!projectId || !Number.isInteger(projectId) || projectId <= 0) {
+    console.error("用法: bun run projectRunner.ts {projectId}（或设置环境变量 PROJECT_ID）");
+    process.exit(1);
+  }
+
+  console.log(`[runner] 启动项目 ${projectId}...`);
+  runProject(projectId, new CliQuestioner())
+    .then(() => {
+      console.log("[runner] 流程结束，进程退出");
+      process.exit(0);
+    })
+    .catch((e) => {
+      console.error("[runner] 进程异常退出:", e);
+      process.exit(1);
+    });
 }

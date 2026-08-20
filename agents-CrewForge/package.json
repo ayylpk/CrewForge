@@ -3,6 +3,10 @@
   "module": "index.ts",
   "type": "module",
   "private": true,
+  "scripts": {
+    "start:project": "bun run projectRunner.ts"
+  },
+
   "devDependencies": {
     "@types/bun": "latest",
     "@types/node": "26.2.0",

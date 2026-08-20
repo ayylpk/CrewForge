@@ -22,6 +22,8 @@ public class WebMvcConfig implements WebMvcConfigurer {
                 .excludePathPatterns(
                         // 登录接口
                         "/api/auth/login",
+                        // Agent 运行时（classes）写库后清缓存的回调（无 JWT，仅清缓存无副作用）
+                        "/api/projectfile/cache/**",
                         // knife4j / swagger 文档
                         "/doc.html",
                         "/webjars/**",

@@ -39,7 +39,7 @@ const INITFUNCTIONS:Record<string,any> = {
 const pool = mysql.createPool({
     host: "localhost",
     user: "root",
-    password: "xxxxxx",
+    password: "qwer1016LPK",
     database: "crewforge",
 })
 
@@ -192,6 +192,47 @@ export async function saveArchitectOutput(projectId: number, modules: unknown, s
     });
 }
 
+// ============================================================
+// 代码落库：生成的文件同步写 sys_project_file（前端回显/项目树的数据源）
+//   表：sys_project_file（project_id / file_path / file_content / file_type / user_modified）
+//   写入时机：writeWorkspace 写盘后同步 upsert（Agent 产出，user_modified=0）
+// ============================================================
+
+/** 按扩展名推断 file_type（与后端 ProjectFile 的取值一致） */
+export function inferFileType(filePath: string): string {
+    const ext = filePath.split(".").pop()?.toLowerCase() ?? "";
+    const map: Record<string, string> = {
+        java: "java", vue: "vue", ts: "ts", js: "ts", yml: "yml", yaml: "yml",
+        xml: "xml", sql: "sql", md: "md", json: "json", html: "html", css: "css",
+        gitkeep: "other",
+    };
+    return map[ext] ?? "other";
+}
+
+/** upsert 项目文件：同 project_id+file_path 已存在则更新内容，否则插入（不依赖唯一索引，先查后写） */
+export async function upsertProjectFile(projectId: number, filePath: string, content: string): Promise<void> {
+    if (!projectId || !filePath) return;
+    const [rows] = await pool.query<RowDataPacket[]>(
+        "SELECT id FROM sys_project_file WHERE project_id = ? AND file_path = ? AND deleted = 0 LIMIT 1",
+        [projectId, filePath],
+    );
+    if (rows.length > 0 && rows[0]) {
+        await pool.query(
+            "UPDATE sys_project_file SET file_content = ?, file_type = ?, user_modified = 0, update_time = NOW() WHERE id = ?",
+            [content, inferFileType(filePath), rows[0].id],
+        );
+    } else {
+        await pool.query(
+            `INSERT INTO sys_project_file (project_id, file_path, file_content, file_type, user_modified, create_time, update_time)
+             VALUES (?, ?, ?, ?, 0, NOW(), NOW())`,
+            [projectId, filePath, content, inferFileType(filePath)],
+        );
+    }
+    // agent 修改 → 通知 Java 清缓存（查询侧每次写缓存，仅修改侧清；失败不阻塞）
+    fetch(`http://localhost:8080/api/projectfile/cache/clear/${projectId}`, { method: "POST" })
+        .catch(() => { /* 后端未启动等场景忽略 */ });
+}
+
 export function initNode(nodeInformation: Node): GraphNode<any> {
     const type: string = nodeInformation.nodeType;
     const initFunction = INITFUNCTIONS[type];
@@ -292,24 +333,3 @@ function initEnd() {
     return async (state: any) => ({});
 }
 
-/*
--- 迁移 SQL 见 backed-CrewForge/sql/migration_agent_graph.sql：
-ALTER TABLE sys_agent_node
-  ADD COLUMN node_type VARCHAR(16) NOT NULL DEFAULT 'llm',
-  ADD COLUMN schema_key VARCHAR(64) NULL,
-  ADD COLUMN code_key VARCHAR(64) NULL,
-  ADD COLUMN output VARCHAR(64) NULL,
-  ADD COLUMN timeout_ms INT NULL;
-
-CREATE TABLE sys_agent_edge (
-  id BIGINT AUTO_INCREMENT PRIMARY KEY,
-  agent_id BIGINT NOT NULL,
-  from_node VARCHAR(64) NOT NULL,
-  type VARCHAR(16) NOT NULL DEFAULT 'direct',
-  to_nodes VARCHAR(255) NOT NULL,
-  create_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  update_time DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  deleted TINYINT NOT NULL DEFAULT 0,
-  INDEX idx_agent_id (agent_id)
-) COMMENT 'agent 图连接声明';
-*/

@@ -48,7 +48,10 @@ public class ProjectFileController {
     @DeleteMapping("/{id}")
     public Result<Void> delete(@PathVariable Long id) {
         log.info("删除项目文件 id = {}", id);
+        // 删除前拿 projectId → 删完清缓存
+        Long projectId = projectFileService.getById(id).getProjectId();
         projectFileService.removeById(id);
+        projectFileService.clearCache(projectId);
         return Result.success();
     }
 
@@ -57,5 +60,13 @@ public class ProjectFileController {
     public Result<ProjectFileVO> getById(@PathVariable Long id) {
         log.info("查询单个项目文件 id = {}", id);
         return Result.success(projectFileService.getById(id));
+    }
+
+    @Operation(summary = "清除项目文件缓存（Agent 修改代码后由 classes 调用，查询侧每次写缓存、仅修改侧清）")
+    @PostMapping("/cache/clear/{projectId}")
+    public Result<Void> clearCache(@PathVariable Long projectId) {
+        log.info("清除项目文件缓存 projectId = {}", projectId);
+        projectFileService.clearCache(projectId);
+        return Result.success();
     }
 }
