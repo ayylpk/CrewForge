@@ -11,17 +11,11 @@ const request = axios.create({
   timeout: 30000,
 })
 
-// 请求拦截器：统一带 token（Authorization 头）+ 团队上下文（X-Tenant-Id）
+// 请求拦截器：统一带 token（Authorization 头）
 request.interceptors.request.use((config) => {
     const token = localStorage.getItem('cf_token')
     if(token){
         config.headers.Authorization = token
-    }
-    // 进入团队后设置 cf_active_tenant（localStorage），请求自动带 X-Tenant-Id
-    // 后端拦截器会校验"当前用户确实属于该团队"，伪造/越权直接 403
-    const activeTenant = localStorage.getItem('cf_active_tenant')
-    if (activeTenant) {
-        config.headers['X-Tenant-Id'] = activeTenant
     }
     return config
     },

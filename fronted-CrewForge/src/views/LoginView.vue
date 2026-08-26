@@ -44,8 +44,6 @@ async function handleLogin() {
     loading.value = true;
     try{
         await auth.login({ username: username.value, password: password.value })
-        // 新会话从个人空间开始，清掉上次的团队上下文（X-Tenant-Id）
-        localStorage.removeItem('cf_active_tenant')
         router.push('/projects')
     }catch(err){
       error.value = err instanceof Error ? err.message : '登录失败，请检查用户名和密码'

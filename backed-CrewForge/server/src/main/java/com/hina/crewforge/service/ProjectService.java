@@ -10,9 +10,7 @@ import com.hina.crewforge.pojo.vo.ProjectVO;
 public interface ProjectService extends IService<Project> {
 
     /**
-     * 分页查询项目
-     * projectType=1(个人): 按 create_user = userId 过滤
-     * projectType=2(团队): 按 tenant_id = tenantId 过滤
+     * 分页查询项目（按当前用户过滤）
      */
     PageResult<ProjectVO> page(ProjectQueryParam projectQueryParam);
 
@@ -35,4 +33,9 @@ public interface ProjectService extends IService<Project> {
      * 删除项目（含所有权校验，个人项目只能删自己的）
      */
     void delete(Long id);
+
+    /**
+     * 下载项目文件为 ZIP（根目录 = 项目名，解压后不散落）
+     */
+    byte[] downloadZip(Long projectId);
 }

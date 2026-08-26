@@ -4,18 +4,16 @@ import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+/**
+ * 项目分页查询参数
+ * ⚠️ 砍掉团队功能后：移除 projectType / tenantId，按 createUser 过滤
+ */
 @Data
 @AllArgsConstructor
 @NoArgsConstructor
 public class ProjectQueryParam {
     private Integer page = 1;
     private Integer pageSize = 20;
-    /** 查询类型: 1-个人项目(按userId), 2-团队项目(需传tenantId) */
-    private Integer projectType;
-    /** 用户ID(查个人项目时必传, 过滤 create_user) */
-    private Long userId;
-    /** 团队ID(查团队项目时必传) */
-    private Long tenantId;
     /** 关键词搜索(项目名称) */
     private String keyword;
     /** 状态过滤: draft/clarifying/planning/executing/paused/done/failed */

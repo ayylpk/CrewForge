@@ -54,7 +54,7 @@ public class LoginServiceImpl implements LoginService {
             throw new PasswordErrorException();
         }
 
-        // 4. 签发 JWT（只含 userId —— 团队信息登录时不返回，后续通过 /api/tenant 单独查）
+        // 4. 签发 JWT（只含 userId）
         String token = JwtUtil.createJwt(
                 jwtProperties.getUserSecretKey(), jwtProperties.getUserTtl(), user.getId());
         log.info("登录成功: userId={}", user.getId());

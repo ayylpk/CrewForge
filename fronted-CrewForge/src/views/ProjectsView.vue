@@ -22,7 +22,7 @@
         </button>
       </div>
       <div class="topbar-center">
-        <WorkspaceSwitcher :current="'personal'" @switch="switchWs" />
+        <!-- 工作区占位：砍掉团队功能后，不再显示 WorkspaceSwitcher -->
       </div>
       <div class="topbar-right">
         <!-- Agent 仓库（自定义 Agent 池管理） -->
@@ -187,7 +187,6 @@ import CardShell from '../components/CardShell.vue'
 import GradientButton from '../components/GradientButton.vue'
 import StatusDot from '../components/StatusDot.vue'
 import EmptyState from '../components/EmptyState.vue'
-import WorkspaceSwitcher from '../components/WorkspaceSwitcher.vue'
 import { fetchProjects, deleteProject } from '../api/project'
 import type { Project, ProjectStatus } from '../types/project'
 
@@ -319,13 +318,6 @@ const totalFiles = computed(() =>
   projects.value.reduce((sum, p) => sum + (p.fileCount || 0), 0)
 )
 
-// ===== 工作区切换（个人 ↔ 团队平级入口） =====
-function switchWs(ws: 'personal' | 'team') {
-  if (ws === 'team') {
-    router.push('/teams')
-  }
-}
-
 // ===== 新建（路由切换，不弹窗） =====
 function createNew() {
   router.push({ name: 'project-new' })
@@ -344,7 +336,6 @@ function goProject(p: Project) {
 // ===== 退出 =====
 function logout() {
   localStorage.removeItem('cf_token')
-  localStorage.removeItem('cf_active_tenant')
   router.push('/login')
 }
 </script>

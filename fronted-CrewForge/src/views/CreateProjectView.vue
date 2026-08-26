@@ -4,7 +4,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import CardShell from '../components/CardShell.vue'
 import GradientButton from '../components/GradientButton.vue'
-import { createProject as createProjectApi, createTeamProject, fetchProjectById, updateProject } from '../api/project'
+import { createProject as createProjectApi, fetchProjectById, updateProject } from '../api/project'
 import type { ConfirmMode ,ProjectCreateDTO} from '../types/project'
 
 const router = useRouter()
@@ -14,16 +14,11 @@ const route = useRoute()
  * 双模式工作台：
  * · /projects/new      新建模式 —— 定项目描述 → 创建项目
  * · /projects/:id/pm   澄清模式 —— 加载项目 → 确认具体功能 → 保存
+ *
+ * ⚠️ 砍掉团队功能后：移除团队模式相关逻辑
  */
 const isEdit = computed(() => !!route.params.id)
 const projectId = Number(route.params.id || 0)
-
-/**
- * 团队模式：/projects/new?tenantId=xxx —— 创建的项目归属该团队（projectType=2）
- * 保存走 createTeamProject，成功后跳回团队详情页
- */
-const teamId = Number(route.query.tenantId || 0)
-const isTeamMode = computed(() => teamId > 0)
 
 // ===== 表单 =====（类型 = 后端 ProjectDTO 白名单，全字段集中在这，保存统一走 saveProject）
 // ⚠️ 可选字段不能给 ''：空字符串会被后端 updateById 当真值覆盖；undefined 才表示"不修改"
@@ -32,8 +27,6 @@ const form = ref<ProjectCreateDTO>({
   description: '', // 项目描述：要做什么样子的项目
   confirmMode: 'mixed',
   // 以下可选字段：页面有输入/加载到值才赋值；undefined = 不发送 = 后端不修改
-  tenantId: undefined,
-  projectType: undefined,
   clarifiedReq: undefined,
   businessModules: undefined,
   techStack: undefined,
@@ -274,14 +267,8 @@ async function confirmCreate() {
       name: form.value.name.trim(),
       description: form.value.description.trim(),
     }
-    if (isTeamMode.value) {
-      // 团队模式：项目归属团队，创建后回团队详情页
-      await createTeamProject(payload, teamId)
-      router.push(`/teams/${teamId}`)
-    } else {
-      await createProjectApi(payload)
-      router.push('/projects')
-    }
+    await createProjectApi(payload)
+    router.push('/projects')
   } finally {
     creating.value = false
   }
@@ -292,8 +279,8 @@ async function confirmCreate() {
   <div class="create">
     <!-- 顶栏 -->
     <header class="topbar">
-      <button class="btn-back" @click="isEdit ? goOverview() : isTeamMode ? router.push(`/teams/${teamId}`) : router.push('/projects')">
-        {{ isEdit ? '← 返回' : isTeamMode ? '← 团队详情' : '← 项目列表' }}
+      <button class="btn-back" @click="isEdit ? goOverview() : router.push('/projects')">
+        {{ isEdit ? '← 返回' : '← 项目列表' }}
       </button>
       <div class="topbar-title">
         <span class="dim">{{ isEdit ? '需求对话 ·' : '新建项目 ·' }}</span>

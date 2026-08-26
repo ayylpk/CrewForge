@@ -30,12 +30,11 @@
         <button class="entry-card" @click="router.push({ name: 'execution', params: { id: route.params.id } })">
           <span class="entry-ico" style="background: rgba(69, 184, 255, 0.12); color: var(--blue)">
             <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="16 18 22 12 16 6" />
-              <polyline points="8 6 2 12 8 18" />
+              <polygon points="5 3 19 12 5 21 5 3" />
             </svg>
           </span>
-          <span class="entry-name">查看代码</span>
-          <span class="entry-desc">文件树 + 编辑器</span>
+          <span class="entry-name">执行面板</span>
+          <span class="entry-desc">Agent 任务流水线</span>
         </button>
 
         <button class="entry-card" @click="router.push({ name: 'pm', params: { id: route.params.id } })">
@@ -65,14 +64,11 @@
         <button class="entry-card" @click="router.push({ name: 'team', params: { id: route.params.id } })">
           <span class="entry-ico" style="background: rgba(94, 203, 138, 0.12); color: var(--green)">
             <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-              <circle cx="9" cy="7" r="4" />
-              <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
-              <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+              <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
             </svg>
           </span>
-          <span class="entry-name">团队配置</span>
-          <span class="entry-desc">成员 · 模型 · API Key</span>
+          <span class="entry-name">Agent 团队</span>
+          <span class="entry-desc">成员 · 模型 · 提示词</span>
         </button>
 
         <button class="entry-card" @click="downloadZip">
@@ -202,16 +198,11 @@ const statusLabel = computed(() => STATUS_META[project.value?.status || 'draft']
 const statusColor = computed(() => STATUS_META[project.value?.status || 'draft'].color)
 const projectName = computed(() => project.value?.name || '项目 #' + route.params.id)
 
-/** 团队项目：返回团队详情页；个人项目：返回项目列表 */
-const isTeamProject = computed(() => !!project.value?.tenantId)
-const backLabel = computed(() => (isTeamProject.value ? '团队空间' : '项目列表'))
+/** 返回项目列表 */
+const backLabel = '项目列表'
 
 function goBack() {
-  if (isTeamProject.value) {
-    router.push(`/teams/${project.value!.tenantId}`)
-  } else {
-    router.push('/projects')
-  }
+  router.push('/projects')
 }
 
 onMounted(async () => {
@@ -227,22 +218,13 @@ function scrollTo(id: string) {
   document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' })
 }
 
-/** 下载 zip（生成占位说明文件，真实打包等执行引擎接入） */
+/** 下载 zip（调后端 API 打包项目文件） */
 function downloadZip() {
-  const content = [
-    'CrewForge 项目包',
-    '',
-    `项目：${projectName.value}`,
-    '',
-    '接入执行引擎后将打包真实项目代码下载。',
-  ].join('\n')
-  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' })
-  const url = URL.createObjectURL(blob)
+  const id = route.params.id
   const a = document.createElement('a')
-  a.href = url
-  a.download = `${projectName.value}.zip.txt`
+  a.href = `/api/project/${id}/download`
+  a.download = `${projectName.value}.zip`
   a.click()
-  URL.revokeObjectURL(url)
 }
 </script>
 
@@ -540,7 +522,7 @@ function downloadZip() {
   font-weight: 500;
 }
 
-/* 团队 */
+/* 返回按钮 */
 .team-list {
   display: flex;
   flex-direction: column;

@@ -19,10 +19,6 @@ export type ConfirmMode = 'green' | 'mixed' | 'manual'
 export interface Project {
   /** 项目 ID */
   id: number
-  /** 所属团队 ID（个人项目为 null） */
-  tenantId: number
-  /** 项目类型: 1-个人项目, 2-团队项目 */
-  projectType?: number
   /** 项目名称 */
   name: string
   /** 项目描述（原始需求：这个项目要做什么样子的项目） */
@@ -67,10 +63,6 @@ export interface ProjectCreateDTO {
   description: string
   /** 确认模式（前端字符串，提交时经 CONFIRM_MAP 转数字 0/1/2） */
   confirmMode: ConfirmMode
-  /** 所属团队 ID（团队项目由 createTeamProject 自动填，创建时可不传） */
-  tenantId?: number
-  /** 项目类型: 1-个人项目, 2-团队项目（api 函数内部自动填） */
-  projectType?: number
   /** 需求澄清后的结构化文档(Markdown) */
   clarifiedReq?: string
   /** 业务模块/功能列表(JSON 数组字符串)，如 '["客户管理","跟进记录"]' */

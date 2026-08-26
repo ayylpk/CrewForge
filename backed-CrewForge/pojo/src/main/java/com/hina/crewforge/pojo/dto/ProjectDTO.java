@@ -3,16 +3,14 @@ import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
+/**
+ * 项目新增/更新请求 DTO
+ * ⚠️ 砍掉团队功能后：移除 tenantId / projectType，项目直属于创建人
+ */
 @Data
 @AllArgsConstructor
 @NoArgsConstructor
 public class ProjectDTO {
-    /** 所属团队ID(个人项目不传) */
-    private Long tenantId;
-    /** 项目类型: 1-个人项目, 2-团队项目(见 Project.PROJECT_TYPE_*), 不传默认1 */
-    private Integer projectType;
-    /** 创建人ID(前端传当前登录用户) */
-    private Long createUser;
     /** 项目名称 */
     private String name;
     /** 项目描述(原始需求: 这个项目要做什么样子的项目) */

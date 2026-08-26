@@ -15,6 +15,7 @@ import { z } from "zod";
 import { SystemMessage } from "@langchain/core/messages";
 import { Annotation } from "@langchain/langgraph";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs";
 import { BaseAgent } from "./BaseAgent";
 import { roles, type TransferStation } from "./Hub";
 import { initModels } from "./models";
@@ -24,8 +25,9 @@ import {
     codeRegistry, schemaRegistry, condRegistry,
     type StateNodeFn, type CondFn,
 } from "./GraphFactory";
-import { type Node, type Edge, saveArchitectOutput } from "./Node";
+import { type Node, type Edge, saveArchitectOutput, readProjectFile, getProjectConfirmMode } from "./Node";
 import { writeWorkspace, type Pair, type ExecTask, type Plan, type planItem } from "./common";
+import { currentProjectId, projectDir } from "./runEnv";
 
 // ---------- 模型 ----------
 
@@ -267,6 +269,23 @@ const bootstrapNode: StateNodeFn = async (state, node) => {
     }
     const prompt = node?.systemPrompt?.trim() || bootstrap_prompt;
     const stack = state?.stack ?? {};
+    // 读取当前项目已有的地基文件，供 LLM 参考（追加修改时保留已有内容）
+    let existingFilesPrompt = "";
+    try {
+        const pid = currentProjectId();
+        if (pid) {
+            const commonPaths = ["pom.xml", "package.json", "application.yml", "application.properties",
+                "vite.config.ts", "tsconfig.json", ".env.example", "docker-compose.yml"];
+            const existing: string[] = [];
+            for (const p of commonPaths) {
+                const content = await readProjectFile(pid, p);
+                if (content) existing.push(`--- ${p} ---\n${content.slice(0, 20000)}`);
+            }
+            if (existing.length > 0) {
+                existingFilesPrompt = `\n\n## 项目已有的文件（在此之上修改/追加，保留所有已有配置）\n${existing.join("\n")}`;
+            }
+        }
+    } catch { /* 静默 */ }
     try {
         const parsed = await retryStructured<{ files: { path: string; content: string }[] }>(
             "工程地基落地",
@@ -279,11 +298,14 @@ const bootstrapNode: StateNodeFn = async (state, node) => {
                             prompt +
                             `\n\n## 基础架构动作（basePlan）\n${JSON.stringify(basePlan, null, 2)}` +
                             `\n\n## 技术选型（stack）\n${JSON.stringify(stack, null, 2)}` +
+                            existingFilesPrompt +
                             feedback,
                         ),
                     ], { signal: sig });
                 return result as { files: { path: string; content: string }[] };
             },
+            // 地基是流水线输出量最大的节点（5-15 个完整文件内容），180s 默认超时不够，单独放宽到 300s
+            { timeoutMs: 300_000 },
         );
         const files = parsed?.files ?? [];
         for (const f of files) {
@@ -296,7 +318,23 @@ const bootstrapNode: StateNodeFn = async (state, node) => {
             }
         }
         console.log(`[architect] 地基落地完成：${files.length} 个文件`);
-        return { bootstrapFiles: files };
+
+        // 状态落盘（含地基就绪标记）：阶段 2+ 的 runPhaseSplit 读回 → 条件边短路跳过技术栈/确认门/地基
+        const pid = currentProjectId();
+        if (pid != null) {
+            try {
+                const stateFile = projectDir(pid) + "/.architect-state.json";
+                fs.mkdirSync(projectDir(pid), { recursive: true });
+                fs.writeFileSync(stateFile, JSON.stringify(
+                    { bootstrapDone: true, stack: state?.stack ?? null, basePlan: state?.basePlan ?? null },
+                    null, 2,
+                ));
+                console.log("[architect] 架构状态已落盘：.architect-state.json（后续阶段将短路复用）");
+            } catch (e) {
+                console.warn("[architect] 架构状态落盘失败:", (e as Error).message);
+            }
+        }
+        return { bootstrapFiles: files, bootstrapDone: true };
     } catch (e) {
         // LLM 失败不阻塞流水线：记录并继续（地基缺失，开发仍按接口任务写代码）
         console.warn("[architect] 工程地基落地失败（跳过）:", (e as Error).message);
@@ -304,10 +342,16 @@ const bootstrapNode: StateNodeFn = async (state, node) => {
     }
 };
 
-/** 确认门：human 交互（y/n），把答案保留进 confirmAnswer 供条件边判断（humanGate 会清掉 humanAnswer） */
+/** 确认门：human 交互（y/n），把答案保留进 confirmAnswer 供条件边判断（humanGate 会清掉 humanAnswer）
+ *  确认模式控制：0-全绿灯(自动) / 1-混合(自动) / 2-手动(弹出确认) */
 const confirmNode: StateNodeFn = async (state, node) => {
     if (state.humanAnswer != null) {
         return { human: null, confirmAnswer: state.humanAnswer, humanAnswer: null };
+    }
+    const mode = state.confirmMode ?? 0;
+    // 全绿灯(0) 或 混合(1)：架构师确认门自动跳过
+    if (mode === 0 || mode === 1) {
+        return { human: null, confirmAnswer: "y", humanAnswer: null };
     }
     return { human: { questionId: randomUUID(), prompt: node?.systemPrompt?.trim() || "技术方案如上，确认开工？(y / n)", options: ["y", "n"] } };
 };
@@ -487,7 +531,9 @@ export const DEFAULT_NODES: Node[] = [
 
 export const DEFAULT_EDGES: Edge[] = [
     { fromNode: "__start__", type: "direct", toNodes: "architectPlan" },
-    { fromNode: "architectPlan", type: "direct", toNodes: "architectStack" },
+    // 地基已就绪（阶段 2+）：跳过 architectStack/confirmGate/base/bootstrap，直接拆任务
+    //（stack/basePlan 由 runPhaseSplit 从 .architect-state.json 读回注入；bootstrapDone 置 true 走此短路）
+    { fromNode: "architectPlan", type: "conditional", toNodes: JSON.stringify({ cond: "architect_bootstrap_done", true: "dispatch", false: "architectStack" }) },
     { fromNode: "architectStack", type: "direct", toNodes: "confirmGate" },
     { fromNode: "confirmGate", type: "conditional", toNodes: JSON.stringify({ cond: "architect_confirm_yes", true: "base", false: "__end__" }) },
     { fromNode: "base", type: "direct", toNodes: "bootstrap" },
@@ -540,6 +586,7 @@ export class Architect extends BaseAgent {
         codeRegistry.register("architect_bootstrap", bootstrapNode);
         codeRegistry.register("architect_dispatch", makeDispatchNode(this.station));
         condRegistry.register("architect_confirm_yes", confirmYes);
+        condRegistry.register("architect_bootstrap_done", (s: any) => s.bootstrapDone === true);
 
         console.log(`[architect] 拼接编译拆分图：${nodes.map(n => n.nodeName).join(" → ")}`);
         this.graph = stitch(nodes, edges, {
@@ -547,6 +594,8 @@ export class Architect extends BaseAgent {
                 plan: Annotation<any>({ default: () => null, reducer: (_: any, u: any) => u }),
                 confirmAnswer: Annotation<any>({ default: () => null, reducer: (_: any, u: any) => u }),
                 exeTasks: Annotation<any[]>({ default: () => [], reducer: (_: any[], u: any[]) => u }),
+                confirmMode: Annotation<number>({ default: () => 0, reducer: (_: number, u: number) => u }),
+                bootstrapDone: Annotation<boolean>({ default: () => false, reducer: (_: boolean, u: boolean) => u }),
             },
         });
     }
@@ -559,7 +608,29 @@ export class Architect extends BaseAgent {
             features: plan.features.filter(f => phase.features.includes(f.name)),
             phases: [phase],
         };
-        const state = await runWithInteraction(this.graph, { plan: planForPhase }, `architect-phase-${phase.phase}`, new CliQuestioner());
+        // 读取项目确认模式，控制确认门是否弹出
+        let confirmMode = 0;
+        if (projectId) {
+            try { confirmMode = await getProjectConfirmMode(projectId); } catch { /* 默认 0 */ }
+        }
+        // 阶段 2+：地基已就绪 → 读回 stack/basePlan 并置 bootstrapDone → 条件边短路（见 DEFAULT_EDGES）
+        const extraInput: any = { plan: planForPhase, confirmMode };
+        const pid = currentProjectId();
+        if (pid != null) {
+            try {
+                const stateFile = projectDir(pid) + "/.architect-state.json";
+                if (fs.existsSync(stateFile)) {
+                    const saved = JSON.parse(fs.readFileSync(stateFile, "utf-8"));
+                    if (saved?.bootstrapDone) {
+                        extraInput.stack = saved.stack ?? null;
+                        extraInput.basePlan = saved.basePlan ?? null;
+                        extraInput.bootstrapDone = true;
+                        console.log(`[architect] 复用已有架构状态：阶段 ${phase.phase} 跳过技术栈/确认门/地基，直接拆分任务`);
+                    }
+                }
+            } catch { /* 读回失败走全图（退化为老行为，不阻塞） */ }
+        }
+        const state = await runWithInteraction(this.graph, extraInput, `architect-phase-${phase.phase}`, new CliQuestioner());
         // 落库：业务模块(detailedPlan) + 技术选型(stack) + status=executing
         if (projectId) {
             try {

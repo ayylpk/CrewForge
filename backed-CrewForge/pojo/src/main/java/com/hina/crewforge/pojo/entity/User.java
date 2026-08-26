@@ -10,7 +10,7 @@ public class User {
     /** 用户ID */
     @TableId(type = IdType.AUTO)
     private Long id;
-    // 注：用户-团队关系在 sys_user_tenant 关联表，User 上不放 tenantId（表里也没有这列）
+    // 用户独立于团队，通过 createUser 关联项目
     /** 登录用户名（唯一） */
     private String username;
     /** 密码（BCrypt 加密存储，不存明文） */

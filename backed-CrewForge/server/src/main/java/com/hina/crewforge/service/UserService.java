@@ -11,20 +11,17 @@ import java.util.List;
 
 /**
  * 用户管理服务
- * 说明: 用户 CRUD 之外，还要处理两个关联关系——
- *       · 用户-团队 (sys_user_tenant): 创建用户时加入团队
- *       · 用户-角色 (sys_user_role): 创建用户时分配角色
+ * ⚠️ 砍掉团队功能后：移除团队相关注释；砍掉 RBAC 后：移除角色相关注释
  */
 public interface UserService extends IService<User> {
 
     /**
-     * 分页查询用户（附带所属团队列表）
-     * 注意: PageResult 的泛型 T 是元素类型，records 本身是 List<T>
+     * 分页查询用户
      */
     PageResult<UserVO> pageUsers(UserQueryParam userQueryParam);
 
     /**
-     * 新增用户: BCrypt 加密密码 + 关联团队 + 分配角色
+     * 新增用户: BCrypt 加密密码
      */
     void createUser(UserDTO dto);
 
@@ -34,7 +31,7 @@ public interface UserService extends IService<User> {
     void updateUser(Long id, UserDTO dto);
 
     /**
-     * 查询单个用户（附带所属团队列表）
+     * 查询单个用户
      */
     UserVO getUserById(Long id);
 }

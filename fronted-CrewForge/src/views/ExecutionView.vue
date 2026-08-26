@@ -2,7 +2,7 @@
   <div class="exec">
     <!-- 顶栏 -->
     <header class="topbar">
-      <button class="btn-back" @click="router.push('/projects')">← 项目列表</button>
+      <button class="btn-back" @click="router.push(`/projects/${route.params.id}`)">← 返回</button>
       <div class="topbar-title">
         <span class="dim">{{ projectName }} ·</span>
         <span>执行面板</span>
@@ -52,12 +52,14 @@
         <button
           class="activity-item"
           :class="{ active: rightOpen }"
-          title="Agent 状态"
+          title="任务看板"
           @click="rightOpen = !rightOpen"
         >
           <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="8" r="4" />
-            <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+            <rect x="3" y="3" width="7" height="7" />
+            <rect x="14" y="3" width="7" height="7" />
+            <rect x="3" y="14" width="7" height="7" />
+            <rect x="14" y="14" width="7" height="7" />
           </svg>
         </button>
         <button
@@ -91,6 +93,29 @@
           <div class="side-head">
             <span>项目经理</span>
             <span class="side-count">执行中随时提问</span>
+          </div>
+          <!-- 确认模式选择器 -->
+          <div class="mode-selector">
+            <div class="mode-label">
+              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10" />
+                <path d="M12 6v6l4 2" />
+              </svg>
+              确认模式
+            </div>
+            <div class="mode-options">
+              <button
+                v-for="m in MODES" :key="m.value"
+                class="mode-btn"
+                :class="{ active: confirmMode === m.value }"
+                :title="m.desc"
+                @click="setMode(m.value)"
+              >
+                <span class="mode-dot" :style="{ background: m.color }"></span>
+                {{ m.label }}
+              </button>
+            </div>
+            <div class="mode-hint">{{ MODES[confirmMode]?.desc }}</div>
           </div>
           <div class="chat-body">
             <div v-for="(m, i) in chatMessages" :key="i" class="msg" :class="m.role">
@@ -181,30 +206,134 @@
         @mousedown="startDrag($event, 'x', 'right')"
       ></div>
 
-      <!-- ===== 右侧边栏（Agent 状态） ===== -->
+      <!-- ===== 右侧边栏（任务看板） ===== -->
       <aside v-if="rightOpen" class="rightbar" :style="{ width: rightbarWidth + 'px' }">
         <div class="side-head">
-          <span>Agent 团队</span>
-          <span class="side-count">{{ doneCount }}/{{ agentStates.length }} 完成</span>
+          <span>任务看板</span>
+          <span class="side-count">{{ tasks.length }} 个任务</span>
         </div>
-        <div class="right-scroll">
-          <div
-            v-for="a in agentStates"
-            :key="a.id"
-            class="agent-row"
-            :class="a.status"
-          >
-            <div class="agent-avatar">
-              <img :src="avatarSrc(a.avatar)" :alt="a.name" />
-              <span class="agent-dot" :class="a.status"></span>
+        <div class="kanban">
+          <div class="kanban-col">
+            <div class="kanban-col-head" @click="toggleCol('todo')">
+              <span class="kanban-dot todo"></span>
+              <span>待办</span>
+              <span class="kanban-count">{{ taskCount('todo') }}</span>
+              <span class="kanban-arrow" :class="{ collapsed: collapsedCols.has('todo') }">▾</span>
             </div>
-            <div class="agent-info">
-              <span class="agent-name">{{ a.name }}</span>
-              <span class="agent-task">{{ a.status === 'working' ? a.task || '执行中...' : STATUS_LABEL[a.status] }}</span>
+            <div v-show="!collapsedCols.has('todo')" class="kanban-list">
+              <div v-for="t in tasksBy('todo')" :key="t.id" class="kanban-card" @click="openTaskDetail(t)">
+                <span class="kanban-title">{{ t.title }}</span>
+                <span class="kanban-assignee">{{ t.assignee }}</span>
+              </div>
+            </div>
+          </div>
+          <div class="kanban-col">
+            <div class="kanban-col-head" @click="toggleCol('doing')">
+              <span class="kanban-dot doing"></span>
+              <span>执行中</span>
+              <span class="kanban-count">{{ taskCount('doing') }}</span>
+              <span class="kanban-arrow" :class="{ collapsed: collapsedCols.has('doing') }">▾</span>
+            </div>
+            <div v-show="!collapsedCols.has('doing')" class="kanban-list">
+              <div v-for="t in tasksBy('doing')" :key="t.id" class="kanban-card doing" @click="openTaskDetail(t)">
+                <span class="kanban-title">{{ t.title }}</span>
+                <span class="kanban-assignee">{{ t.assignee }}</span>
+              </div>
+            </div>
+          </div>
+          <div class="kanban-col">
+            <div class="kanban-col-head" @click="toggleCol('done')">
+              <span class="kanban-dot done"></span>
+              <span>已完成</span>
+              <span class="kanban-count">{{ taskCount('done') }}</span>
+              <span class="kanban-arrow" :class="{ collapsed: collapsedCols.has('done') }">▾</span>
+            </div>
+            <div v-show="!collapsedCols.has('done')" class="kanban-list">
+              <div v-for="t in tasksBy('done')" :key="t.id" class="kanban-card done" @click="openTaskDetail(t)">
+                <span class="kanban-title">{{ t.title }}</span>
+                <span class="kanban-assignee">{{ t.assignee }}</span>
+              </div>
+            </div>
+          </div>
+          <div class="kanban-col">
+            <div class="kanban-col-head" @click="toggleCol('failed')">
+              <span class="kanban-dot failed"></span>
+              <span>失败</span>
+              <span class="kanban-count">{{ taskCount('failed') }}</span>
+              <span class="kanban-arrow" :class="{ collapsed: collapsedCols.has('failed') }">▾</span>
+            </div>
+            <div v-show="!collapsedCols.has('failed')" class="kanban-list">
+              <div v-for="t in tasksBy('failed')" :key="t.id" class="kanban-card failed" @click="openTaskDetail(t)">
+                <span class="kanban-title">{{ t.title }}</span>
+                <span class="kanban-assignee">{{ t.assignee }}</span>
+                <button class="kanban-retry" title="重跑" @click.stop="retryTask(t)">↻</button>
+              </div>
             </div>
           </div>
         </div>
       </aside>
+
+      <!-- ===== 任务详情弹窗 ===== -->
+      <div v-if="taskDetail" class="modal-mask" @click.self="taskDetail = null">
+        <div class="modal task-detail-modal">
+          <div class="modal-head">
+            <h2>{{ taskDetail.title }}</h2>
+            <button class="modal-close" @click="taskDetail = null">✕</button>
+          </div>
+          <div class="modal-body">
+            <div class="detail-grid">
+              <div class="detail-field">
+                <span class="detail-label">任务编号</span>
+                <span class="detail-value">{{ taskDetail.taskIdExt || taskDetail.id }}</span>
+              </div>
+              <div class="detail-field">
+                <span class="detail-label">状态</span>
+                <span class="detail-value" :style="{ color: STATUS_COLOR[taskDetail.status] }">{{ STATUS_LABEL[taskDetail.status] }}</span>
+              </div>
+              <div class="detail-field">
+                <span class="detail-label">负责人</span>
+                <span class="detail-value">{{ taskDetail.assignee || '-' }}</span>
+              </div>
+              <div class="detail-field">
+                <span class="detail-label">分层</span>
+                <span class="detail-value">{{ taskDetail.layer === 'backend' ? '后端' : taskDetail.layer === 'frontend' ? '前端' : '-' }}</span>
+              </div>
+              <div class="detail-field" v-if="taskDetail.phaseId">
+                <span class="detail-label">阶段 ID</span>
+                <span class="detail-value">{{ taskDetail.phaseId }}</span>
+              </div>
+              <div class="detail-field" v-if="taskDetail.retryCount > 0">
+                <span class="detail-label">重试次数</span>
+                <span class="detail-value" style="color: var(--yellow)">{{ taskDetail.retryCount }}/3</span>
+              </div>
+            </div>
+
+            <div class="detail-section" v-if="taskDetail.description">
+              <span class="detail-label">描述</span>
+              <p class="detail-text">{{ taskDetail.description }}</p>
+            </div>
+
+            <div class="detail-section" v-if="taskDetail.acceptance">
+              <span class="detail-label">验收标准</span>
+              <p class="detail-text">{{ taskDetail.acceptance }}</p>
+            </div>
+
+            <div class="detail-section" v-if="taskDetail.result">
+              <span class="detail-label">执行结果</span>
+              <p class="detail-text result">{{ taskDetail.result }}</p>
+            </div>
+
+            <div class="detail-section" v-if="taskDetail.errorMsg">
+              <span class="detail-label" style="color: var(--red)">失败原因</span>
+              <p class="detail-text error">{{ taskDetail.errorMsg }}</p>
+            </div>
+          </div>
+          <div class="modal-actions">
+            <button class="btn-cancel" @click="taskDetail = null">关闭</button>
+            <button v-if="taskDetail.status === 'failed'" class="btn-retry" @click="retryTask(taskDetail); taskDetail = null">↻ 重跑</button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- ===== 底部日志面板 ===== -->
@@ -247,15 +376,32 @@ import { EXEC_TIMELINE, AGENT_NAMES } from '../mocks/execution'
 import type { ExecEvent } from '../mocks/execution'
 import { fetchProjectFiles, fetchProjectFileDetail } from '../api/projectFile'
 import type { FileNode, projectFileVO } from '../types/file'
+import { useExecutionStore } from '../stores/execution'
+import { fetchTasks } from '../api/task'
+import type { TaskItem as ApiTaskItem, TaskStatus } from '../api/task'
 
 const router = useRouter()
 const route = useRoute()
 const projectName = ref('项目 #' + route.params.id)
+const execStore = useExecutionStore()
+const confirmMode = ref(execStore.confirmMode)
+
+/** 确认模式常量 */
+const MODES = [
+  { value: 0, label: '全绿灯', color: '#5ecb8a', desc: 'Agent 自动执行，无需人工确认' },
+  { value: 1, label: '混合', color: '#f2b840', desc: '关键步骤（如换阶段）需人工确认' },
+  { value: 2, label: '手动', color: '#f070a0', desc: '每阶段计划都需人工确认' },
+] as const
+
+function setMode(mode: 0 | 1 | 2) {
+  confirmMode.value = mode
+  execStore.setConfirmMode(mode)
+}
 
 // ===== 布局状态（VS Code 风格） =====
 const activeView = ref<'files' | 'chat'>('files') // 左侧边栏内容
 const leftOpen = ref(true) // 左侧边栏
-const rightOpen = ref(false) // 右侧边栏（Agent 状态）
+const rightOpen = ref(false) // 右侧边栏（任务看板）
 const logOpen = ref(false) // 底部日志面板
 
 
@@ -300,37 +446,74 @@ function startDrag(e: MouseEvent, axis: 'x' | 'y', target: 'left' | 'right' | 'l
   document.body.style.userSelect = 'none'
 }
 
-// ===== Agent 状态 =====
-type AgentStatus = 'idle' | 'working' | 'done'
-const STATUS_LABEL: Record<AgentStatus, string> = {
-  idle: '等待中',
-  working: '执行中',
+// ===== 任务看板 =====
+const tasks = ref<ApiTaskItem[]>([])
+
+/** 收起的列（默认已完成收起来） */
+const collapsedCols = reactive(new Set<TaskStatus>(['done']))
+
+/** 任务详情弹窗 */
+const taskDetail = ref<ApiTaskItem | null>(null)
+function openTaskDetail(t: ApiTaskItem) {
+  taskDetail.value = t
+}
+
+const STATUS_COLOR: Record<TaskStatus, string> = {
+  todo: '#8890a8',
+  doing: '#45b8ff',
+  done: '#5ecb8a',
+  failed: '#f26060',
+}
+const STATUS_LABEL: Record<TaskStatus, string> = {
+  todo: '待办',
+  doing: '执行中',
   done: '已完成',
+  failed: '失败',
 }
 
-interface AgentState {
-  id: number
-  name: string
-  avatar: string
-  status: AgentStatus
-  task: string
+function toggleCol(status: TaskStatus) {
+  if (collapsedCols.has(status)) collapsedCols.delete(status)
+  else collapsedCols.add(status)
 }
 
-const agentStates = reactive<AgentState[]>(
-  [1, 2, 3, 4, 5].map((id) => ({
-    id,
-    name: AGENT_NAMES[id].name,
-    avatar: AGENT_NAMES[id].avatar,
-    status: 'idle' as AgentStatus,
-    task: '',
-  }))
-)
-
-const doneCount = computed(() => agentStates.filter((a) => a.status === 'done').length)
-
-function avatarSrc(name: string) {
-  return new URL(`../assets/${name}`, import.meta.url).href
+function taskCount(status: TaskStatus): number {
+  return tasks.value.filter((t) => t.status === status).length
 }
+function tasksBy(status: TaskStatus): ApiTaskItem[] {
+  return tasks.value.filter((t) => t.status === status)
+}
+function retryTask(t: ApiTaskItem) {
+  t.status = 'todo'
+  pushLog({ time: new Date().toLocaleTimeString('zh-CN', { hour12: false }), agentId: 0, agent: '系统', text: `任务 ${t.taskIdExt || t.id} 已重新排队` })
+  // TODO: 调后端 API retryTask(t.id)
+}
+
+/** 10s 轮询任务列表 */
+async function pollTasks() {
+  const projectId = Number(route.params.id)
+  if (!projectId) return
+  try {
+    const list = await fetchTasks(projectId)
+    if (list && list.length > 0) tasks.value = list
+  } catch {
+    // 后端 API 未就绪时静默，保留已有数据
+  }
+}
+
+/** 首次加载没有真实数据时，用 mock 数据填充看板 */
+function initMockTasks() {
+  if (tasks.value.length > 0) return
+  tasks.value = [
+    { id: 1, projectId: 1, phaseId: 1, title: '用户表 DDL', description: null, status: 'done', assignee: '后端开发', layer: 'backend', acceptance: null, result: null, errorMsg: null, retryCount: 0, taskIdExt: 'T1', dependsOn: null, sortOrder: 1, createTime: '', updateTime: '' },
+    { id: 2, projectId: 1, phaseId: 1, title: '登录接口 POST /api/auth/login', description: null, status: 'doing', assignee: '后端开发', layer: 'backend', acceptance: null, result: null, errorMsg: null, retryCount: 0, taskIdExt: 'T2', dependsOn: null, sortOrder: 2, createTime: '', updateTime: '' },
+    { id: 3, projectId: 1, phaseId: null, title: '用户列表页面', description: null, status: 'todo', assignee: '前端开发', layer: 'frontend', acceptance: null, result: null, errorMsg: null, retryCount: 0, taskIdExt: 'T3', dependsOn: null, sortOrder: 3, createTime: '', updateTime: '' },
+    { id: 4, projectId: 1, phaseId: null, title: '注册接口 POST /api/auth/register', description: null, status: 'failed', assignee: '后端开发', layer: 'backend', acceptance: null, result: null, errorMsg: '参数校验失败', retryCount: 1, taskIdExt: 'T4', dependsOn: null, sortOrder: 4, createTime: '', updateTime: '' },
+    { id: 5, projectId: 1, phaseId: null, title: 'JWT 拦截器', description: null, status: 'todo', assignee: '后端开发', layer: 'backend', acceptance: null, result: null, errorMsg: null, retryCount: 0, taskIdExt: 'T5', dependsOn: null, sortOrder: 5, createTime: '', updateTime: '' },
+    { id: 6, projectId: 1, phaseId: null, title: '登录页 UI', description: null, status: 'todo', assignee: '前端开发', layer: 'frontend', acceptance: null, result: null, errorMsg: null, retryCount: 0, taskIdExt: 'T6', dependsOn: null, sortOrder: 6, createTime: '', updateTime: '' },
+  ]
+}
+
+/** Agent 日志颜色 */
 function agentColor(id: number): string {
   return ['#f070a0', '#a76bff', '#5ecb8a', '#f0c060', '#5ec8c0'][id - 1] || '#8890a8'
 }
@@ -530,7 +713,7 @@ const chatUnread = ref(false)
 
 function chatReply(text: string): string {
   if (/进度|到哪|阶段|多久/.test(text)) {
-    return `当前处于${currentPhase.value || '初始阶段'}，整体进度 ${overallProgress.value}%。${doneCount.value}/${agentStates.length} 个 Agent 已完成任务。`
+    return `当前处于${currentPhase.value || '初始阶段'}，整体进度 ${overallProgress.value}%。${taskCount('done')}/${tasks.value.length} 个任务已完成。`
   }
   if (/这个文件|为什么.*写|代码/.test(text)) {
     return '后端按架构师输出的 JSON spec 生成标准 Spring Boot 分层：Controller（接口层）→ Service（业务层）→ Mapper（数据层），前端对应 views + api 封装。'
@@ -569,13 +752,14 @@ const done = ref(false)
 let eventIdx = 0
 let timer: ReturnType<typeof setTimeout> | null = null
 let startedAt = 0
+const pollTimer = ref<ReturnType<typeof setInterval> | null>(null)
 
-function pushLog(e: ExecEvent) {
+function pushLog(e: { time: string; agentId: number; agent: string; text: string }) {
   logs.value.push({
     time: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
     agentId: e.agentId,
     agent: AGENT_NAMES[e.agentId]?.name || '系统',
-    text: e.log,
+    text: e.text,
   })
   nextTick(() => {
     if (logBody.value) {
@@ -599,22 +783,16 @@ function schedule() {
 }
 
 function fire(e: ExecEvent) {
-  const agent = agentStates.find((a) => a.id === e.agentId)
-  if (agent) {
-    agent.status = e.status
-    if (e.task) agent.task = e.task
-  }
   if (e.phase) currentPhase.value = e.phase
   if (e.phaseProgress != null) overallProgress.value = e.phaseProgress
   if (e.file) {
     const node = insertFile(e.file.path, e.file.content)
     openFile(node) // 新文件自动打开 Tab
   }
-  pushLog(e)
-  if (e.status === 'done' && e.task && /完成|交付/.test(e.task)) {
-    agentStates.forEach((a) => {
-      if (a.id !== e.agentId) a.status = 'done'
-    })
+  pushLog({ time: new Date().toLocaleTimeString('zh-CN', { hour12: false }), agentId: e.agentId, agent: AGENT_NAMES[e.agentId]?.name || '系统', text: e.log })
+  if (e.task) {
+    const task = tasks.value.find((t) => t.title.includes(e.task!) || e.task!.includes(t.taskIdExt || ''))
+    if (task) task.status = e.status === 'done' ? 'done' : e.status === 'working' ? 'doing' : 'todo'
   }
 }
 
@@ -627,38 +805,94 @@ function togglePause() {
 }
 
 onMounted(async () => {
+  // 先拉一次任务列表（失败则用 mock 数据兜底）
+  await pollTasks()
+  initMockTasks()
   // 优先从数据库加载真实文件（agent 落库 sys_project_file）
   if (await loadFromDb()) {
     done.value = true
     currentPhase.value = '已完成'
     overallProgress.value = 100
-    agentStates.forEach((a) => {
-      a.status = 'done'
-      a.task = ''
-    })
-    return
-  }
-  // 数据库无文件 → 兜底：本地缓存恢复，否则 mock 时间线演示执行
-  if (restoreFiles()) {
+    tasks.value.forEach((t) => { if (t.status !== 'failed') t.status = 'done' })
+  } else if (restoreFiles()) {
     done.value = true
     currentPhase.value = '已完成'
     overallProgress.value = 100
-    agentStates.forEach((a) => {
-      a.status = 'done'
-      a.task = ''
-    })
-    return
+    tasks.value.forEach((t) => { if (t.status !== 'failed') t.status = 'done' })
+  } else {
+    startedAt = performance.now()
+    timer = setTimeout(schedule, 100)
   }
-  startedAt = performance.now()
-  timer = setTimeout(schedule, 100)
+  // 启动 10s 轮询：文件 + 任务（Agent 可能后续生成新文件或更新任务状态）
+  pollTimer.value = setInterval(() => {
+    pollFiles()
+    pollTasks()
+  }, 10000)
 })
 
 onBeforeUnmount(() => {
   if (timer) clearTimeout(timer)
+  if (pollTimer.value) clearInterval(pollTimer.value)
 })
 
 function viewOverview() {
   router.push({ name: 'project-detail', params: { id: String(route.params.id) } })
+}
+
+// ===== 10s 轮询：文件列表 + 当前 Tab（Agent 修改后自动刷新） =====
+
+/** 保存当前目录展开状态 */
+function saveOpenPaths(nodes: FileNode[]): Set<string> {
+  const paths = new Set<string>()
+  function walk(list: FileNode[]) {
+    for (const n of list) {
+      if (n.type === 'dir') {
+        if (n.open) paths.add(n.path)
+        if (n.children) walk(n.children)
+      }
+    }
+  }
+  walk(nodes)
+  return paths
+}
+
+/** 恢复目录展开状态 */
+function restoreOpenPaths(nodes: FileNode[], openPaths: Set<string>) {
+  for (const n of nodes) {
+    if (n.type === 'dir') {
+      if (openPaths.has(n.path)) n.open = true
+      if (n.children) restoreOpenPaths(n.children, openPaths)
+    }
+  }
+}
+
+/** 轮询：刷新文件树 + 当前 Tab 内容（用户修改的不覆盖） */
+async function pollFiles() {
+  const projectId = Number(route.params.id)
+  if (!projectId) return
+  try {
+    // 保存展开 → 重建树 → 恢复展开（避免目录折叠）
+    const openPaths = saveOpenPaths(fileTree.value)
+    const list = await fetchProjectFiles(projectId)
+    if (list && list.length > 0) {
+      fileTree.value = buildTreeFromVO(list)
+      restoreOpenPaths(fileTree.value, openPaths)
+      persistFiles()
+    }
+
+    // 轮询当前 Tab：非用户修改的文件自动更新内容
+    if (activeFile.value && activeFile.value.id && !activeFile.value.userModified) {
+      const vo = await fetchProjectFileDetail(activeFile.value.id)
+      if (vo.fileContent && vo.fileContent !== activeFile.value.content) {
+        activeFile.value.content = vo.fileContent
+        // 同步更新 tabs 数组中对应 tab 的内容
+        const tab = tabs.value.find(t => t.path === activeFile.value?.path)
+        if (tab) tab.content = vo.fileContent
+      }
+    }
+  } catch {
+    // 静默失败，下次轮询继续
+  }
 }
 </script>
 
@@ -888,6 +1122,67 @@ function viewOverview() {
   text-transform: none;
   letter-spacing: 0;
 }
+
+/* ===== 确认模式选择器（PM 对话区） ===== */
+.mode-selector {
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+.mode-label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text3);
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.mode-options {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 6px;
+}
+.mode-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 5px 0;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--bg3);
+  color: var(--text2);
+  font-size: 11.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.mode-btn:hover {
+  border-color: var(--border2);
+  color: var(--text);
+}
+.mode-btn.active {
+  border-color: var(--blue);
+  color: var(--blue);
+  background: rgba(69, 184, 255, 0.06);
+}
+.mode-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.mode-hint {
+  font-size: 10.5px;
+  color: var(--text3);
+  line-height: 1.5;
+  padding-left: 2px;
+}
+
 .side-scroll {
   flex: 1;
   overflow-y: auto;
@@ -1097,7 +1392,9 @@ function viewOverview() {
   from { opacity: 0; }
   to { opacity: 1; }
 }
-.right-scroll {
+
+/* ===== 任务看板 ===== */
+.kanban {
   flex: 1;
   overflow-y: auto;
   padding: 10px;
@@ -1105,71 +1402,258 @@ function viewOverview() {
   flex-direction: column;
   gap: 8px;
 }
-.agent-row {
+.kanban-col {
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+.kanban-col-head {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 9px 10px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  background: var(--bg3);
-  transition: all 0.2s;
-}
-.agent-row.working {
-  border-color: rgba(69, 184, 255, 0.4);
-}
-.agent-row.done {
-  border-color: rgba(94, 203, 138, 0.25);
-}
-.agent-avatar {
-  position: relative;
-  width: 30px;
-  height: 30px;
-  border-radius: 9px;
-  overflow: hidden;
-  flex-shrink: 0;
-  border: 1px solid var(--border);
-}
-.agent-avatar img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-.agent-dot {
-  position: absolute;
-  right: -1px;
-  bottom: -1px;
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  border: 2px solid var(--bg3);
-}
-.agent-dot.idle { background: var(--text3); }
-.agent-dot.working { background: var(--blue); animation: pulse 1.2s infinite; }
-.agent-dot.done { background: var(--green); }
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.3; }
-}
-.agent-info {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  min-width: 0;
-}
-.agent-name {
-  font-size: 12.5px;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
   font-weight: 600;
+  color: var(--text2);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s;
 }
-.agent-task {
+.kanban-col-head:hover {
+  background: rgba(69, 184, 255, 0.04);
+}
+.kanban-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.kanban-dot.todo { background: var(--text3); }
+.kanban-dot.doing { background: var(--blue); }
+.kanban-dot.done { background: var(--green); }
+.kanban-dot.failed { background: var(--red); }
+.kanban-count {
+  margin-left: auto;
   font-size: 11px;
   color: var(--text3);
-  white-space: nowrap;
+  font-weight: 400;
+}
+.kanban-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+}
+.kanban-card {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 8px;
+  border-radius: 7px;
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  font-size: 12px;
+  transition: all 0.15s;
+}
+.kanban-card.doing {
+  border-color: rgba(69, 184, 255, 0.35);
+  background: rgba(69, 184, 255, 0.06);
+}
+.kanban-card.done {
+  border-color: rgba(94, 203, 138, 0.25);
+  opacity: 0.7;
+}
+.kanban-card.failed {
+  border-color: rgba(242, 96, 96, 0.35);
+  background: rgba(242, 96, 96, 0.06);
+}
+.kanban-title {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.agent-row.working .agent-task { color: var(--blue); }
-.agent-row.done .agent-task { color: var(--green); }
+.kanban-assignee {
+  font-size: 10px;
+  color: var(--text3);
+  flex-shrink: 0;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--bg3);
+}
+.kanban-retry {
+  border: none;
+  background: transparent;
+  color: var(--red);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0 2px;
+  line-height: 1;
+}
+.kanban-retry:hover {
+  color: #ff8080;
+}
+.kanban-arrow {
+  font-size: 10px;
+  transition: transform 0.2s;
+  margin-left: auto;
+}
+.kanban-arrow.collapsed {
+  transform: rotate(-90deg);
+}
+
+/* ===== 任务详情弹窗 ===== */
+.task-detail-modal {
+  width: 480px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+}
+.modal-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 16px;
+}
+.modal-head h2 {
+  font-size: 16px;
+  font-weight: 700;
+  margin: 0;
+}
+.modal-close {
+  border: none;
+  background: transparent;
+  color: var(--text3);
+  font-size: 16px;
+  cursor: pointer;
+  padding: 4px;
+}
+.modal-close:hover {
+  color: var(--text);
+}
+.modal-body {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.detail-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+.detail-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+}
+.detail-label {
+  font-size: 11px;
+  color: var(--text3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.detail-value {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+.detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.detail-section .detail-label {
+  font-size: 11px;
+  text-transform: uppercase;
+}
+.detail-text {
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--text2);
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.detail-text.result {
+  border-color: rgba(94, 203, 138, 0.25);
+}
+.detail-text.error {
+  border-color: rgba(242, 96, 96, 0.3);
+  color: var(--red);
+}
+.btn-retry {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 18px;
+  height: 36px;
+  border-radius: 8px;
+  border: 1px solid var(--red);
+  background: rgba(242, 96, 96, 0.1);
+  color: var(--red);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-retry:hover {
+  background: rgba(242, 96, 96, 0.2);
+}
+
+/* ===== 弹窗遮罩 + 通用 modal（与项目其他页面一致） ===== */
+.modal-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(8, 11, 17, 0.7);
+  backdrop-filter: blur(4px);
+}
+.modal {
+  background: var(--bg2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 24px;
+}
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.btn-cancel {
+  padding: 0 18px;
+  height: 36px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text2);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-cancel:hover {
+  border-color: var(--border2);
+  color: var(--text);
+}
 
 /* ===== 底部日志面板 ===== */
 .log-resize-wrap {

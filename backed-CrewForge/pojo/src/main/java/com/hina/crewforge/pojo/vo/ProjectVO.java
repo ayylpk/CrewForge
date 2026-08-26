@@ -4,14 +4,15 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 import java.time.LocalDateTime;
 
+/**
+ * 项目返回体
+ * ⚠️ 砍掉团队功能后：移除 tenantId / projectType
+ */
 @Data
 @AllArgsConstructor
 @NoArgsConstructor
 public class ProjectVO {
     private Long id;
-    private Long tenantId;
-    /** 项目类型: 1-个人项目, 2-团队项目 */
-    private Integer projectType;
     private String name;
     private String description;
     private String clarifiedReq;

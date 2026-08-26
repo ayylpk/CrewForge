@@ -10,15 +10,8 @@ export interface PageResult<T> {
 }
 
 export function fetchProjects(): Promise<PageResult<Project>> {
-  // userId 后端从 JWT 取，前端不传
   return request.get('/api/project', {
-    params: { page: 1, pageSize: 20, projectType: 1 },
-  }) as Promise<PageResult<Project>>
-}
-
-export function fetchTeamProjects(tenantId: number): Promise<PageResult<Project>> {
-  return request.get('/api/project', {
-    params: { page: 1, pageSize: 20, projectType: 2, tenantId },
+    params: { page: 1, pageSize: 20 },
   }) as Promise<PageResult<Project>>
 }
 
@@ -46,15 +39,5 @@ export function createProject(dto: ProjectCreateDTO): Promise<void> {
   return request.post('/api/project', {
     ...dto,
     confirmMode: CONFIRM_MAP[dto.confirmMode],
-    projectType: 1,
-  }) as Promise<void>
-}
-
-export function createTeamProject(dto: ProjectCreateDTO, tenantId: number): Promise<void> {
-  return request.post('/api/project', {
-    ...dto,
-    confirmMode: CONFIRM_MAP[dto.confirmMode],
-    projectType: 2,
-    tenantId,
   }) as Promise<void>
 }

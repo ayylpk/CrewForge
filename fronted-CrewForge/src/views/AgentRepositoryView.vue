@@ -9,7 +9,7 @@
         </div>
       </div>
       <div class="topbar-center">
-        <WorkspaceSwitcher :current="'personal'" @switch="switchWs" />
+        <!-- 砍掉团队功能后，不再显示 WorkspaceSwitcher -->
       </div>
       <div class="topbar-right">
         <button class="btn-back" @click="router.back()">← 返回</button>
@@ -94,7 +94,6 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { fetchAgentPool, deleteAgentPool } from '../api/agentPools'
 import type { agentPoolVO } from '../types/agent'
-import WorkspaceSwitcher from '../components/WorkspaceSwitcher.vue'
 import EmptyState from '../components/EmptyState.vue'
 
 const router = useRouter()
@@ -196,15 +195,6 @@ async function remove(a: agentPoolVO) {
 }
 
 onMounted(load)
-
-/** 工作区切换：个人 ↔ 团队 */
-function switchWs(ws: 'personal' | 'team') {
-  if (ws === 'personal') {
-    router.push('/projects')
-  } else {
-    router.push('/teams')
-  }
-}
 </script>
 
 <style scoped>

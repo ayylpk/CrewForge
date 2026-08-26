@@ -6,8 +6,10 @@ import java.time.LocalDateTime;
 
 /**
  * 项目 (sys_project)
- * 用户创建的 AI 编程项目, 一个项目属于一个团队
+ * 用户创建的 AI 编程项目, 一个项目属于一个用户
  * 包含需求 → 澄清 → 规划 → 执行 全过程的产物快照
+ *
+ * ⚠️ 砍掉团队功能后：移除了 tenantId / projectType，每个项目直属于创建人
  */
 @Data
 @TableName("sys_project")
@@ -20,18 +22,9 @@ public class Project {
     /** 确认模式: 手动(每一步人工确认) */
     public static final Integer CONFIRM_MODE_MANUAL = 2;
 
-    /** 项目类型: 个人项目(挂在创建人名下, 不属团队) */
-    public static final Integer PROJECT_TYPE_PERSONAL = 1;
-    /** 项目类型: 团队项目(属于团队工作区) */
-    public static final Integer PROJECT_TYPE_TEAM = 2;
-
     /** 项目ID */
     @TableId(type = IdType.AUTO)
     private Long id;
-    /** 所属团队ID(NULL=个人项目) */
-    private Long tenantId;
-    /** 项目类型: 1-个人项目, 2-团队项目(见常量 PROJECT_TYPE_*) */
-    private Integer projectType;
     /** 项目名称 */
     private String name;
     /** 项目描述(原始需求) */

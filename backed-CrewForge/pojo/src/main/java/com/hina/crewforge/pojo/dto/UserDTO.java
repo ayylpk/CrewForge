@@ -6,8 +6,7 @@ import lombok.NoArgsConstructor;
 
 /**
  * 用户新增/修改请求
- * 说明: 用户-团队是多对多(见 sys_user_tenant)，不再有单个 tenantId；
- *       创建用户时通过 teamId 加入一个团队，roleId 分配一个角色
+ * ⚠️ 砍掉团队功能后：移除 teamId；砍掉 RBAC 后：移除 roleId
  */
 @Data
 @AllArgsConstructor
@@ -31,10 +30,4 @@ public class UserDTO {
 
     /** 状态: 1-启用, 0-禁用 */
     private Integer status;
-
-    /** 加入的团队 ID（可选，不传则创建后不加入任何团队，后续再关联） */
-    private Long teamId;
-
-    /** 角色 ID（可选，默认 3=viewer） */
-    private Long roleId;
 }

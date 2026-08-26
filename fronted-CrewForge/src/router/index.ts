@@ -7,10 +7,6 @@ const router = createRouter({
   routes: [
     { path: '/login', name: 'login', component: LoginView },
     { path: '/projects', name: 'projects', component: ProjectsView },
-    // 团队空间（与个人空间平级）
-    { path: '/teams', name: 'teams', component: () => import('../views/TeamWorkspaceView.vue') },
-    // 团队详情（进入团队后的工作区）
-    { path: '/teams/:id', name: 'team-detail', component: () => import('../views/TeamDetailView.vue') },
     // Agent 仓库（自定义 Agent 池管理）
     { path: '/agents', name: 'agent-repo', component: () => import('../views/AgentRepositoryView.vue') },
     // Agent 表单（新建仓库 Agent）
@@ -31,7 +27,7 @@ const router = createRouter({
       name: 'architect',
       component: () => import('../views/ArchitectView.vue'),
     },
-    // 团队配置页（AI 预设 + 合并/添加）
+    // 团队配置页（AI Agent 团队 — 成员/模型/提示词）
     {
       path: '/projects/:id/team',
       name: 'team',

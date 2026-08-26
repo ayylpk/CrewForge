@@ -7,7 +7,6 @@ export const useUserStore = defineStore('user', {
   state: () => ({
     token: localStorage.getItem('cf_token') || '',
     username: localStorage.getItem('cf_username') || 'admin',
-    tenantId: 1,
   }),
   getters: {
     isLoggedIn: (state) => !!state.token,

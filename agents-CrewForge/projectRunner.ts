@@ -25,7 +25,7 @@ import { BackendEngineer } from "./backendEngineer";
 import { FrontendEngineer } from "./frontendEngineer";
 import { TestEngineer } from "./testEngineer";
 import { Maintainer } from "./maintainer";
-import { getProjectAgents, getProjectNodes, getEdges } from "./Node";
+import { getProjectAgents, getProjectNodes, getEdges, getProjectConfirmMode } from "./Node";
 import { CliQuestioner, type Questioner } from "./GraphFactory";
 
 
@@ -94,12 +94,25 @@ export async function runProject(projectId: number, questioner: Questioner): Pro
     for (const manager of managers) {
         const thread = `project-${projectId}`;
         let state: any = await manager.run({ messages: [], projectId }, thread, questioner);
+        // 读取项目确认模式：全绿灯(0) → 一次都不确认，自动定稿
+        let confirmMode = 0;
+        try { confirmMode = await getProjectConfirmMode(projectId); } catch { /* 默认 0 */ }
+        const isAuto = confirmMode === 0;
+        if (isAuto) console.log("[runner] 全绿灯模式：自动推进，无需人工确认");
+
         let turns = 0;
         while (!state?.flag && turns < 30) {
             const reply = state?.messages?.at(-1);
             if (reply) {
                 const text = typeof reply.content === "string" ? reply.content : JSON.stringify(reply.content);
                 console.log(`\n[PM] ${text}`);
+            }
+            // 全绿灯模式：自动输入"定稿"跳过 PM 对话
+            if (isAuto) {
+                console.log("[runner] 全绿灯模式：自动定稿");
+                state = await manager.run({ messages: [new HumanMessage("定稿")], projectId }, thread, questioner);
+                turns++;
+                continue;
             }
             const userInput = await questioner.ask({
                 questionId: `pm-${projectId}-${turns}`,

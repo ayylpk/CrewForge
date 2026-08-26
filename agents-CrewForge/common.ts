@@ -75,3 +75,11 @@ export function writeWorkspace(relative: string, code: string): string {
     console.warn("[writeWorkspace] 代码落库失败:", (e as Error).message));
   return full;
 }
+
+/** 读盘：从 DB 读取当前项目已存在的文件内容（用于 agent 追加修改时参考） */
+export async function readWorkspace(relative: string): Promise<string | null> {
+  const pid = currentProjectId();
+  if (pid == null) return null;
+  const { readProjectFile } = await import("./Node");
+  return readProjectFile(pid, relative);
+}

@@ -18,7 +18,7 @@ import { BaseAgent } from "./BaseAgent";
 import { roles, type TransferStation, WorkQueue } from "./Hub";
 import { initModels } from "./models";
 import { invokeWithTimeout } from "./llm";
-import { writeWorkspace, type ExecTask } from "./common";
+import { writeWorkspace, readWorkspace, type ExecTask } from "./common";
 import { nodePrompt, type Node } from "./Node";
 
 const BACKEND_MODEL_JSON = JSON.stringify({
@@ -168,14 +168,26 @@ export class BackendEngineer extends BaseAgent {
                 continue;
             }
 
-            const code = await this.generateCode(task, pseudo);
-            if (!code) {
+            // 逐文件生成（对齐 frontendEngineer）：每个文件单独一次 LLM 调用，
+            // 任务内已生成文件注入记忆，实现跨文件衔接（同任务后写的文件能看到先写的）
+            const writtenFiles = new Map<string, string>();
+            const implementation: { filePath: string; code: string }[] = [];
+            let failed = false;
+
+            for (const filePath of task.files) {
+                const code = await this.generateFile(task, pseudo, filePath, writtenFiles);
+                if (!code) { failed = true; break; }
+                implementation.push({ filePath, code });
+            }
+
+            if (failed) {
                 console.log(`[${this.name}] ${task.id} 代码生成失败，上报合并器`);
                 this.send("merger", { type: "task_result", task, success: false });
                 continue;
             }
-            for (const fp of task.files) {
-                const full = writeWorkspace(fp, code);
+            for (const f of implementation) {
+                const full = writeWorkspace(f.filePath, f.code);
+                writtenFiles.set(f.filePath, f.code);
                 console.log(`已写入 ${full}`);
             }
             console.log(`[${this.name}] ${task.id} 后端实现已写入 workspace/`);
@@ -183,11 +195,32 @@ export class BackendEngineer extends BaseAgent {
         }
     }
 
-    private async generateCode(task: ExecTask, pseudo: string | null): Promise<string | null> {
+    private async generateFile(
+        task: ExecTask,
+        pseudo: string | null,
+        filePath: string,
+        writtenFiles: Map<string, string>,
+    ): Promise<string | null> {
         const model = initModels(BACKEND_MODEL_JSON);
-        const hint = pseudo
+        // 本任务内先写的文件注入，供跨文件衔接（避免重复实现或引用不存在的函数）
+        const taskExisting = [...writtenFiles.entries()]
+            .filter(([knownPath]) => task.files.includes(knownPath))
+            .map(([knownPath, knownCode]) => `--- ${knownPath} ---\n${knownCode}`)
+            .join("\n");
+        const taskExistingPrompt = taskExisting ? `\n\n## 本任务已生成的文件（供衔接，不要重复实现）\n${taskExisting}` : "";
+        // 读取现有文件内容（追加修改时参考：当前文件）
+        let existingPrompt = "";
+        try {
+            const existing = await readWorkspace(filePath);
+            if (existing) {
+                existingPrompt = `\n\n## 现有代码（在此之上修改/追加，保留所有已有功能，不要只输出新增部分）\n\`\`\`\n${existing.slice(0, 20000)}\n\`\`\``;
+            }
+        } catch { /* 静默失败，无旧内容也正常 */ }
+        const pseudoHint = pseudo
             ? `\n\n## 伪代码骨架（必须严格遵循，补全实现体）\n${pseudo}`
             : "\n\n## 提示\n伪代码生成失败，请一次性输出完整可运行的源代码。";
+        // 只看当前一个文件的契约与提示词（提示词本身按"目标文件 files 中的文件"措辞，缩小到单文件即逐文件产出）
+        const fileTask = { ...task, files: [filePath] };
         let feedback = "";
         for (let attempt = 1; attempt <= 3; attempt++) {
             const ts = Date.now();
@@ -195,9 +228,12 @@ export class BackendEngineer extends BaseAgent {
                 const res = await invokeWithTimeout<any>(`${task.id} 代码`, 120_000, sig => model.invoke([
                     new SystemMessage(
                         this.codePrompt +
-                        `\n\n## 当前任务\n${JSON.stringify(task, null, 2)}` +
+                        `\n\n## 当前任务\n${JSON.stringify(fileTask, null, 2)}` +
+                        `\n\n## 当前目标文件\n${filePath}` +
                         `\n\n## 项目路径\nworkspace` +
-                        hint +
+                        taskExistingPrompt +
+                        existingPrompt +
+                        pseudoHint +
                         feedback
                     ),
                 ], { signal: sig }));

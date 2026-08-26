@@ -9,47 +9,35 @@ import com.hina.crewforge.common.exception.AccountNotFoundException;
 import com.hina.crewforge.common.exception.BaseException;
 import com.hina.crewforge.common.exception.ParamErrorException;
 import com.hina.crewforge.common.result.PageResult;
-import com.hina.crewforge.mapper.TenantMapper;
 import com.hina.crewforge.mapper.UserMapper;
-import com.hina.crewforge.mapper.UserRoleMapper;
-import com.hina.crewforge.mapper.UserTenantMapper;
 import com.hina.crewforge.pojo.QueryParam.UserQueryParam;
 import com.hina.crewforge.pojo.dto.UserDTO;
-import com.hina.crewforge.pojo.entity.Tenant;
 import com.hina.crewforge.pojo.entity.User;
-import com.hina.crewforge.pojo.entity.UserRole;
-import com.hina.crewforge.pojo.entity.UserTenant;
 import com.hina.crewforge.pojo.vo.UserVO;
 import com.hina.crewforge.service.UserService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
-import java.util.Collections;
 import java.util.List;
-import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
  * 用户管理服务实现
- *
- * 多对多说明: 用户不绑死单个团队，创建时可选 teamId 关联一个团队；
- *             用户的团队列表通过 sys_user_tenant 查询，显示时批量组装
+ * ⚠️ 砍掉团队功能后：移除 fillTeams / TenantMapper / UserTenantMapper 依赖
+ * ⚠️ 砍掉 RBAC 后：移除角色分配逻辑
  */
 @Service
 @RequiredArgsConstructor
 @Slf4j
 public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements UserService {
 
-    /** 默认角色 ID: 3 = viewer（见 SQL 种子数据 sys_role） */
-    private static final Long DEFAULT_ROLE_ID = 3L;
-
-    private final UserTenantMapper userTenantMapper;
-    private final TenantMapper tenantMapper;
-    private final UserRoleMapper userRoleMapper;
+    @Autowired
+    private UserMapper userMapper;
 
     /** BCrypt 编码器（无状态，可安全复用单实例） */
     private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
@@ -72,9 +60,8 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         // PageHelper 拦截后返回的 List 实际是 Page 对象, 强转取 total
         Page<User> p = (Page<User>) users;
 
-        // 3. 组装返回（附带每个用户的团队列表）
+        // 3. 组装返回
         List<UserVO> vos = p.getResult().stream().map(this::toVO).collect(Collectors.toList());
-        fillTeams(vos);
 
         return new PageResult<>(p.getTotal(), vos);
     }
@@ -99,22 +86,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         user.setStatus(dto.getStatus() == null ? 1 : dto.getStatus());
         baseMapper.insert(user);
 
-        // 3. 可选: 加入团队（sys_user_tenant，状态=正常成员）
-        if (dto.getTeamId() != null) {
-            UserTenant ut = new UserTenant();
-            ut.setUserId(user.getId());
-            ut.setTenantId(dto.getTeamId());
-            ut.setStatus(1);
-            userTenantMapper.insert(ut);
-        }
-
-        // 4. 分配角色（默认 viewer）
-        UserRole ur = new UserRole();
-        ur.setUserId(user.getId());
-        ur.setRoleId(dto.getRoleId() == null ? DEFAULT_ROLE_ID : dto.getRoleId());
-        userRoleMapper.insert(ur);
-
-        log.info("创建用户: id={}, username={}, teamId={}", user.getId(), user.getUsername(), dto.getTeamId());
+        log.info("创建用户: id={}, username={}", user.getId(), user.getUsername());
     }
 
     @Override
@@ -148,14 +120,12 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         if (user == null) {
             throw new AccountNotFoundException();
         }
-        UserVO vo = toVO(user);
-        fillTeams(Collections.singletonList(vo));
-        return vo;
+        return toVO(user);
     }
 
     /* ========== 私有工具 ========== */
 
-    /** 实体 → VO（不含团队列表） */
+    /** 实体 → VO */
     private UserVO toVO(User user) {
         UserVO vo = new UserVO();
         vo.setId(user.getId());
@@ -166,40 +136,5 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements Us
         vo.setStatus(user.getStatus());
         vo.setCreateTime(user.getCreateTime());
         return vo;
-    }
-
-    /**
-     * 批量组装用户的团队列表（一次查询 N 条，避免循环查库）
-     * 流程: 查关联表(sys_user_tenant) → 批量查团队名(sys_tenant) → 按 userId 分组填入 VO
-     */
-    private void fillTeams(List<UserVO> vos) {
-        if (vos.isEmpty()) {
-            return;
-        }
-        List<Long> userIds = vos.stream().map(UserVO::getId).collect(Collectors.toList());
-
-        // 1. 查全部关联（user_id in ...）
-        List<UserTenant> uts = userTenantMapper.selectList(
-                new LambdaQueryWrapper<UserTenant>().in(UserTenant::getUserId, userIds));
-        if (uts.isEmpty()) {
-            return;
-        }
-
-        // 2. userId → [teamIds] 分组
-        Map<Long, List<Long>> userIdToTeamIds = uts.stream().collect(Collectors.groupingBy(
-                UserTenant::getUserId,
-                Collectors.mapping(UserTenant::getTenantId, Collectors.toList())));
-
-        // 3. 批量查团队名，teamId → teamName 映射
-        List<Long> teamIds = uts.stream().map(UserTenant::getTenantId).distinct().collect(Collectors.toList());
-        Map<Long, String> teamIdToName = tenantMapper.selectBatchIds(teamIds).stream()
-                .collect(Collectors.toMap(Tenant::getId, Tenant::getName));
-
-        // 4. 填入每个 VO
-        for (UserVO vo : vos) {
-            List<Long> ids = userIdToTeamIds.getOrDefault(vo.getId(), Collections.emptyList());
-            vo.setTeamIds(ids);
-            vo.setTeamNames(ids.stream().map(teamIdToName::get).collect(Collectors.toList()));
-        }
     }
 }

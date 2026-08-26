@@ -135,8 +135,6 @@ export interface agentPoolQueryParam {
 export interface agentQueryParam {
   page?: number
   pageSize?: number
-  /** 团队 ID（后端 SQL 未使用，实际按 projectId 过滤） */
-  tenantId?: number
   /** 项目 ID（实际过滤条件） */
   projectId: number
   /** 模糊匹配 name/role */

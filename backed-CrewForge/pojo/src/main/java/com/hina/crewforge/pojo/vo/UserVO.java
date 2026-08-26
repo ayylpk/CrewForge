@@ -9,6 +9,7 @@ import java.util.List;
 
 /**
  * 用户返回体（列表/详情用）
+ * ⚠️ 砍掉团队功能后：移除 teamIds / teamNames
  */
 @Data
 @AllArgsConstructor
@@ -21,10 +22,4 @@ public class UserVO {
     private String phone;
     private Integer status;
     private LocalDateTime createTime;
-
-    /** 所属团队 ID 列表（多对多） */
-    private List<Long> teamIds;
-
-    /** 所属团队名称列表（展示用） */
-    private List<String> teamNames;
 }

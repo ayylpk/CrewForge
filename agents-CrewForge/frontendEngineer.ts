@@ -19,7 +19,7 @@ import { BaseAgent } from "./BaseAgent";
 import { roles, type TransferStation, WorkQueue } from "./Hub";
 import { initModels } from "./models";
 import { invokeWithTimeout } from "./llm";
-import { writeWorkspace, type ExecTask } from "./common";
+import { writeWorkspace, readWorkspace, type ExecTask } from "./common";
 import { nodePrompt, type Node } from "./Node";
 
 const FRONTEND_MODEL_JSON = JSON.stringify({
@@ -219,6 +219,14 @@ export class FrontendEngineer extends BaseAgent {
             .map(([knownPath, knownCode]) => `--- ${knownPath} ---\n${knownCode}`)
             .join("\n");
         const existingContent = existing ? `\n\n## 已存在的文件\n${existing}` : "";
+        // 读取 DB 中该文件的现有内容（追加修改时参考）
+        let dbExistingPrompt = "";
+        try {
+            const dbExisting = await readWorkspace(filePath);
+            if (dbExisting) {
+                dbExistingPrompt = `\n\n## 文件现有内容（在此之上修改/追加，保留所有已有功能，不要只输出新增部分）\n\`\`\`\n${dbExisting.slice(0, 20000)}\n\`\`\``;
+            }
+        } catch { /* 静默失败，无旧内容也正常 */ }
         const designHint = design ? `\n\n## 页面设计稿（接口字段/组件结构必须照抄）\n${design}` : "";
         const fileTask = { ...task, files: [filePath] };
 
@@ -232,6 +240,7 @@ export class FrontendEngineer extends BaseAgent {
                         `\n\n## 当前子任务\n${JSON.stringify(fileTask, null, 2)}` +
                         designHint +
                         existingContent +
+                        dbExistingPrompt +
                         `\n\n## 主题变量\n${DEFAULT_THEME}\n\n## 请求封装\n${DEFAULT_REQUEST}` +
                         feedback
                     ),

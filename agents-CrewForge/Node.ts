@@ -39,7 +39,8 @@ const INITFUNCTIONS:Record<string,any> = {
 const pool = mysql.createPool({
     host: "localhost",
     user: "root",
-    password: "qwer1016LPK",
+    // DB 密码从 .env 读取（bun 自动加载），禁止硬编码明文入库
+    password: process.env.DB_PASSWORD ?? "",
     database: "crewforge",
 })
 
@@ -231,6 +232,27 @@ export async function upsertProjectFile(projectId: number, filePath: string, con
     // agent 修改 → 通知 Java 清缓存（查询侧每次写缓存，仅修改侧清；失败不阻塞）
     fetch(`http://localhost:8080/api/projectfile/cache/clear/${projectId}`, { method: "POST" })
         .catch(() => { /* 后端未启动等场景忽略 */ });
+}
+
+/** 读取项目文件内容（从 sys_project_file），用于 agent 修改前查看旧内容 */
+export async function readProjectFile(projectId: number, filePath: string): Promise<string | null> {
+    if (!projectId || !filePath) return null;
+    const [rows] = await pool.query<RowDataPacket[]>(
+        "SELECT file_content FROM sys_project_file WHERE project_id = ? AND file_path = ? AND deleted = 0 LIMIT 1",
+        [projectId, filePath],
+    );
+    return rows.length > 0 ? (rows[0]!.file_content ?? null) : null;
+}
+
+/** 读取项目确认模式（sys_project.confirm_mode），用于判断是否弹出确认门 */
+export async function getProjectConfirmMode(projectId: number): Promise<number> {
+    if (!projectId) return 0;
+    const [rows] = await pool.query<RowDataPacket[]>(
+        "SELECT confirm_mode FROM sys_project WHERE id = ? AND deleted = 0 LIMIT 1",
+        [projectId],
+    );
+    if (!rows || rows.length === 0) return 0;
+    return rows[0]!.confirm_mode ?? 0;
 }
 
 export function initNode(nodeInformation: Node): GraphNode<any> {

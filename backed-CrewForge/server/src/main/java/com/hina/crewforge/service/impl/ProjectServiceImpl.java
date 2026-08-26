@@ -12,8 +12,6 @@ import com.hina.crewforge.common.exception.BaseException;
 import com.hina.crewforge.common.result.PageResult;
 import com.hina.crewforge.mapper.ProjectFileMapper;
 import com.hina.crewforge.mapper.ProjectMapper;
-import com.hina.crewforge.mapper.UserTenantMapper;
-import com.hina.crewforge.pojo.entity.UserTenant;
 import com.hina.crewforge.pojo.QueryParam.ProjectQueryParam;
 import com.hina.crewforge.pojo.dto.ProjectDTO;
 import com.hina.crewforge.pojo.entity.Project;
@@ -26,12 +24,17 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 @Service
 @Slf4j
@@ -40,29 +43,16 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
     @Autowired
     private ProjectFileMapper projectFileMapper;
     @Autowired
-    private UserTenantMapper userTenantMapper;
-    @Autowired
     private ObjectMapper objectMapper;
 
     /**
-     * 所有权校验（防 API 越权，与是否带 X-Tenant-Id 无关）：
-     * · 个人项目: 只能操作自己创建的
-     * · 团队项目: 必须是项目所属团队的成员(sys_user_tenant status=1)
+     * 所有权校验：只能操作自己创建的项目
+     * ⚠️ 砍掉团队功能后：简化，不再查团队归属
      */
     private void checkOwnership(Project existing, String action) {
         Long currentUserId = BaseContext.getCurrentUserId();
-        if (Project.PROJECT_TYPE_PERSONAL.equals(existing.getProjectType())) {
-            if (!existing.getCreateUser().equals(currentUserId)) {
-                throw new BaseException("无权" + action + "他人项目");
-            }
-            return;
-        }
-        Long cnt = userTenantMapper.selectCount(new LambdaQueryWrapper<UserTenant>()
-                .eq(UserTenant::getUserId, currentUserId)
-                .eq(UserTenant::getTenantId, existing.getTenantId())
-                .eq(UserTenant::getStatus, 1));
-        if (cnt == null || cnt == 0) {
-            throw new BaseException("你不属于该项目所属团队，无权" + action);
+        if (!existing.getCreateUser().equals(currentUserId)) {
+            throw new BaseException("无权" + action + "他人项目");
         }
     }
 
@@ -71,18 +61,9 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
         // 1. PageHelper 分页（只对紧接着的第一次查询生效）
         PageHelper.startPage(projectQueryParam.getPage(), projectQueryParam.getPageSize());
 
-        // 2. 按查询类型拼过滤条件: 个人项目按 create_user(JWT 身份), 团队项目按 tenant_id
+        // 2. 按当前用户过滤（只查自己的项目）
         LambdaQueryWrapper<Project> wrapper = new LambdaQueryWrapper<>();
-        if (Project.PROJECT_TYPE_PERSONAL.equals(projectQueryParam.getProjectType())) {
-            wrapper.eq(Project::getProjectType, Project.PROJECT_TYPE_PERSONAL);
-            // ⚠️ 不信任前端传的 userId, 从 JWT 解析当前登录用户
-            wrapper.eq(Project::getCreateUser, BaseContext.getCurrentUserId());
-        } else if (Project.PROJECT_TYPE_TEAM.equals(projectQueryParam.getProjectType())) {
-            wrapper.eq(Project::getProjectType, Project.PROJECT_TYPE_TEAM);
-            if (projectQueryParam.getTenantId() != null) {
-                wrapper.eq(Project::getTenantId, projectQueryParam.getTenantId());
-            }
-        }
+        wrapper.eq(Project::getCreateUser, BaseContext.getCurrentUserId());
         // 3. 关键词(项目名称) + 状态过滤
         if (StringUtils.hasText(projectQueryParam.getKeyword())) {
             wrapper.like(Project::getName, projectQueryParam.getKeyword());
@@ -104,16 +85,6 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
 
     @Override
     public void create(ProjectDTO dto) {
-        // 团队项目: 必须属于该团队才能往里建（防往任意团队塞项目）
-        if (Project.PROJECT_TYPE_TEAM.equals(dto.getProjectType())) {
-            Long cnt = userTenantMapper.selectCount(new LambdaQueryWrapper<UserTenant>()
-                    .eq(UserTenant::getUserId, BaseContext.getCurrentUserId())
-                    .eq(UserTenant::getTenantId, dto.getTenantId())
-                    .eq(UserTenant::getStatus, 1));
-            if (cnt == null || cnt == 0) {
-                throw new BaseException("你不属于该团队，无法创建团队项目");
-            }
-        }
         Project project = new Project();
         BeanUtils.copyProperties(dto, project);
         LocalDateTime now = LocalDateTime.now();
@@ -121,10 +92,7 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
         project.setUpdateTime(now);
         // ⚠️ 不信任前端传的 createUser, 从 JWT 解析当前登录用户
         project.setCreateUser(BaseContext.getCurrentUserId());
-        // 默认值: 个人项目 + 草稿状态 + 混合确认模式
-        if (project.getProjectType() == null) {
-            project.setProjectType(Project.PROJECT_TYPE_PERSONAL);
-        }
+        // 默认值: 草稿状态 + 混合确认模式
         if (project.getStatus() == null) {
             project.setStatus("draft");
         }
@@ -208,6 +176,42 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
         checkOwnership(project, "查看");
         Map<Long, Long> fileCounts = countProjectFiles(Collections.singletonList(id));
         return toVO(project, fileCounts);
+    }
+
+    @Override
+    public byte[] downloadZip(Long projectId) {
+        Project project = baseMapper.selectById(projectId);
+        if (project == null) throw new BaseException("项目不存在: " + projectId);
+        checkOwnership(project, "下载");
+
+        // 读所有文件（不含 user_modified 过滤，全部打包）
+        List<ProjectFile> files = projectFileMapper.selectList(
+                new LambdaQueryWrapper<ProjectFile>()
+                        .eq(ProjectFile::getProjectId, projectId)
+                        .eq(ProjectFile::getDeleted, 0)
+        );
+
+        // 根文件夹名 = 项目名（去特殊字符），解压后不散落
+        String rootName = project.getName() != null
+                ? project.getName().replaceAll("[\\\\/:*?\"<>|]", "_").trim()
+                : "project-" + projectId;
+        if (rootName.isEmpty()) rootName = "project-" + projectId;
+
+        ByteArrayOutputStream baos = new ByteArrayOutputStream(8192);
+        try (ZipOutputStream zos = new ZipOutputStream(baos, StandardCharsets.UTF_8)) {
+            for (ProjectFile file : files) {
+                String entryName = rootName + "/" + file.getFilePath();
+                zos.putNextEntry(new ZipEntry(entryName));
+                if (file.getFileContent() != null) {
+                    zos.write(file.getFileContent().getBytes(StandardCharsets.UTF_8));
+                }
+                zos.closeEntry();
+            }
+        } catch (IOException e) {
+            log.error("项目文件打包失败: projectId={}", projectId, e);
+            throw new BaseException("项目文件打包失败");
+        }
+        return baos.toByteArray();
     }
 
     private ProjectVO toVO(Project project, Map<Long, Long> fileCounts) {
