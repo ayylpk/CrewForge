@@ -18,8 +18,9 @@ export const DEFAULT_MODEL_JSON = JSON.stringify({
     thinking: false,
 });
 
-/** 单次模型调用的超时上限（毫秒）。超时后 abort 底层请求，防止永久挂起 */
-export const DEFAULT_TIMEOUT_MS = 180_000;
+/** 单次模型调用的超时上限（毫秒）。超时后 abort 底层请求，防止永久挂起
+ *  9/2 实测：deepseek-v4-flash jsonMode 大 prompt 单次响应体要流 60~120s，180s 会误杀触发静默重试 → 放宽到 300s */
+export const DEFAULT_TIMEOUT_MS = 300_000;
 
 /** 结构化输出失败重试次数（含首次） */
 export const DEFAULT_RETRIES = 3;

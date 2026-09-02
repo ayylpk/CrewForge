@@ -9,18 +9,7 @@
         <span class="phase-badge">{{ currentPhase || '准备中' }}</span>
       </div>
       <div class="topbar-right">
-        <button v-if="!done" class="btn-pause" :class="{ paused }" @click="togglePause">
-          <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <template v-if="!paused">
-              <rect x="6" y="4" width="4" height="16" />
-              <rect x="14" y="4" width="4" height="16" />
-            </template>
-            <template v-else>
-              <polygon points="5 3 19 12 5 21 5 3" />
-            </template>
-          </svg>
-          {{ paused ? '恢复' : '暂停' }}
-        </button>
+        <!-- 暂停/继续随假引擎退役（施工卡 1-4）：真执行无剧本，引擎侧控制=确认门（阶段 3） -->
         <button v-if="done" class="btn-save" @click="viewOverview">查看项目</button>
       </div>
     </header>
@@ -372,12 +361,11 @@ import { ref, computed, onMounted, onBeforeUnmount, nextTick, reactive } from 'v
 import { useRouter, useRoute } from 'vue-router'
 import FileTree from '../components/FileTree.vue'
 import MonacoEditor from '../components/MonacoEditor.vue'
-import { EXEC_TIMELINE, AGENT_NAMES } from '../mocks/execution'
-import type { ExecEvent } from '../mocks/execution'
+import { AGENT_NAMES } from '../constants/agents'
 import { fetchProjectFiles, fetchProjectFileDetail } from '../api/projectFile'
 import type { FileNode, projectFileVO } from '../types/file'
 import { useExecutionStore } from '../stores/execution'
-import { fetchTasks } from '../api/task'
+import { fetchTasks, retryTask as apiRetryTask } from '../api/task'
 import type { TaskItem as ApiTaskItem, TaskStatus } from '../api/task'
 
 const router = useRouter()
@@ -482,35 +470,54 @@ function taskCount(status: TaskStatus): number {
 function tasksBy(status: TaskStatus): ApiTaskItem[] {
   return tasks.value.filter((t) => t.status === status)
 }
-function retryTask(t: ApiTaskItem) {
-  t.status = 'todo'
-  pushLog({ time: new Date().toLocaleTimeString('zh-CN', { hour12: false }), agentId: 0, agent: '系统', text: `任务 ${t.taskIdExt || t.id} 已重新排队` })
-  // TODO: 调后端 API retryTask(t.id)
-}
-
-/** 10s 轮询任务列表 */
-async function pollTasks() {
-  const projectId = Number(route.params.id)
-  if (!projectId) return
+/** 重跑：调后端（todo 复位 + retry_count+1），乐观更新，pollTasks 校准；引擎在阶段边界消费返工 */
+async function retryTask(t: ApiTaskItem) {
   try {
-    const list = await fetchTasks(projectId)
-    if (list && list.length > 0) tasks.value = list
-  } catch {
-    // 后端 API 未就绪时静默，保留已有数据
+    await apiRetryTask(t.id)
+    t.status = 'todo'
+    t.retryCount += 1
+    pushLog({ time: '', agentId: 0, agent: '系统', text: `任务 ${t.taskIdExt || t.id}「${t.title}」已重新排队（第 ${t.retryCount} 次，引擎于阶段边界重新派发）` })
+  } catch (e) {
+    pushLog({ time: '', agentId: 0, agent: '系统', text: `重跑失败：${(e as Error).message || e}` })
   }
 }
 
-/** 首次加载没有真实数据时，用 mock 数据填充看板 */
-function initMockTasks() {
-  if (tasks.value.length > 0) return
-  tasks.value = [
-    { id: 1, projectId: 1, phaseId: 1, title: '用户表 DDL', description: null, status: 'done', assignee: '后端开发', layer: 'backend', acceptance: null, result: null, errorMsg: null, retryCount: 0, taskIdExt: 'T1', dependsOn: null, sortOrder: 1, createTime: '', updateTime: '' },
-    { id: 2, projectId: 1, phaseId: 1, title: '登录接口 POST /api/auth/login', description: null, status: 'doing', assignee: '后端开发', layer: 'backend', acceptance: null, result: null, errorMsg: null, retryCount: 0, taskIdExt: 'T2', dependsOn: null, sortOrder: 2, createTime: '', updateTime: '' },
-    { id: 3, projectId: 1, phaseId: null, title: '用户列表页面', description: null, status: 'todo', assignee: '前端开发', layer: 'frontend', acceptance: null, result: null, errorMsg: null, retryCount: 0, taskIdExt: 'T3', dependsOn: null, sortOrder: 3, createTime: '', updateTime: '' },
-    { id: 4, projectId: 1, phaseId: null, title: '注册接口 POST /api/auth/register', description: null, status: 'failed', assignee: '后端开发', layer: 'backend', acceptance: null, result: null, errorMsg: '参数校验失败', retryCount: 1, taskIdExt: 'T4', dependsOn: null, sortOrder: 4, createTime: '', updateTime: '' },
-    { id: 5, projectId: 1, phaseId: null, title: 'JWT 拦截器', description: null, status: 'todo', assignee: '后端开发', layer: 'backend', acceptance: null, result: null, errorMsg: null, retryCount: 0, taskIdExt: 'T5', dependsOn: null, sortOrder: 5, createTime: '', updateTime: '' },
-    { id: 6, projectId: 1, phaseId: null, title: '登录页 UI', description: null, status: 'todo', assignee: '前端开发', layer: 'frontend', acceptance: null, result: null, errorMsg: null, retryCount: 0, taskIdExt: 'T6', dependsOn: null, sortOrder: 6, createTime: '', updateTime: '' },
-  ]
+/** 上次轮询的任务状态快照：diff 出真事件进日志流（替代假时间线播放器） */
+const lastStatus = new Map<number, TaskStatus>()
+
+/** 10s 轮询——看板唯一数据源=sys_task（施工卡 1-4：mock 已撤，一切以库里为准） */
+async function pollTasks() {
+  const projectId = Number(route.params.id)
+  if (!projectId) return
+  let list: ApiTaskItem[] | null = null
+  try {
+    list = await fetchTasks(projectId)
+  } catch {
+    return // 后端未就绪时静默，保留已有数据
+  }
+  if (!list) return
+  // 1. 状态变化 → 日志真事件（谁在动这块卡片一目了然）
+  for (const t of list) {
+    if (lastStatus.get(t.id) !== t.status) {
+      const who = t.status === 'failed' ? 5 : t.status === 'done' ? 6 : t.layer === 'frontend' ? 4 : 3
+      const line = t.status === 'failed'
+        ? `任务 ${t.taskIdExt || t.id}「${t.title}」失败：${(t.errorMsg || '未记录原因').split('\n')[0].slice(0, 60)}`
+        : `任务 ${t.taskIdExt || t.id}「${t.title}」${STATUS_LABEL[t.status]}`
+      pushLog({ time: '', agentId: who, agent: '', text: line })
+      lastStatus.set(t.id, t.status)
+    }
+  }
+  tasks.value = list
+  // 2. 顶栏真状态：进度=done/total；阶段=在办任务最小编号；全部终态=已收敛
+  const total = list.length
+  const doneCount = list.filter((t) => t.status === 'done').length
+  overallProgress.value = total ? Math.round((doneCount / total) * 100) : 0
+  const doing = list.filter((t) => t.status === 'doing')
+  if (doing.length) currentPhase.value = `阶段 ${doing.reduce((m, t) => Math.min(m, t.phaseId ?? 99), 99)}`
+  else if (list.some((t) => t.status === 'todo')) currentPhase.value = '待派发'
+  else if (total) currentPhase.value = '已收敛'
+  else currentPhase.value = ''
+  done.value = total > 0 && list.every((t) => t.status === 'done' || t.status === 'failed')
 }
 
 /** Agent 日志颜色 */
@@ -551,37 +558,6 @@ function restoreFiles(): boolean {
 
 function countFiles(nodes: FileNode[]): number {
   return nodes.reduce((sum, n) => sum + (n.type === 'file' ? 1 : countFiles(n.children || [])), 0)
-}
-
-/** 按路径插入文件（自动建目录） */
-function insertFile(path: string, content: string) {
-  const parts = path.split('/')
-  const fileName = parts.pop()!
-  let level = fileTree.value
-  let curPath = ''
-  for (const part of parts) {
-    curPath += (curPath ? '/' : '') + part
-    let dir = level.find((n) => n.type === 'dir' && n.name === part)
-    if (!dir) {
-      dir = { name: part, type: 'dir', path: curPath, open: true, children: [] }
-      level.push(dir)
-    }
-    if (!dir.children) dir.children = []
-    level = dir.children
-  }
-  const exists = level.find((n) => n.path === path)
-  if (exists) {
-    exists.content = content
-    exists.isNew = false
-    return exists
-  }
-  const node: FileNode = { name: fileName, type: 'file', path, content, isNew: true }
-  level.push(node)
-  setTimeout(() => {
-    node.isNew = false
-  }, 2000)
-  persistFiles()
-  return node
 }
 
 /** 打开文件 → 加入 Tab（VS Code 行为）；落库文件无内容时异步拉详情 */
@@ -719,7 +695,7 @@ function chatReply(text: string): string {
     return '后端按架构师输出的 JSON spec 生成标准 Spring Boot 分层：Controller（接口层）→ Service（业务层）→ Mapper（数据层），前端对应 views + api 封装。'
   }
   if (/暂停|停|继续|恢复/.test(text)) {
-    return paused.value ? '已恢复执行，Agent 团队继续干活。' : '好的，Agent 完成当前任务后会暂停，随时可以恢复。'
+    return '真执行没有暂停按钮——引擎按阶段自动推进；要中止请用顶栏返回后在项目详情停止运行（阶段 2 接入）。'
   }
   if (/下一步|接下来|后面/.test(text)) {
     const next = currentPhase.value
@@ -741,17 +717,13 @@ function sendChat() {
   }, 700)
 }
 
-// ===== 执行引擎（mock 时间线） =====
+// ===== 执行视图状态（真数据：日志=轮询差分，顶栏状态=pollTasks 计算） =====
 const logs = ref<{ time: string; agentId: number; agent: string; text: string }[]>([])
 const logBody = ref<HTMLElement | null>(null)
 const currentPhase = ref('')
 const overallProgress = ref(0)
-const paused = ref(false)
 const done = ref(false)
 
-let eventIdx = 0
-let timer: ReturnType<typeof setTimeout> | null = null
-let startedAt = 0
 const pollTimer = ref<ReturnType<typeof setInterval> | null>(null)
 
 function pushLog(e: { time: string; agentId: number; agent: string; text: string }) {
@@ -768,62 +740,12 @@ function pushLog(e: { time: string; agentId: number; agent: string; text: string
   })
 }
 
-function schedule() {
-  if (paused.value || done.value) return
-  const now = performance.now() - startedAt
-  while (eventIdx < EXEC_TIMELINE.length && EXEC_TIMELINE[eventIdx].at <= now) {
-    fire(EXEC_TIMELINE[eventIdx])
-    eventIdx++
-  }
-  if (eventIdx >= EXEC_TIMELINE.length) {
-    done.value = true
-    return
-  }
-  timer = setTimeout(schedule, 100)
-}
-
-function fire(e: ExecEvent) {
-  if (e.phase) currentPhase.value = e.phase
-  if (e.phaseProgress != null) overallProgress.value = e.phaseProgress
-  if (e.file) {
-    const node = insertFile(e.file.path, e.file.content)
-    openFile(node) // 新文件自动打开 Tab
-  }
-  pushLog({ time: new Date().toLocaleTimeString('zh-CN', { hour12: false }), agentId: e.agentId, agent: AGENT_NAMES[e.agentId]?.name || '系统', text: e.log })
-  if (e.task) {
-    const task = tasks.value.find((t) => t.title.includes(e.task!) || e.task!.includes(t.taskIdExt || ''))
-    if (task) task.status = e.status === 'done' ? 'done' : e.status === 'working' ? 'doing' : 'todo'
-  }
-}
-
-function togglePause() {
-  paused.value = !paused.value
-  if (!paused.value && !done.value) {
-    startedAt = performance.now() - (eventIdx ? EXEC_TIMELINE[eventIdx].at : 0)
-    timer = setTimeout(schedule, 100)
-  }
-}
-
 onMounted(async () => {
-  // 先拉一次任务列表（失败则用 mock 数据兜底）
+  // 看板唯一数据源=sys_task 轮询（假卡片/假时间线已随施工卡 1-4 撤除）
   await pollTasks()
-  initMockTasks()
-  // 优先从数据库加载真实文件（agent 落库 sys_project_file）
-  if (await loadFromDb()) {
-    done.value = true
-    currentPhase.value = '已完成'
-    overallProgress.value = 100
-    tasks.value.forEach((t) => { if (t.status !== 'failed') t.status = 'done' })
-  } else if (restoreFiles()) {
-    done.value = true
-    currentPhase.value = '已完成'
-    overallProgress.value = 100
-    tasks.value.forEach((t) => { if (t.status !== 'failed') t.status = 'done' })
-  } else {
-    startedAt = performance.now()
-    timer = setTimeout(schedule, 100)
-  }
-  // 启动 10s 轮询：文件 + 任务（Agent 可能后续生成新文件或更新任务状态）
+  // 文件优先从数据库加载（agent 落库 sys_project_file），本地草稿兜底；任务状态只信 pollTasks
+  if (!(await loadFromDb())) restoreFiles()
+  // 10s 轮询：文件 + 任务（引擎在跑就有新状态）
   pollTimer.value = setInterval(() => {
     pollFiles()
     pollTasks()
@@ -831,7 +753,6 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
-  if (timer) clearTimeout(timer)
   if (pollTimer.value) clearInterval(pollTimer.value)
 })
 

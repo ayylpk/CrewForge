@@ -1,4 +1,5 @@
 import mysql, { type RowDataPacket, type ResultSetHeader } from "mysql2/promise";
+import type { ExecTask } from "./common";
 
 /** 任务状态（对应看板四列） */
 export type TaskStatus = "todo" | "doing" | "done" | "failed";
@@ -135,4 +136,62 @@ export async function getTaskStats(projectId: number): Promise<{ status: TaskSta
         [projectId],
     );
     return rows as { status: TaskStatus; count: number }[];
+}
+
+// ============================================================
+// sys_task 桥 helper（施工卡 1-2）：ext 检索 + 旁路化写入
+//   桥=可观测层不是控制层：任何写库异常只 warn 不阻塞流水线
+// ============================================================
+
+/** 按外部编号（ExecTask.id, 如 T1/T2-F）查任务：传 phaseId=精确行；不传=取最新（id 最大——阶段顺序处理时即当前行） */
+export async function getTaskByExt(projectId: number, extId: string, phaseId?: number): Promise<Task | null> {
+    const [rows] = await pool.query<RowDataPacket[]>(
+        phaseId == null
+            ? "SELECT * FROM sys_task WHERE project_id = ? AND task_id_ext = ? AND deleted = 0 ORDER BY id DESC LIMIT 1"
+            : "SELECT * FROM sys_task WHERE project_id = ? AND task_id_ext = ? AND phase_id = ? AND deleted = 0 ORDER BY id DESC LIMIT 1",
+        phaseId == null ? [projectId, extId] : [projectId, extId, phaseId],
+    );
+    return (rows[0] as Task) ?? null;
+}
+
+/**
+ * 幂等登记阶段任务（映射规则 = 施工手册 F6）：
+ *  - ★ 幂等键=(project_id, phase_id, task_id_ext)——architect 的 id 是阶段内顺序号（每阶段都从 T1 起），
+ *    不带 phase 会把阶段 2 的 T1 当成阶段 1 的重复而整段漏库（bridge-smoke 用例 5 抓到过）
+ *  - depends_on 是 JSON 列：前端任务依赖配对后端 ["T5"]，后端任务 null
+ *  - sort_order = 阶段*1000+序（跨阶段保持全局下发序）
+ * 异常上抛，由调用方桥函数吞并 warn。
+ */
+export async function ensureTasksForPhase(tasks: ExecTask[], projectId: number, phaseId: number): Promise<void> {
+    for (let i = 0; i < tasks.length; i++) {
+        const t = tasks[i]!;
+        if (await getTaskByExt(projectId, t.id, phaseId)) continue;   // ★ 幂等键含 phase
+        await createTask({
+            project_id: projectId,
+            phase_id: phaseId,
+            title: t.title.slice(0, 199),                     // 列 varchar(200)
+            description: t.description ?? null,
+            status: "todo",
+            assignee: t.layer === "frontend" ? "前端开发" : "后端开发",
+            layer: t.layer,
+            acceptance: t.acceptance ?? null,
+            result: null,
+            error_msg: null,
+            retry_count: 0,
+            task_id_ext: t.id,
+            depends_on: t.layer === "frontend" ? JSON.stringify([t.id.replace(/-F$/, "")]) : null,
+            sort_order: phaseId * 1000 + i,
+        });
+    }
+}
+
+/** 按 ext 旁路写状态（工位 doing / 判定 done·failed）：无行静默跳过（桥上线前的老任务），DB 异常只 warn */
+export async function updateStatusByExt(projectId: number, extId: string, status: TaskStatus, errorMsg?: string): Promise<void> {
+    try {
+        const task = await getTaskByExt(projectId, extId);
+        if (!task?.id) return;
+        await updateTaskStatus(task.id, status, errorMsg);
+    } catch (e) {
+        console.warn(`[task-bridge] ${extId}→${status} 更新失败(不阻塞):`, (e as Error).message);
+    }
 }

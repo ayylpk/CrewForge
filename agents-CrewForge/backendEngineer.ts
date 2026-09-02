@@ -19,6 +19,8 @@ import { roles, type TransferStation, WorkQueue } from "./Hub";
 import { initModels } from "./models";
 import { invokeWithTimeout } from "./llm";
 import { writeWorkspace, readWorkspace, type ExecTask } from "./common";
+import { currentProjectId } from "./runEnv";
+import { updateStatusByExt } from "./task";
 import { nodePrompt, type Node } from "./Node";
 
 const BACKEND_MODEL_JSON = JSON.stringify({
@@ -105,15 +107,23 @@ export class BackendEngineer extends BaseAgent {
         this.skeletonPrompt = nodePrompt(nodes, "伪代码", skeleton_prompt);
         this.codePrompt = nodePrompt(nodes, "代码实现", pseudo_prompt);
         this.on("task", { fromNames: ["architect", "merger"] }, ({ data }) => {
-            this.taskQueue.push({ task: data.task as ExecTask });
+            const t = data.task as ExecTask;
+            this.taskQueue.push({ task: t });
+            // sys_task 桥：工位取任务 → doing（旁路，helper 自吞异常）
+            const pid = currentProjectId();
+            if (pid != null) void updateStatusByExt(pid, t.id, "doing");
         });
         this.on("revision", { fromRoles: [roles.testEngineer] }, ({ data }) => {
+            const t = data.task as ExecTask;
             this.taskQueue.push({
                 task: {
-                    ...(data.task as ExecTask),
-                    description: (data.task as ExecTask).description + "\n\n【测试返工意见（必须逐条解决）】\n" + (data.issues ?? []).join("\n"),
+                    ...t,
+                    description: t.description + "\n\n【测试返工意见（必须逐条解决）】\n" + (data.issues ?? []).join("\n"),
                 },
             });
+            // 返工重新排队 → 状态回 doing（error_msg 保留至下次判定覆盖）
+            const pid = currentProjectId();
+            if (pid != null) void updateStatusByExt(pid, t.id, "doing");
         });
     }
 
@@ -142,7 +152,8 @@ export class BackendEngineer extends BaseAgent {
         for (let attempt = 1; attempt <= 3; attempt++) {
             const ts = Date.now();
             try {
-                const res = await invokeWithTimeout<any>(`${task.id} 伪代码`, 120_000, sig => model.invoke([
+                // 工位档 180s：伪代码/代码输出量小于 architect jsonMode，不必吃满主链 300s
+                const res = await invokeWithTimeout<any>(`${task.id} 伪代码`, 180_000, sig => model.invoke([
                     new SystemMessage(this.skeletonPrompt + `\n\n## 当前任务\n${JSON.stringify(task, null, 2)}` + feedback),
                 ], { signal: sig }));
                 console.log(`[${this.name}] ${task.id} 伪代码 ${Date.now() - ts}ms`);
@@ -225,7 +236,7 @@ export class BackendEngineer extends BaseAgent {
         for (let attempt = 1; attempt <= 3; attempt++) {
             const ts = Date.now();
             try {
-                const res = await invokeWithTimeout<any>(`${task.id} 代码`, 120_000, sig => model.invoke([
+                const res = await invokeWithTimeout<any>(`${task.id} 代码`, 180_000, sig => model.invoke([
                     new SystemMessage(
                         this.codePrompt +
                         `\n\n## 当前任务\n${JSON.stringify(fileTask, null, 2)}` +

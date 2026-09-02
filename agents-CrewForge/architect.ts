@@ -28,6 +28,7 @@ import {
 import { type Node, type Edge, saveArchitectOutput, readProjectFile, getProjectConfirmMode } from "./Node";
 import { writeWorkspace, type Pair, type ExecTask, type Plan, type planItem } from "./common";
 import { currentProjectId, projectDir } from "./runEnv";
+import { ensureTasksForPhase, getTasksByStatus, updateStatusByExt } from "./task";
 
 // ---------- 模型 ----------
 
@@ -640,12 +641,51 @@ export class Architect extends BaseAgent {
             }
         }
         const tasks: ExecTask[] = state?.exeTasks ?? [];
+        // ★ sys_task 桥（施工卡 1-2/1-3）：本阶段任务幂等落库 + 消费返工 todo；旁路 fire-and-forget 不阻塞
+        void this.bridgeTasks(tasks, phase.phase, projectId ?? pid ?? undefined);
         if (tasks.length > 0) {
             console.log(`[architect] 阶段 ${phase.phase} 拆出 ${tasks.length} 个任务并下发`);
         } else {
             // 方案被拒 / 拆分失败 → 声明 0 对并 final，维护据此直接完成本阶段（不卡死流水线）
             console.log(`[architect] 阶段 ${phase.phase} 无任务（被拒或拆分失败），声明 0 对完成`);
             this.send("maintainer", { type: "tasks_declared", phase: phase.phase, pairIds: [], final: true });
+        }
+    }
+
+    /**
+     * sys_task 桥（任务为原子的落点）：
+     *  ① 幂等登记本阶段任务（ext 唯一键，阶段重跑/重放不重复建——ensureTasksForPhase 内）
+     *  ② 消费返工任务：人在看板点重跑=todo+retry_count+1，此后每个阶段边界在这里重新下发到工位
+     *     （description 自包含，契约/验收抄在里面；files/method/path 不落列，由工位按描述重推）
+     * 旁路原则：整段 try 包住，DB 异常只 warn——桥是可观测层，不是控制层。
+     */
+    private async bridgeTasks(tasks: ExecTask[], phaseId: number, projectId?: number): Promise<void> {
+        if (!projectId) return;
+        try {
+            await ensureTasksForPhase(tasks, projectId, phaseId);
+            // 补 doing：dispatch 节点的消息比桥落库先到，工位 on("task") 写 doing 时无行可写（9/2 实测）
+            // 语义="已下发工位"；发送失败的任务（无空闲工位）会被略早标 doing——可接受的观测误差
+            for (const t of tasks) void updateStatusByExt(projectId, t.id, "doing");
+            const dispatched = new Set(tasks.map(t => t.id));
+            for (const row of await getTasksByStatus(projectId, "todo")) {
+                if (!row.retry_count || row.retry_count >= 3) continue;              // 只吃返工任务；≥3=放弃护栏
+                if (!row.task_id_ext || dispatched.has(row.task_id_ext)) continue;   // 本阶段重新拆过的以新消息为准
+                const target = this.station.pickLeastBusy(row.layer === "frontend" ? roles.frontendEngineer : roles.backendEngineer);
+                if (!target) continue;
+                const t: ExecTask = {
+                    id: row.task_id_ext,
+                    layer: row.layer === "frontend" ? "frontend" : "backend",
+                    method: "", path: "", files: [],
+                    title: row.title,
+                    description: row.description ?? row.title,
+                    parameters: [],
+                    acceptance: row.acceptance ?? "功能可正常使用",
+                };
+                this.station.sendMessage("architect", target, JSON.stringify({ type: "task", task: t }));
+                console.log(`[architect] sys_task 桥：消费返工任务 ${row.task_id_ext}（第 ${row.retry_count} 次）→ ${target}`);
+            }
+        } catch (e) {
+            console.warn("[architect] sys_task 桥失败(不阻塞):", (e as Error).message);
         }
     }
 

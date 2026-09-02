@@ -145,6 +145,8 @@ function llmNode(row: Node): GraphNode<any> {
                 );
                 return { [output]: schema ? res : extractJson(res.content), llmCalls: 1 };
             } catch (e) {
+                // 每次失败必须留痕（9/2 血泪：静默重试导致 20 分钟看似死锁无从判断）
+                console.warn(`[llm:${row.nodeName}] 第 ${attempt}/${DEFAULT_RETRIES} 次失败: ${(e as Error).message.slice(0, 120)}`);
                 if (attempt === DEFAULT_RETRIES) throw e;
                 feedback = `\n\n## 上次输出校验失败，必须修正后重新输出（只输出合法 JSON）\n${(e as Error).message.slice(0, 400)}`;
             }

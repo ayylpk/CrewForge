@@ -9,6 +9,8 @@
 
 import { BaseAgent } from "./BaseAgent";
 import { roles, type TransferStation } from "./Hub";
+import { currentProjectId } from "./runEnv";
+import { updateStatusByExt } from "./task";
 
 export class Maintainer extends BaseAgent {
     private declaredPairs = new Set<string>();
@@ -23,6 +25,12 @@ export class Maintainer extends BaseAgent {
         super("maintainer", roles.maintainer, station);
         this.on("task_passed", { fromRoles: [roles.testEngineer] }, ({ data }) => {
             const key = data.pair?.back?.id;
+            // sys_task 桥：接口对通过 → 两端 done（先于流水线判定写，旁路独立于 phase 过滤）
+            const pid = currentProjectId();
+            if (pid != null && key) {
+                void updateStatusByExt(pid, key, "done");
+                if (data.pair?.front?.id) void updateStatusByExt(pid, data.pair.front.id, "done");
+            }
             if (key && data.phase === this.currentPhase) {
                 this.passedPairs.add(key);
                 console.log(`[maintainer] 收到测试结果：${key} 通过（已收 ${this.passedPairs.size} 对）`);
@@ -30,6 +38,13 @@ export class Maintainer extends BaseAgent {
             }
         });
         this.on("task_failed", ({ data, msg, senderRole }) => {
+            // sys_task 桥：放弃上报 → 整对 failed（issues 原文进 error_msg，看板卡片可展开）
+            const pid = currentProjectId();
+            if (pid != null && data.pairId) {
+                const err = (data.issues ?? []).join("\n").slice(0, 1000) || "返工次数耗尽，该接口对被放弃";
+                void updateStatusByExt(pid, data.pairId, "failed", err);
+                void updateStatusByExt(pid, `${data.pairId}-F`, "failed", err);   // 无前端配对时 helper 静默跳过
+            }
             // 两个来源：合并器（返工轮次耗尽，按名字）和测试（判定 ≥3 次未过，按角色）
             if (data.pairId && data.phase === this.currentPhase
                 && (msg.sender === "merger" || senderRole === roles.testEngineer)) {

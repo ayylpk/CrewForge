@@ -255,6 +255,18 @@ export async function getProjectConfirmMode(projectId: number): Promise<number> 
     return rows[0]!.confirm_mode ?? 0;
 }
 
+/** 读取项目需求文本（sys_project.description + clarified_req 合并）——全绿灯首轮注入 PM 对话用（B2 需求注入） */
+export async function getProjectRequirement(projectId: number): Promise<string> {
+    if (!projectId) return "";
+    const [rows] = await pool.query<RowDataPacket[]>(
+        "SELECT description, clarified_req FROM sys_project WHERE id = ? AND deleted = 0 LIMIT 1",
+        [projectId],
+    );
+    if (!rows || rows.length === 0) return "";
+    const r = rows[0]!;
+    return [r.description, r.clarified_req].filter((x: string | null) => x && String(x).trim()).join("\n\n").trim();
+}
+
 export function initNode(nodeInformation: Node): GraphNode<any> {
     const type: string = nodeInformation.nodeType;
     const initFunction = INITFUNCTIONS[type];

@@ -16,7 +16,7 @@
 // ============================================================
 
 import { HumanMessage, type BaseMessage } from "@langchain/core/messages";
-import { TransferStation } from "./Hub";
+import { TransferStation, roles } from "./Hub";
 import type { BaseAgent } from "./BaseAgent";
 import { Manager } from "./manager";
 import { Architect } from "./architect";
@@ -25,7 +25,7 @@ import { BackendEngineer } from "./backendEngineer";
 import { FrontendEngineer } from "./frontendEngineer";
 import { TestEngineer } from "./testEngineer";
 import { Maintainer } from "./maintainer";
-import { getProjectAgents, getProjectNodes, getEdges, getProjectConfirmMode } from "./Node";
+import { getProjectAgents, getProjectNodes, getEdges, getProjectConfirmMode, getProjectRequirement } from "./Node";
 import { CliQuestioner, type Questioner } from "./GraphFactory";
 
 
@@ -56,8 +56,15 @@ export async function buildTeam(
                 console.log(`[runner] 项目经理 ${m.name}：图版，节点 ${nodes.length} 个`);
                 break;
             case "架构师":
-                messageAgents.push(new Architect(station, nodes, await getEdges(m.agentId)));
-                console.log(`[runner] 架构师 ${m.name}：消息+拆分图，节点 ${nodes.length} 个`);
+                // 节点/边缺一 → 整体退内置 DEFAULT_NODES/DEFAULT_EDGES（构造器默认参）——
+                // 半套 DB 配置（有边无节点）会让 stitch 编译崩死（9/2 验收：软删遗留池边撞库实锤）
+                {
+                    const edges = await getEdges(m.agentId);
+                    messageAgents.push(nodes.length > 0 && edges.length > 0
+                        ? new Architect(station, nodes, edges)
+                        : new Architect(station));
+                }
+                console.log(`[runner] 架构师 ${m.name}：消息+拆分图，${nodes.length > 0 ? `DB 配置（节点 ${nodes.length} 个）` : "内置默认图"}`);
                 break;
             case "后端开发":
                 messageAgents.push(new BackendEngineer(`backend-${m.agentId}`, station, nodes));
@@ -86,14 +93,36 @@ export async function buildTeam(
 export async function runProject(projectId: number, questioner: Questioner): Promise<void> {
     const { station, messageAgents, managers } = await buildTeam(projectId);
 
-    // 1. 消息版团队常驻（架构师/开发/测试/合并/维护挂消息循环）
-    await Promise.all(messageAgents.map((a) => a.start()));
+    // 1. 消息版团队常驻：start() 内含 while(true) 消息循环**永不 resolve**，必须 fire-and-forget
+    //    （9/2 阶段1验收逮到的真 bug：await 会把主流程卡死在 PM 对话之前，零 LLM 请求）
+    for (const a of messageAgents) {
+        void a.start().catch((e) => console.error("[runner] agent 消息循环异常退出:", e));
+    }
+
+    // ★ fail-fast：必需角色缺席=消息投进 Hub 惰性空箱、无人消费，waitForMessage 死等
+    //   （9/2 阶段1验收血泪：项目1 没配架构师成员，流水线静默挂死零日志）
+    const need: { label: string; ok: () => boolean }[] = [
+        { label: "架构师", ok: () => !!station.status["architect"] },
+        { label: "测试", ok: () => Object.values(station.status).some((s) => s.role === roles.testEngineer) },
+        { label: "后端开发", ok: () => Object.values(station.status).some((s) => s.role === roles.backendEngineer) },
+        { label: "前端开发", ok: () => Object.values(station.status).some((s) => s.role === roles.frontendEngineer) },
+    ];
+    const missing = need.filter((n) => !n.ok()).map((n) => n.label);
+    if (missing.length > 0) {
+        console.error(`[runner] ⚠️ 团队缺席「${missing.join("、")}」——请先到团队视图配齐成员再开工（本轮中止，不空烧 LLM）`);
+        process.exit(2);
+    }
 
     // 2. 图版 Manager：PM 多轮对话直到需求定稿（flag=true）
     //    注意：同 thread 下 messages 由 reducer 追加，每轮只传"用户新输入"，不传全量（避免重复）
     for (const manager of managers) {
         const thread = `project-${projectId}`;
-        let state: any = await manager.run({ messages: [], projectId }, thread, questioner);
+        // ★ B2 需求注入：PM 对话是纯 messages 上下文——先把库里需求作为开场白喂进去。
+        //   缺这步，全绿灯模式对着空气喊"定稿"，PM 按契约拒绝空功能清单（9/2 阶段1验收实锤）。
+        const requirement = await getProjectRequirement(projectId);
+        if (!requirement) console.warn("[runner] ⚠️ 项目 description/clarified_req 均为空——PM 无法提炼功能，请先在网页端填写需求");
+        const seed = requirement ? [new HumanMessage(`【项目需求】\n${requirement}`)] : [];
+        let state: any = await manager.run({ messages: seed, projectId }, thread, questioner);
         // 读取项目确认模式：全绿灯(0) → 一次都不确认，自动定稿
         let confirmMode = 0;
         try { confirmMode = await getProjectConfirmMode(projectId); } catch { /* 默认 0 */ }
