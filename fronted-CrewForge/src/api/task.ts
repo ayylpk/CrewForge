@@ -1,5 +1,4 @@
 import request from './request'
-import type { Project } from '../types/project'
 
 /** 任务状态（与看板四列一致） */
 export type TaskStatus = 'todo' | 'doing' | 'done' | 'failed'

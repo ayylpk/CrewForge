@@ -26,7 +26,7 @@ export class Merger extends BaseAgent {
     private currentPhase = 0;
 
     constructor(station: TransferStation) {
-        super("merger", roles.unknown, station);
+        super("merger", roles.merger, station);
         this.on("phase_reset", ({ data }) => {
             if (data.pairId) {
                 // 单对重置：测试 3 次回炉架构师重设计后，清该对的配对/交付/放弃状态（防旧版缓存串新任务）

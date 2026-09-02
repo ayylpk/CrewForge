@@ -4,7 +4,7 @@
 // 不依赖任何外部包（纯 JS 逻辑），classes 项目自洽
 // ============================================================
 
-// agent 角色定义（数字值：manager=0 … maintainer=5，unknown=6 兜底）
+// agent 角色定义（数字值：manager=0 … maintainer=5，unknown=6 兜底，merger=7）
 export const roles = {
     manager: 0,
     architect: 1,

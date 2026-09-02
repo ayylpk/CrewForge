@@ -47,21 +47,6 @@ export interface Plan {
     risks: string[];
 }
 
-/** 占位任务（LLM 拆分失败时的兜底，保证流水线能跑通） */
-export function makeTask(no: number, feature: string, layer: "backend" | "frontend"): ExecTask {
-    return {
-        id: layer === "frontend" ? `T${no}-F` : `T${no}`,
-        layer,
-        method: layer === "backend" ? "POST" : "",
-        path: layer === "backend" ? `/api/feature-${no}` : "",
-        files: [layer === "backend" ? `src/backend/feature${no}.ts` : `src/frontend/Feature${no}.vue`],
-        title: `T${no} ${feature}（${layer}）`,
-        description: `功能：${feature}\n技术：模板技术栈`,
-        parameters: [],
-        acceptance: `功能 ${feature} 可正常使用`,
-    };
-}
-
 // 写盘（沙箱：只能写当前项目的房间，逃逸直接抛错）
 export function writeWorkspace(relative: string, code: string): string {
   const pid = currentProjectId();

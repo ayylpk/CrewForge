@@ -28,13 +28,3 @@ export function toDeclarations(tools: Tool[]) {
     },
   }));
 }
-
-export function createToolFn(code: string): (args: any) => Promise<any> {
-  try {
-    const fn = new Function(`return (${code})`)();
-    if (typeof fn === "function") return fn;
-  } catch (err) {
-    console.error("[initDeepSeek] 工具代码不是合法函数:", err);
-  }
-  throw new Error(`工具代码无法执行: ${code.slice(0, 50)}...`);
-}
