@@ -185,13 +185,44 @@ export async function ensureTasksForPhase(tasks: ExecTask[], projectId: number, 
     }
 }
 
-/** 按 ext 旁路写状态（工位 doing / 判定 done·failed）：无行静默跳过（桥上线前的老任务），DB 异常只 warn */
+/** 按 ext 旁路写状态（工位 doing / 判定 done·failed）：无行静默跳过（桥上线前的老任务），DB 异常只 warn
+ *  终态保护（9/3 run11 前补）：done 不回退成 failed——测试通过后到达的迟到放弃上报不得抹掉通过证据；
+ *  done→doing 不设防（阶段重拆=真重做，看板状态须跟现实走） */
 export async function updateStatusByExt(projectId: number, extId: string, status: TaskStatus, errorMsg?: string): Promise<void> {
     try {
         const task = await getTaskByExt(projectId, extId);
         if (!task?.id) return;
+        if (task.status === "done" && status === "failed") {
+            console.log(`[task-bridge] ${extId} 已 done，忽略迟到的 ${status}`);
+            return;
+        }
+        if (status === "doing") {
+            // 回到 doing 顺带清上轮遗留（9/3 run12 观察：doing 卡片挂着上一轮 failed 的 error_msg，看板失真）
+            await pool.query(
+                "UPDATE sys_task SET status = 'doing', error_msg = NULL, result = NULL, update_time = NOW() WHERE id = ?",
+                [task.id],
+            );
+            return;
+        }
         await updateTaskStatus(task.id, status, errorMsg);
     } catch (e) {
         console.warn(`[task-bridge] ${extId}→${status} 更新失败(不阻塞):`, (e as Error).message);
+    }
+}
+
+/**
+ * 退出前关闭桥：pool.end 等在途 SQL 收尾，3s 上限兜底防退出挂起。
+ * 背景（9/3 run10）：maintainer 最后一对的 failed 写是 fire-and-forget，runner 随后 process.exit(0)
+ * 把在途写腰斩 → T4 永挂 doing。根治=handler 内 await（见 maintainer.ts），本函数是出口保险
+ * （覆盖 dispatch 起点 doing 写等仍走 void 的旁路）。
+ */
+export async function closeTaskBridge(): Promise<void> {
+    try {
+        await Promise.race([
+            pool.end(),
+            new Promise(res => setTimeout(res, 3000)),
+        ]);
+    } catch (e) {
+        console.warn("[task-bridge] pool.end 异常(忽略):", (e as Error).message);
     }
 }

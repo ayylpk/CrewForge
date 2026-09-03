@@ -27,6 +27,7 @@ import { TestEngineer } from "./testEngineer";
 import { Maintainer } from "./maintainer";
 import { getProjectAgents, getProjectNodes, getEdges, getProjectConfirmMode, getProjectRequirement } from "./Node";
 import { CliQuestioner, type Questioner } from "./GraphFactory";
+import { closeTaskBridge } from "./task";   // 出口保险：退出前冲干净在途 sys_task 写（9/3 run10 T4 竞态）
 
 
 export interface TeamBundle {
@@ -195,12 +196,14 @@ if (import.meta.main) {
 
   console.log(`[runner] 启动项目 ${projectId}...`);
   runProject(projectId, new CliQuestioner())
-    .then(() => {
-      console.log("[runner] 流程结束，进程退出");
+    .then(async () => {
+      console.log("[runner] 流程结束，冲刷 sys_task 桥后退出");
+      await closeTaskBridge();   // 等在途写落完（3s 上限兜底），再 exit
       process.exit(0);
     })
-    .catch((e) => {
+    .catch(async (e) => {
       console.error("[runner] 进程异常退出:", e);
+      await closeTaskBridge().catch(() => {});
       process.exit(1);
     });
 }

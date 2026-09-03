@@ -18,7 +18,7 @@ import { SystemMessage } from "@langchain/core/messages";
 import { BaseAgent } from "./BaseAgent";
 import { roles, type TransferStation, WorkQueue } from "./Hub";
 import { initModels } from "./models";
-import { invokeWithTimeout } from "./llm";
+import { invokeWithTimeout, DEFAULT_TIMEOUT_MS } from "./llm";
 import { writeWorkspace, readWorkspace, type ExecTask } from "./common";
 import { currentProjectId } from "./runEnv";
 import { updateStatusByExt } from "./task";
@@ -164,8 +164,8 @@ export class FrontendEngineer extends BaseAgent {
         for (let attempt = 1; attempt <= 3; attempt++) {
             const ts = Date.now();
             try {
-                // 工位档 180s（同后端）：设计稿/逐文件输出量小于 architect jsonMode
-                const res = await invokeWithTimeout<any>(`${task.id} 设计稿`, 180_000, sig => model.invoke([
+                // 工位超时 9/3 拍板：与主链同级 300s（旧 180s 两档制被 run10 击穿，见 backendEngineer 同款注释）
+                const res = await invokeWithTimeout<any>(`${task.id} 设计稿`, DEFAULT_TIMEOUT_MS, sig => model.invoke([
                     new SystemMessage(this.designPrompt + `\n\n## 当前任务\n${JSON.stringify(task, null, 2)}` + feedback),
                 ], { signal: sig }));
                 console.log(`[${this.name}] ${task.id} 设计稿 ${Date.now() - ts}ms`);
@@ -187,7 +187,10 @@ export class FrontendEngineer extends BaseAgent {
             const { task, design } = await this.designQueue.pop();
             console.log(`[${this.name}] ${task.id} 进入实现工位${design ? "" : "（设计稿缺失，单步实现）"}`);
             if (task.files.length === 0) {
-                this.send("merger", { type: "task_result", task, success: false });
+                // 9/3 run11 修正：无 UI 任务（Swagger 调试类，架构师明示"无新增前端界面"）= 没有文件要写就是完成，
+                // 与 backendEngineer 同语义 success:true。旧值 false 让 merger 数满 3 轮放弃整对——
+                // run10/run11 里所有"开发自测失败 3 轮"的无 UI 对全是这个不对称杀的（超时修复后现形）
+                this.send("merger", { type: "task_result", task, success: true });
                 continue;
             }
 
@@ -245,7 +248,7 @@ export class FrontendEngineer extends BaseAgent {
         for (let attempt = 1; attempt <= 3; attempt++) {
             const ts = Date.now();
             try {
-                const res = await invokeWithTimeout<any>(`${task.id} ${filePath}`, 180_000, sig => model.invoke([
+                const res = await invokeWithTimeout<any>(`${task.id} ${filePath}`, DEFAULT_TIMEOUT_MS, sig => model.invoke([
                     new SystemMessage(
                         this.filePrompt +
                         `\n\n## 当前子任务\n${JSON.stringify(fileTask, null, 2)}` +

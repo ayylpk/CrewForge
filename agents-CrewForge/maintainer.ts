@@ -23,13 +23,14 @@ export class Maintainer extends BaseAgent {
 
     constructor(station: TransferStation) {
         super("maintainer", roles.maintainer, station);
-        this.on("task_passed", { fromRoles: [roles.testEngineer] }, ({ data }) => {
+        this.on("task_passed", { fromRoles: [roles.testEngineer] }, async ({ data }) => {
             const key = data.pair?.back?.id;
             // sys_task 桥：接口对通过 → 两端 done（先于流水线判定写，旁路独立于 phase 过滤）
+            // ★ await 而非 void：最后一对通过时 done 写若不在 phase_done 发出前落完，会被 runner 退出腰斩（9/3 run10 T4 教训）
             const pid = currentProjectId();
             if (pid != null && key) {
-                void updateStatusByExt(pid, key, "done");
-                if (data.pair?.front?.id) void updateStatusByExt(pid, data.pair.front.id, "done");
+                await updateStatusByExt(pid, key, "done");
+                if (data.pair?.front?.id) await updateStatusByExt(pid, data.pair.front.id, "done");
             }
             if (key && data.phase === this.currentPhase) {
                 this.passedPairs.add(key);
@@ -37,13 +38,14 @@ export class Maintainer extends BaseAgent {
                 this.checkConverged();
             }
         });
-        this.on("task_failed", ({ data, msg, senderRole }) => {
+        this.on("task_failed", async ({ data, msg, senderRole }) => {
             // sys_task 桥：放弃上报 → 整对 failed（issues 原文进 error_msg，看板卡片可展开）
+            // ★ await：同上——最后一对的 failed 必须在 checkConverged 发 phase_done 前落库，否则进程退出丢写
             const pid = currentProjectId();
             if (pid != null && data.pairId) {
                 const err = (data.issues ?? []).join("\n").slice(0, 1000) || "返工次数耗尽，该接口对被放弃";
-                void updateStatusByExt(pid, data.pairId, "failed", err);
-                void updateStatusByExt(pid, `${data.pairId}-F`, "failed", err);   // 无前端配对时 helper 静默跳过
+                await updateStatusByExt(pid, data.pairId, "failed", err);
+                await updateStatusByExt(pid, `${data.pairId}-F`, "failed", err);   // 无前端配对时 helper 静默跳过
             }
             // 两个来源：合并器（返工轮次耗尽，按名字）和测试（判定 ≥3 次未过，按角色）
             if (data.pairId && data.phase === this.currentPhase
