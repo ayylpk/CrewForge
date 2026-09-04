@@ -19,6 +19,9 @@ export interface ExecTask {
     description: string;
     parameters: { name: string; type: string; required: boolean; description: string }[];
     acceptance: string;
+    /** 所属阶段号（阶段 3 加，可选保协议兼容）：ext 是阶段内编号，sys_task 桥写状态
+     *  必须按 (project, phase, ext) 定位——缺了它跨阶段同名任务（每阶段都有 T1）会串台（9/4 live 实锤） */
+    phase?: number;
 }
 
 /** 接口对：一个接口的后端 + 前端（前端可能落单为空） */

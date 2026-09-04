@@ -9,6 +9,7 @@ import com.hina.crewforge.mapper.TaskMapper;
 import com.hina.crewforge.pojo.entity.Project;
 import com.hina.crewforge.pojo.entity.ProjectRun;
 import com.hina.crewforge.pojo.entity.Task;
+import com.hina.crewforge.service.ConfirmService;
 import com.hina.crewforge.service.ProjectRunService;
 import com.hina.crewforge.service.support.ProjectGuard;
 import lombok.RequiredArgsConstructor;
@@ -54,6 +55,7 @@ public class ProjectRunServiceImpl implements ProjectRunService {
     private final ProjectMapper projectMapper;
     private final ProjectRunMapper projectRunMapper;
     private final TaskMapper taskMapper;
+    private final ConfirmService confirmService;   // 阶段 3：等答免死判定（pending 题挂起中的进程不许杀/不许计熔断）
 
     @Value("${project-run.bun-path:bun}")
     private String bunPath;
@@ -83,7 +85,7 @@ public class ProjectRunServiceImpl implements ProjectRunService {
         if (isRunning(projectId)) {
             throw new BaseException("项目 " + projectId + " 已在运行");
         }
-        Process p = spawnEngine(projectId);
+        Process p = spawnEngine(projectId, project.getConfirmMode());
         try {
             // 开工建档/重置账目：restart_count 清零、本轮起点刷新（对账器据此判进展窗）
             LocalDateTime now = LocalDateTime.now();
@@ -193,6 +195,14 @@ public class ProjectRunServiceImpl implements ProjectRunService {
                 && ProcessHandle.of(row.getPid()).map(ProcessHandle::isAlive).orElse(false)) {
             return;   // Java 重启后孤儿仍在跑：等它本阶段自然收口，下一轮对账再接棒（不中断在途产物）
         }
+        // ===== 阶段 3 等答免死 =====
+        // 有未过期 pending 题 = 人正在看问答卡，引擎棒挂起等答案是天经地义：本轮不动、不计熔断
+        if (confirmService.hasPendingQuestion(projectId)) {
+            log.debug("[run-reconcile] 项目 {} 确认门等人作答，暂缓续拉", projectId);
+            return;
+        }
+        // 过期题没人轮询（上棒死了，lazy 判定失效）→ 先清扫成 auto_passed，再走正常续拉
+        confirmService.sweepExpired(projectId);
         if (p != null) {
             processes.remove(projectId);
             try {
@@ -217,7 +227,7 @@ public class ProjectRunServiceImpl implements ProjectRunService {
         projectRunMapper.updateById(row);
         log.info("[run-reconcile] 项目 {} 无活进程（上棒 exit={}），续拉第 {} 次",
                 projectId, row.getExitCode(), row.getRestartCount());
-        spawnEngine(projectId);
+        spawnEngine(projectId, project.getConfirmMode());
     }
 
     /** 上次拉起之后是否有任何任务行被更新（引擎每步推进都会碰 sys_task） */
@@ -233,11 +243,9 @@ public class ProjectRunServiceImpl implements ProjectRunService {
 
     // ==================== 进程原语 ====================
 
-    /** 可拉性检查：手动模式等阶段 3、配置残缺直接拒，别拉个必死的进程烧对账额度 */
+    /** 可拉性检查：配置残缺直接拒，别拉个必死的进程烧对账额度
+     *  （阶段 3 拆掉了"手动模式拒开"——confirm_mode=2 的问题现在有 Web 问答卡可答了） */
     private void assertSpawnable(Project project) {
-        if (Project.CONFIRM_MODE_MANUAL.equals(project.getConfirmMode())) {
-            throw new BaseException("手动确认模式的 Web 确认门待阶段 3 落地，暂切全绿灯/混合后再开工");
-        }
         if (engineDir == null || engineDir.isBlank() || runsRoot == null || runsRoot.isBlank()) {
             throw new BaseException("project-run.engine-dir / runs-root 未配置（application.yml）");
         }
@@ -247,7 +255,7 @@ public class ProjectRunServiceImpl implements ProjectRunService {
     }
 
     /** 拉起引擎进程（start 与对账续拉共用），账目字段由调用方管 */
-    private Process spawnEngine(Long projectId) {
+    private Process spawnEngine(Long projectId, Integer confirmMode) {
         try {
             // 日志树与产物树分开：logs/p{id}.run.log（p{id} 会被引擎全新开工归档改名）
             File logDir = new File(runsRoot, "logs");
@@ -257,7 +265,11 @@ public class ProjectRunServiceImpl implements ProjectRunService {
             Map<String, String> env = pb.environment();
             env.put("PROJECT_ID", String.valueOf(projectId));
             env.put("RUNS_ROOT", new File(runsRoot).getAbsolutePath());           // A12：产物树根显式化，不再靠 cwd
-            env.put("AUTO_CONFIRM", "1");                                          // A9：无终端子进程，0/1 模式全auto（2 已被 assertSpawnable 拒）
+            // A9 精细化（阶段 3）：只有全绿灯自动确认；混合/手动不注入 AUTO_CONFIRM，
+            // 引擎按 pickQuestioner 分流走 HttpQuestioner → sys_confirm → Web 问答卡
+            if (confirmMode == null || confirmMode == 0) {
+                env.put("AUTO_CONFIRM", "1");
+            }
             if (perPhaseExit) {
                 env.put("EXIT_AT_PHASE_BOUNDARY", "1");                             // 按阶段起进程（9/2 拍板）
             }
@@ -279,15 +291,24 @@ public class ProjectRunServiceImpl implements ProjectRunService {
         }
     }
 
-    /** 超时看门狗：单棒进程到点强杀（B5 放宽到 120min；按阶段起棒后单棒实际远小于此） */
+    /** 超时看门狗：单棒进程到点强杀（B5 放宽到 120min；按阶段起棒后单棒实际远小于此）。
+     *  阶段 3 免死：到点若还有未过期 pending 题（人还在答），延一棒再判——等审批不算挂死 */
     private void startTimeoutWatchdog(Long projectId, Process p) {
         long timeoutMs = timeoutMinutes * 60_000L;
         Thread watcher = new Thread(() -> {
             try {
-                Thread.sleep(timeoutMs);
-                if (p.isAlive()) {
+                while (p.isAlive()) {
+                    Thread.sleep(timeoutMs);
+                    if (!p.isAlive()) {
+                        return;
+                    }
+                    if (confirmService.hasPendingQuestion(projectId)) {
+                        log.info("[run-timeout] 项目 {} 到点但确认门等人作答 → 看门狗延一棒（{}min）", projectId, timeoutMinutes);
+                        continue;
+                    }
                     log.warn("[run-timeout] 项目 {} 进程超 {}min 强杀（对账器判无进展会续棒/熔断）", projectId, timeoutMinutes);
                     p.destroyForcibly();
+                    return;
                 }
             } catch (InterruptedException ignored) { }
         });

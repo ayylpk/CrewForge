@@ -176,12 +176,17 @@ export async function ensureTasksForPhase(tasks: ExecTask[], projectId: number, 
     }
 }
 
-/** 按 ext 旁路写状态（工位 doing / 判定 done·failed）：无行静默跳过（桥上线前的老任务），DB 异常只 warn
+/**
+ * 按 ext 旁路写状态（工位 doing / 判定 done·failed）：无行静默跳过（桥上线前的老任务），DB 异常只 warn
  *  终态保护（9/3 run11 前补）：done 不回退成 failed——测试通过后到达的迟到放弃上报不得抹掉通过证据；
- *  done→doing 不设防（阶段重拆=真重做，看板状态须跟现实走） */
-export async function updateStatusByExt(projectId: number, extId: string, status: TaskStatus, errorMsg?: string): Promise<void> {
+ *  done→doing 不设防（阶段重拆=真重做，看板状态须跟现实走）
+ * ⚠️ phaseId（阶段 3 修）：ext 是**阶段内**编号（每阶段都从 T1 起）——不传 phase 的"取最新行"
+ *   在跨阶段场景会串台（阶段 1 的 T1 迟到写落在阶段 2 的新行上，老行永挂 doing，9/4 live 实锤）。
+ *   与 ensureTasksForPhase 幂等键对称：调用方知道 phase 就必须传。
+ */
+export async function updateStatusByExt(projectId: number, extId: string, status: TaskStatus, errorMsg?: string, phaseId?: number | null): Promise<void> {
     try {
-        const task = await getTaskByExt(projectId, extId);
+        const task = await getTaskByExt(projectId, extId, phaseId ?? undefined);
         if (!task?.id) return;
         if (task.status === "done" && status === "failed") {
             console.log(`[task-bridge] ${extId} 已 done，忽略迟到的 ${status}`);

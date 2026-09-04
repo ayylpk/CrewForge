@@ -124,7 +124,7 @@ export class FrontendEngineer extends BaseAgent {
             this.taskQueue.push({ task: t });
             // sys_task 桥：工位取任务 → doing（旁路，helper 自吞异常）
             const pid = currentProjectId();
-            if (pid != null) void updateStatusByExt(pid, t.id, "doing");
+            if (pid != null) void updateStatusByExt(pid, t.id, "doing", undefined, t.phase);   // phase 防跨阶段串台（9/4 live 修，ExecTask.phase）
         });
         this.on("revision", { fromRoles: [roles.testEngineer] }, ({ data }) => {
             const t = data.task as ExecTask;
@@ -136,7 +136,7 @@ export class FrontendEngineer extends BaseAgent {
             });
             // 返工重新排队 → 状态回 doing（error_msg 保留至下次判定覆盖）
             const pid = currentProjectId();
-            if (pid != null) void updateStatusByExt(pid, t.id, "doing");
+            if (pid != null) void updateStatusByExt(pid, t.id, "doing", undefined, t.phase);   // phase 防跨阶段串台（9/4 live 修，ExecTask.phase）
         });
     }
 

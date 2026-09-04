@@ -353,6 +353,40 @@
       </div>
     </div>
 
+    <!-- ===== 确认门就地问答卡（阶段 3：引擎挂起等人拍板，答复后自动续跑） ===== -->
+    <div v-if="pendingConfirms.length" class="confirm-mask">
+      <div class="confirm-card">
+        <div class="confirm-head">
+          <span class="confirm-node">{{ nodeLabel(pendingConfirms[0].node) }}</span>
+          <span class="confirm-expire">{{ confirmCountdown(pendingConfirms[0].expireAt) }}</span>
+        </div>
+        <p class="confirm-question">{{ pendingConfirms[0].question }}</p>
+        <!-- 有选项=选择题（点一下即答），无选项=自由文本题（PM 追问走这里） -->
+        <div v-if="parseOptions(pendingConfirms[0]).length" class="confirm-opts">
+          <button
+            v-for="opt in parseOptions(pendingConfirms[0])"
+            :key="opt"
+            class="confirm-opt"
+            :disabled="confirmBusy"
+            @click="submitConfirm(opt)"
+          >{{ opt }}</button>
+        </div>
+        <div v-else class="confirm-free">
+          <input
+            v-model="confirmText"
+            class="input confirm-input"
+            type="text"
+            placeholder="输入回复…"
+            :disabled="confirmBusy"
+            @keyup.enter="confirmText.trim() && submitConfirm(confirmText.trim())"
+          />
+          <button class="confirm-opt send" :disabled="confirmBusy || !confirmText.trim()" @click="submitConfirm(confirmText.trim())">
+            发送
+          </button>
+        </div>
+      </div>
+    </div>
+
   </div>
 </template>
 
@@ -367,6 +401,9 @@ import type { FileNode, projectFileVO } from '../types/file'
 import { useExecutionStore } from '../stores/execution'
 import { fetchTasks, retryTask as apiRetryTask } from '../api/task'
 import type { TaskItem as ApiTaskItem, TaskStatus } from '../api/task'
+import { fetchProjectById, updateProject } from '../api/project'
+import { fetchPendingConfirms, answerConfirm, parseOptions, type ConfirmQuestion } from '../api/confirm'
+import { ElMessage } from 'element-plus'
 
 const router = useRouter()
 const route = useRoute()
@@ -384,6 +421,50 @@ const MODES = [
 function setMode(mode: 0 | 1 | 2) {
   confirmMode.value = mode
   execStore.setConfirmMode(mode)
+  // 阶段 3：模式落后端 sys_project.confirm_mode（引擎开工时读它决定 Cli/Http 分流）——
+  // 只存 localStorage 的话选择器就是装饰，Web 上切了引擎也看不见
+  const strMode = (['green', 'mixed', 'manual'] as const)[mode]
+  updateProject(Number(route.params.id), { confirmMode: strMode } as never).catch(() => {
+    /* 保存失败提示由拦截器统一弹；本地态保留，用户可重试 */
+  })
+}
+
+// ===== 确认门问答卡（阶段 3）：pending 题轮询弹卡，答复即续跑 =====
+const pendingConfirms = ref<ConfirmQuestion[]>([])
+const confirmText = ref('')
+const confirmBusy = ref(false)
+
+async function pollConfirms() {
+  try {
+    pendingConfirms.value = await fetchPendingConfirms(Number(route.params.id))
+  } catch {
+    /* 后端未就绪等：本轮不弹卡，下轮 10s 再试（卡是增强不是控制，永不拦看板） */
+  }
+}
+
+async function submitConfirm(answer: string) {
+  if (confirmBusy.value || !pendingConfirms.value.length) return
+  confirmBusy.value = true
+  try {
+    await answerConfirm(pendingConfirms.value[0].id, answer)
+    ElMessage.success('已答复，引擎几秒内续跑')
+    confirmText.value = ''
+    await pollConfirms()
+  } finally {
+    confirmBusy.value = false
+  }
+}
+
+function nodeLabel(node: string): string {
+  const map: Record<string, string> = { architect: '架构师', manager: '项目经理', test: '测试' }
+  return map[node] || node
+}
+
+/** 超时放行倒计时提示（惰性：每轮轮询刷新，不做秒级动画） */
+function confirmCountdown(expireAt: string | null): string {
+  if (!expireAt) return ''
+  const min = Math.max(0, Math.round((new Date(expireAt).getTime() - Date.now()) / 60000))
+  return min > 0 ? `${min} 分钟无人应答将自动放行` : '即将自动放行'
 }
 
 // ===== 布局状态（VS Code 风格） =====
@@ -743,12 +824,22 @@ function pushLog(e: { time: string; agentId: number; agent: string; text: string
 onMounted(async () => {
   // 看板唯一数据源=sys_task 轮询（假卡片/假时间线已随施工卡 1-4 撤除）
   await pollTasks()
+  void pollConfirms()   // 确认门首拉：进页面就答，不等 10s（阶段 3）
+  // 回填真项目名 + 库中确认模式（阶段 3：模式以 sys_project.confirm_mode 为真相，本地只是即时态）
+  fetchProjectById(Number(route.params.id)).then((p) => {
+    projectName.value = p.name
+    if (p.confirmMode === 0 || p.confirmMode === 1 || p.confirmMode === 2) {
+      confirmMode.value = p.confirmMode
+      execStore.setConfirmMode(p.confirmMode)
+    }
+  }).catch(() => { /* 详情拉不到不拦面板主流程 */ })
   // 文件优先从数据库加载（agent 落库 sys_project_file），本地草稿兜底；任务状态只信 pollTasks
   if (!(await loadFromDb())) restoreFiles()
-  // 10s 轮询：文件 + 任务（引擎在跑就有新状态）
+  // 10s 轮询：文件 + 任务 + 待答问题（引擎在跑就有新状态）
   pollTimer.value = setInterval(() => {
     pollFiles()
     pollTasks()
+    pollConfirms()
   }, 10000)
 })
 
@@ -1633,5 +1724,90 @@ async function pollFiles() {
 .log-time { color: var(--text3); flex-shrink: 0; }
 .log-agent { flex-shrink: 0; }
 .log-text { color: var(--text2); word-break: break-all; }
+
+/* ===== 确认门问答卡（阶段 3）：居中浮层，藏青底 + 黄描边强调"等人拍板" ===== */
+.confirm-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(6, 10, 22, 0.62);
+  backdrop-filter: blur(4px);
+}
+.confirm-card {
+  width: min(520px, 92vw);
+  padding: 24px 28px;
+  border-radius: var(--radius-lg);
+  border: 1px solid rgba(242, 184, 64, 0.45);
+  background: var(--bg2);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+}
+.confirm-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+.confirm-node {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--yellow);
+  border: 1px solid rgba(242, 184, 64, 0.4);
+  border-radius: 999px;
+  padding: 3px 12px;
+  letter-spacing: 1px;
+}
+.confirm-expire {
+  font-size: 11.5px;
+  color: var(--text3);
+}
+.confirm-question {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--text);
+  white-space: pre-wrap;
+  max-height: 40vh;
+  overflow-y: auto;
+  margin-bottom: 20px;
+}
+.confirm-opts {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+}
+.confirm-free {
+  display: flex;
+  gap: 10px;
+}
+.confirm-input {
+  flex: 1;
+}
+.confirm-opt {
+  height: 38px;
+  padding: 0 20px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border2);
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all var(--dur) var(--ease);
+}
+.confirm-opt:hover:not(:disabled) {
+  border-color: var(--yellow);
+  color: var(--yellow);
+}
+.confirm-opt.send {
+  border: none;
+  background: var(--grad1);
+  color: #fff;
+  font-weight: 600;
+}
+.confirm-opt:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 
 </style>

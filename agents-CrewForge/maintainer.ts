@@ -28,9 +28,12 @@ export class Maintainer extends BaseAgent {
             // sys_task 桥：接口对通过 → 两端 done（先于流水线判定写，旁路独立于 phase 过滤）
             // ★ await 而非 void：最后一对通过时 done 写若不在 phase_done 发出前落完，会被 runner 退出腰斩（9/3 run10 T4 教训）
             const pid = currentProjectId();
+            // ★ phase（阶段 3 修跨阶段串台）：ext 是阶段内编号，done/failed 必须按 (project,phase,ext)
+            //   定位——不传会写到"最新阶段同名行"，老行永挂 doing（9/4 live 实锤）。消息链路自带 phase。
+            const ph = data.phase as number | undefined;
             if (pid != null && key) {
-                await updateStatusByExt(pid, key, "done");
-                if (data.pair?.front?.id) await updateStatusByExt(pid, data.pair.front.id, "done");
+                await updateStatusByExt(pid, key, "done", undefined, ph);
+                if (data.pair?.front?.id) await updateStatusByExt(pid, data.pair.front.id, "done", undefined, ph);
             }
             if (key && data.phase === this.currentPhase) {
                 this.passedPairs.add(key);
@@ -44,8 +47,9 @@ export class Maintainer extends BaseAgent {
             const pid = currentProjectId();
             if (pid != null && data.pairId) {
                 const err = (data.issues ?? []).join("\n").slice(0, 1000) || "返工次数耗尽，该接口对被放弃";
-                await updateStatusByExt(pid, data.pairId, "failed", err);
-                await updateStatusByExt(pid, `${data.pairId}-F`, "failed", err);   // 无前端配对时 helper 静默跳过
+                const ph = data.phase as number | undefined;   // 同上：failed 也按阶段定位
+                await updateStatusByExt(pid, data.pairId, "failed", err, ph);
+                await updateStatusByExt(pid, `${data.pairId}-F`, "failed", err, ph);   // 无前端配对时 helper 静默跳过
             }
             // 两个来源：合并器（返工轮次耗尽，按名字）和测试（判定 ≥3 次未过，按角色）
             if (data.pairId && data.phase === this.currentPhase

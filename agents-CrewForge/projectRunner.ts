@@ -26,7 +26,8 @@ import { FrontendEngineer } from "./frontendEngineer";
 import { TestEngineer } from "./testEngineer";
 import { Maintainer } from "./maintainer";
 import { getProjectAgents, getProjectNodes, getEdges, getProjectConfirmMode, getProjectRequirement, getProjectPlan, updateProjectField } from "./Node";
-import { CliQuestioner, type Questioner } from "./GraphFactory";
+import { type Questioner } from "./GraphFactory";
+import { pickQuestioner } from "./confirm";
 import { closeTaskBridge, getTasksByProject, type Task } from "./task";   // 出口保险：退出前冲干净在途 sys_task 写（9/3 run10 T4 竞态）
 import { archiveProjectDir } from "./runEnv";
 import { refreshSettings } from "./settings";
@@ -280,7 +281,8 @@ if (import.meta.main) {
   // 配置层先热身后开跑：sys_settings 进缓存（30s 心跳刷新，设置页改动半分钟内生效；读失败静默走内置）
   await refreshSettings(true);
   setInterval(() => { void refreshSettings(true); }, 30_000).unref();
-  runProject(projectId, new CliQuestioner())
+  // 提问器按进程身份分流（阶段 3）：AUTO_CONFIRM→自动 y；Java 管理进程→Web 问答卡；手工终端→stdin
+  runProject(projectId, pickQuestioner(projectId))
     .then(async () => {
       console.log("[runner] 流程结束，冲刷 sys_task 桥后退出");
       await closeTaskBridge();   // 等在途写落完（3s 上限兜底），再 exit

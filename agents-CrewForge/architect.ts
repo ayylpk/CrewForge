@@ -7,7 +7,8 @@
 //
 //   拆分图走 GraphFactory 的 stitch()：DB 存声明（DEFAULT_NODES/EDGES），
 //   实现注册进 codeRegistry / schemaRegistry / condRegistry。
-//   确认门用 human 交互（runWithInteraction + CliQuestioner；AUTO_CONFIRM=1 自动 y）。
+//   确认门用 human 交互（runWithInteraction + pickQuestioner：阶段 3 三分流——
+//   AUTO_CONFIRM 自动 y / Java 管理进程 Web 问答卡 / 手工终端真 stdin）。
 //   接口拆分失败/被拒 → 声明 0 对并 final，阶段直接完成（不卡死）。
 // ============================================================
 
@@ -21,7 +22,7 @@ import { roles, type TransferStation } from "./Hub";
 import { initModels } from "./models";
 import { retryStructured } from "./llm";
 import {
-    stitch, runWithInteraction, CliQuestioner,
+    stitch, runWithInteraction,
     codeRegistry, schemaRegistry, condRegistry,
     type StateNodeFn, type CondFn,
 } from "./GraphFactory";
@@ -29,6 +30,7 @@ import { type Node, type Edge, saveArchitectOutput, readProjectFile, getProjectC
 import { writeWorkspace, type Pair, type ExecTask, type Plan, type planItem } from "./common";
 import { currentProjectId, projectDir } from "./runEnv";
 import { ensureTasksForPhase, getTasksByStatus, updateStatusByExt } from "./task";
+import { pickQuestioner } from "./confirm";
 
 // ---------- 模型 ----------
 
@@ -432,6 +434,7 @@ function makeDispatchNode(station: TransferStation): StateNodeFn {
 
         // 3. 副作用：按层分流下发开发 + 声明给维护（final）+ 通知合并器清配对缓存
         for (const t of tasks) {
+            t.phase = phaseNo;   // 阶段 3：任务自带归属阶段，工位/维护写 sys_task 时按 (project,phase,ext) 定位
             const role = t.layer === "backend" ? roles.backendEngineer : roles.frontendEngineer;
             const target = station.pickLeastBusy(role);
             if (!target) { console.log(`提示：没有 ${t.layer} 开发注册，任务 ${t.id} 下发失败`); continue; }
@@ -631,7 +634,9 @@ export class Architect extends BaseAgent {
                 }
             } catch { /* 读回失败走全图（退化为老行为，不阻塞） */ }
         }
-        const state = await runWithInteraction(this.graph, extraInput, `architect-phase-${phase.phase}`, new CliQuestioner());
+        // 确认门提问器三分流（阶段 3，A3"stdin 死锁"根治的收尾：管理进程的问题上 Web）
+        const state = await runWithInteraction(this.graph, extraInput, `architect-phase-${phase.phase}`,
+            pickQuestioner(projectId ?? pid ?? 0));
         // 落库：业务模块(detailedPlan) + 技术选型(stack) + status=executing
         if (projectId) {
             try {
@@ -665,7 +670,7 @@ export class Architect extends BaseAgent {
             await ensureTasksForPhase(tasks, projectId, phaseId);
             // 补 doing：dispatch 节点的消息比桥落库先到，工位 on("task") 写 doing 时无行可写（9/2 实测）
             // 语义="已下发工位"；发送失败的任务（无空闲工位）会被略早标 doing——可接受的观测误差
-            for (const t of tasks) void updateStatusByExt(projectId, t.id, "doing");
+            for (const t of tasks) void updateStatusByExt(projectId, t.id, "doing", undefined, phaseId);
             const dispatched = new Set(tasks.map(t => t.id));
             for (const row of await getTasksByStatus(projectId, "todo")) {
                 if (!row.retry_count || row.retry_count >= 3) continue;              // 只吃返工任务；≥3=放弃护栏
@@ -680,6 +685,7 @@ export class Architect extends BaseAgent {
                     description: row.description ?? row.title,
                     parameters: [],
                     acceptance: row.acceptance ?? "功能可正常使用",
+                    phase: row.phase_id ?? undefined,   // 返工任务带着归属阶段回炉，工位写状态不串台
                 };
                 this.station.sendMessage("architect", target, JSON.stringify({ type: "task", task: t }));
                 console.log(`[architect] sys_task 桥：消费返工任务 ${row.task_id_ext}（第 ${row.retry_count} 次）→ ${target}`);

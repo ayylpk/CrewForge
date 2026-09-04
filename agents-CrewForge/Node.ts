@@ -175,9 +175,13 @@ export async function saveClarifiedReq(projectId: number, features: unknown[]): 
     await updateProjectField(projectId, { clarified_req: JSON.stringify({ features }) });
 }
 
-/** PM 定稿后写 dev_plan + status=planning */
+/** PM 定稿后写 dev_plan。
+ *  ⚠️ 不再写 status=planning（阶段 3 live 修）：开工路径 Java 已先置 executing，
+ *  对话在"定稿→拆分"窗口把状态改回 planning = 状态机倒退——窗口里棒一死（手动模式
+ *  确认门可等人 30min），对账器只扫 executing 不再接管，项目永久孤儿。
+ *  planning 语义留给网页 ArchitectView 手动保存；终端跑引擎由 saveArchitectOutput 置 executing 继续。 */
 export async function saveDevPlan(projectId: number, plan: unknown): Promise<void> {
-    await updateProjectField(projectId, { dev_plan: JSON.stringify(plan), status: "planning" });
+    await updateProjectField(projectId, { dev_plan: JSON.stringify(plan) });
 }
 
 /** 架构师每阶段拆分完写 business_modules + tech_stack + status=executing */
