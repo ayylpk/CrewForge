@@ -38,3 +38,5 @@ agents-CrewForge/runs/
 agents-CrewForge/dist-node/
 *.pid
 smoke-input*
+# 阶段2起 RUNS_ROOT 统一指仓库根 runs/（产物树 pN/_archive/logs 不入库）
+runs/

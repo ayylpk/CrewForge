@@ -97,6 +97,10 @@ const MANAGER_STATE_EXTRA = {
     numberOfTasks: Annotation<number>({ default: () => 0, reducer: (x: number, y: number) => x + y }),
     flag: Annotation<boolean>({ default: () => false, reducer: (_: boolean, u: boolean) => u }),
     plan: Annotation<Plan | null>({ default: () => null, reducer: (_: Plan | null, u: Plan | null) => u }),
+    // ⚠️ projectId 必须显式声明通道：LangGraph 对未声明的输入键静默丢弃——
+    //   阶段 2 live 逮到：pmNode/plannerNode 的 saveClarifiedReq/saveDevPlan 钩子因此空转两个月，
+    //   dev_plan 从没真正落库，跨进程续跑（读库跳过 PM）直接失灵。
+    projectId: Annotation<number>({ default: () => 0, reducer: (_: number, u: number) => u }),
 };
 
 // ---------- 提示词（移植自 _legacy-agents/manager.ts） ----------

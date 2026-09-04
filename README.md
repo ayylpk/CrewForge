@@ -43,17 +43,18 @@ architect → manager   : phase_request（阶段收尾，runner 代发下一阶�
 ## 快速起环境
 
 ```bash
-# 1. 建库导基线（11 表，含默认配置行）
+# 1. 建库导基线（12 表，含默认配置行）
 mysql -u root -p -e "CREATE DATABASE crewforge DEFAULT CHARSET utf8mb4"
 mysql --default-character-set=utf8mb4 -u root -p crewforge < backed-CrewForge/sql/schema.sql
 
-# 2. 后端（先改 application.yml 的 DB 账号密码）
+# 2. 后端（先改 application.yml 的 DB 账号密码 + project-run 的 engine-dir/runs-root 路径）
 cd backed-CrewForge && ./mvnw spring-boot:run        # :8080
 
 # 3. 引擎（先建 .env：DB_PASSWORD=*** DEEPSEEK_API_KEY=***
 cd agents-CrewForge && bun install
-#    手动驱动（Java 未点开工时的调试入口）：
-PROJECT_ID=1 AUTO_CONFIRM=1 bun run projectRunner.ts 1
+#    模型走 sys_settings 设置页（cc-switch 式，Web/API 均可配，引擎 30s 热生效）
+#    手动驱动（Java 未点开工时的调试入口，产物落仓库根 runs/）：
+PROJECT_ID=1 AUTO_CONFIRM=1 RUNS_ROOT=../runs bun run projectRunner.ts 1
 
 # 4. 前端
 cd fronted-CrewForge && npm install && npm run dev    # :5173
@@ -63,14 +64,14 @@ cd fronted-CrewForge && npm install && npm run dev    # :5173
 
 - [x] 阶段 0 地基：schema 基线入库 / 三张新表 / 死代码清零 / 桌面端封存
 - [x] 阶段 1 sys_task 桥：看板从假卡片换成任务真数据（9/3 结清：live done/failed 全流转 + 拔库旁路 + 重跑复活实测）
-- [ ] 阶段 2 点火 + 配置层：Web「开工」按钮、cc-switch 设置页、按阶段起进程
+- [x] 阶段 2 点火 + 配置层（9/4 结清：Web 点开工→跑完零终端实测；按阶段起进程——引擎阶段收口退出、Java 对账器 30s 续拉、kill 进程实锤复活、无进展 5 次熔断；cc-switch 设置页 sys_settings 单行 + 掩码回显 + 测试连接 + OpenAI 兼容端点吃 DashScope/Ollama/vLLM；断点续跑=读库 dev_plan 跳过 PM 对话按任务状态定位；超时 30→120min；产物树 RUNS_ROOT 统一仓库根 + 全新开工自动归档旧树）
 - [ ] 阶段 3 确认门回路 / 阶段 4 冒烟验证闭环（到这里 = 面试演示可用）
 - [ ] 阶段 5 PM 在线化热更新 / 阶段 6 加分项
 
 **已知边界**（诚实清单，熔断降级后在此记录）：
-- 设置页存 localStorage（阶段 2 接真）
+- 手动确认模式（confirm_mode=2）暂拒开工（提示切全绿灯/混合）——Web 确认门是阶段 3 的事
+- 进度字段恒 0（sys_task 已可用，真实统计在阶段 4 随冒烟一并做）；跨进程重启后看板可能残留 doing（桥是可观测层，不拦控制流）
 - 测试工位纸面审、不执行代码（阶段 4 冒烟补）
-- 确认门依赖 stdin/自动定稿，Web 问答回路未通（阶段 3）
 - `DeskTop-CrewForge` 桌面端为前端暴力拷贝，已封存于仓库外（`F:/code/_archive/`，真做时壳引用 web dist）
 
 ## 说明

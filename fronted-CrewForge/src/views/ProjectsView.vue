@@ -7,12 +7,12 @@
           <img src="../assets/logo-crewforge.png" alt="CrewForge" />
           <span>CrewForge</span>
         </div>
-        <!-- API 设置（配置 AI 模型服务，Key 仅存浏览器本地） -->
+        <!-- API 设置（阶段 2：读写服务端 sys_settings，不再只存浏览器） -->
         <button
           class="btn-api"
           :class="{ ok: llmConfigured }"
-          :title="llmConfigured ? '已配置 DeepSeek' : '未配置 API Key，AI 功能不可用'"
-          @click="showApiSettings = true"
+          :title="llmConfigured ? '模型服务已配置（' + maskedKey + '）' : '未配置 API Key（引擎走服务器 .env 兜底）'"
+          @click="openApiSettings"
         >
           <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
@@ -136,43 +136,74 @@
       </EmptyState>
     </main>
 
-    <!-- API 设置弹窗（DeepSeek） -->
+    <!-- API 设置弹窗（阶段 2 cc-switch 式：读写服务端 sys_settings，引擎 30s 内热生效） -->
     <div v-if="showApiSettings" class="modal-mask" @click.self="showApiSettings = false">
       <div class="modal api-modal">
         <h2>API 设置</h2>
         <p class="api-tip">
-          配置后，需求对话 / 架构师 / 团队成员等 AI 功能将使用该模型服务。
-          API Key 仅保存在浏览器本地，不会上传服务器。
+          保存进服务器运行时配置，引擎（需求对话 / 架构师 / 开发 / 测试）自动生效，无需重启。
+          OpenAI 兼容档可指向 Ollama / vLLM / 任意中转端点。
         </p>
 
         <div class="modal-field">
-          <label>模型服务商</label>
+          <label>模型服务</label>
           <div class="provider-card">
             <div class="provider-head">
-              <span class="provider-name">DeepSeek</span>
-              <span v-if="llmKey" class="provider-key-state">Key 已配置</span>
-              <span v-else class="provider-key-state no">未配置 Key</span>
+              <span class="provider-name">{{ cfg.modelKind === 'openai' ? 'OpenAI 兼容端点' : 'DeepSeek' }}</span>
+              <span v-if="maskedKey && maskedKey !== '未配置'" class="provider-key-state">Key 已配置（{{ maskedKey }}）</span>
+              <span v-else class="provider-key-state no">未配置 Key（引擎走 .env）</span>
+            </div>
+            <div class="provider-row">
+              <span class="provider-label">服务商</span>
+              <select v-model="cfg.modelKind" class="select">
+                <option value="deepseek">DeepSeek（官方协议，支持 thinking）</option>
+                <option value="openai">OpenAI 兼容（Ollama / vLLM / 中转）</option>
+              </select>
             </div>
             <div class="provider-row">
               <span class="provider-label">Base URL</span>
-              <input class="input" type="text" :value="DEEPSEEK_BASE_URL" disabled />
+              <input v-model="cfg.modelUrl" class="input" type="text"
+                     :placeholder="cfg.modelKind === 'openai' ? '必填，如 http://localhost:11434/v1' : '留空 = https://api.deepseek.com/v1'" />
             </div>
             <div class="provider-row">
               <span class="provider-label">API Key</span>
-              <input v-model="llmKey" class="input" type="password" placeholder="sk-..." />
+              <input v-model="cfg.apiKey" class="input" type="password"
+                     :placeholder="maskedKey && maskedKey !== '未配置' ? '留空 = 保持不变（' + maskedKey + '）' : 'sk-...'" />
             </div>
             <div class="provider-row">
-              <span class="provider-label">默认模型</span>
-              <select v-model="llmModel" class="select">
-                <option v-for="m in DEEPSEEK_MODELS" :key="m" :value="'deepseek/' + m">{{ m }}</option>
-              </select>
+              <span class="provider-label">模型名</span>
+              <input v-model="cfg.modelName" class="input" type="text" list="cf-model-presets"
+                     placeholder="如 deepseek-v4-flash" />
+              <datalist id="cf-model-presets">
+                <option v-for="m in MODEL_PRESETS" :key="m" :value="m" />
+              </datalist>
+            </div>
+            <div class="provider-row">
+              <span class="provider-label">回调基址</span>
+              <input v-model="cfg.javaBaseUrl" class="input" type="text" placeholder="引擎回调 Java：http://localhost:8080" />
+            </div>
+            <div class="provider-row">
+              <span class="provider-label">确认门超时</span>
+              <input v-model.number="cfg.confirmTimeoutMin" class="input" type="number" min="1" max="720" placeholder="30" />
+            </div>
+            <div class="provider-row">
+              <span class="provider-label">冒烟加 build</span>
+              <label class="switch-line">
+                <input v-model="cfg.smokeBuild" type="checkbox" />
+                <span class="dim">阶段 4 启用；默认关保演示稳定</span>
+              </label>
             </div>
           </div>
         </div>
 
         <div class="modal-actions">
           <button class="btn-cancel" @click="showApiSettings = false">取消</button>
-          <button class="btn-save" @click="saveApiSettings">保存</button>
+          <button class="btn-test" :disabled="testing" @click="runTest">
+            {{ testing ? '测试中…' : '测试连接' }}
+          </button>
+          <button class="btn-save" :disabled="saving" @click="saveApiSettings">
+            {{ saving ? '保存中…' : '保存' }}
+          </button>
         </div>
       </div>
     </div>
@@ -188,55 +219,98 @@ import GradientButton from '../components/GradientButton.vue'
 import StatusDot from '../components/StatusDot.vue'
 import EmptyState from '../components/EmptyState.vue'
 import { fetchProjects, deleteProject } from '../api/project'
+import { fetchSettings, saveSettings, testSettings, type RuntimeSettings } from '../api/settings'
 import type { Project, ProjectStatus } from '../types/project'
 
 const router = useRouter()
 
-// ===== API 设置（DeepSeek，Key 仅存浏览器 localStorage） =====
-const DEEPSEEK_BASE_URL = 'https://api.deepseek.com/v1'
-const DEEPSEEK_MODELS = ['deepseek-chat', 'deepseek-reasoner', 'deepseek-v4-flash', 'deepseek-v4-pro[1m]']
+// ===== API 设置（阶段 2 起接服务端 sys_settings；Key 存服务器，引擎直读） =====
+const MODEL_PRESETS = ['deepseek-v4-flash', 'deepseek-v4-pro', 'qwen3-flash', 'glm-4.6-flash', 'kimi-k2']
 
 const showApiSettings = ref(false)
-const llmKey = ref('')
-const llmModel = ref('deepseek/deepseek-v4-flash')
+const cfg = ref<RuntimeSettings>({ modelKind: 'deepseek' })
+const maskedKey = ref('未配置')   // 服务端当前 key 的掩码（引擎有 .env 兜底，空也能跑）
+const saving = ref(false)
+const testing = ref(false)
 
-/** 已配置 Key 才算可用 */
-const llmConfigured = computed(() => llmKey.value.trim().length > 0)
+/** 顶栏小点：服务端配了 key 就算已配置 */
+const llmConfigured = computed(() => maskedKey.value !== '未配置' && maskedKey.value !== '')
 
-/** 从 localStorage 恢复（key: cf_providers / cf_default_model，与旧格式兼容） */
-function loadLlmSettings() {
+/** 拉一次服务端配置刷新顶栏状态点 */
+async function refreshSettingsDot() {
   try {
-    const saved = localStorage.getItem('cf_providers')
-    if (saved) {
-      const providers = JSON.parse(saved) as { id: string; apiKey?: string }[]
-      const ds = providers.find((p) => p.id === 'deepseek')
-      if (ds?.apiKey) llmKey.value = ds.apiKey
-    }
+    const s = await fetchSettings()
+    maskedKey.value = s.apiKey || '未配置'
   } catch {
-    /* 数据损坏则用默认 */
+    /* 后端未启动：点灰着，不炸列表页 */
   }
-  llmModel.value = localStorage.getItem('cf_default_model') || 'deepseek/deepseek-v4-flash'
 }
 
-/** 保存配置到浏览器本地 */
-function saveApiSettings() {
-  localStorage.setItem(
-    'cf_providers',
-    JSON.stringify([
-      {
-        id: 'deepseek',
-        name: 'DeepSeek',
-        baseUrl: DEEPSEEK_BASE_URL,
-        apiKey: llmKey.value.trim(),
-        enabled: true,
-        builtin: true,
-        models: DEEPSEEK_MODELS,
-      },
-    ])
-  )
-  localStorage.setItem('cf_default_model', llmModel.value)
-  showApiSettings.value = false
-  ElMessage.success(llmConfigured.value ? 'API 设置已保存' : '已保存（尚未填写 API Key）')
+/** 打开弹窗时才拉全量配置（掩码回显 + 表单初值） */
+async function openApiSettings() {
+  showApiSettings.value = true
+  try {
+    const s = await fetchSettings()
+    maskedKey.value = s.apiKey || '未配置'
+    cfg.value = {
+      modelKind: s.modelKind || 'deepseek',
+      modelUrl: s.modelUrl || '',
+      apiKey: '',   // 永不回显明文；留空=保持
+      modelName: s.modelName || '',
+      javaBaseUrl: s.javaBaseUrl || '',
+      confirmTimeoutMin: s.confirmTimeoutMin ?? 30,
+      smokeBuild: !!s.smokeBuild,
+    }
+  } catch {
+    /* 拦截器已提示 */
+  }
+}
+
+async function saveApiSettings() {
+  saving.value = true
+  try {
+    await saveSettings({
+      ...cfg.value,
+      apiKey: cfg.value.apiKey?.trim() || undefined,   // 空=不改（后端掩码语义）
+    })
+    // localStorage 镜像：AgentFormView/TeamView 等本地 AI 辅助仍读这份，格式兼容旧值
+    try {
+      const prev = JSON.parse(localStorage.getItem('cf_providers') || '[]') as { apiKey?: string }[]
+      localStorage.setItem(
+        'cf_providers',
+        JSON.stringify([
+          {
+            id: cfg.value.modelKind === 'openai' ? 'openai-compatible' : 'deepseek',
+            name: cfg.value.modelKind === 'openai' ? 'OpenAI 兼容' : 'DeepSeek',
+            baseUrl: cfg.value.modelUrl?.trim() || 'https://api.deepseek.com/v1',
+            // 真 key 只在用户本次输入的瞬间可得；没输入则保留本地旧值
+            apiKey: cfg.value.apiKey?.trim() || prev.find((p) => p?.apiKey)?.apiKey || '',
+            enabled: true,
+            builtin: true,
+            models: MODEL_PRESETS,
+          },
+        ]),
+      )
+      localStorage.setItem('cf_default_model', `${cfg.value.modelKind}/${cfg.value.modelName || 'deepseek-v4-flash'}`)
+    } catch { /* 镜像坏了不影响服务端为准 */ }
+    ElMessage.success('已保存——引擎最多 30 秒热加载生效')
+    maskedKey.value = (await fetchSettings().catch(() => ({} as RuntimeSettings))).apiKey || '未配置'
+    cfg.value.apiKey = ''
+    showApiSettings.value = false
+  } finally {
+    saving.value = false
+  }
+}
+
+async function runTest() {
+  testing.value = true
+  try {
+    const r = await testSettings({ ...cfg.value, apiKey: cfg.value.apiKey?.trim() || undefined })
+    if (r.ok) ElMessage.success(`连通 ${r.latencyMs ?? '?'}ms（HTTP ${r.status}）`)
+    else ElMessage.error(`不通：${r.error || '未知错误'}`)
+  } finally {
+    testing.value = false
+  }
 }
 
 // ===== 状态元数据 =====
@@ -297,7 +371,7 @@ onMounted(async () => {
   // 分页结果取 records 数组
   const { records } = await fetchProjects()
   projects.value = records
-  loadLlmSettings()
+  void refreshSettingsDot()
 })
 
 /** 删除项目：确认 → 调接口 → 从列表移除（失败提示由 request.ts 拦截器统一弹出） */
@@ -607,6 +681,42 @@ function logout() {
 }
 .btn-save:hover {
   opacity: 0.9;
+}
+/* 测试连接：主按钮左侧的次要描边按钮 */
+.btn-test {
+  padding: 0 18px;
+  height: 40px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border2);
+  background: transparent;
+  color: var(--text1);
+  font-size: 14px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-test:hover:not(:disabled) {
+  border-color: var(--blue);
+  color: var(--blue);
+}
+.btn-test:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+/* 冒烟开关行 */
+.switch-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.switch-line input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--blue);
+  cursor: pointer;
+}
+.dim {
+  color: var(--text3);
+  font-size: 12px;
 }
 
 /* ===== 主区域 ===== */

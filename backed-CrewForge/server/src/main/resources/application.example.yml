@@ -48,3 +48,11 @@ crewforge:
     user-secret-key: your_user_secret_key     # ← 换成随机 Base64 密钥
     user-ttl: 604800000
     user-token-name: Authorization
+
+# 项目运行（沙箱：Java spawn bun 引擎；阶段 2 补牢）——B6：模板以前缺这段
+project-run:
+  bun-path: bun                 # bun 可执行文件（不在 PATH 就写绝对路径）
+  engine-dir: /path/to/CrewForge/agents-CrewForge   # 引擎工作目录（找 projectRunner.ts/.env）
+  runs-root: /path/to/CrewForge/runs                # 产物树根（注入引擎 RUNS_ROOT；日志在其 logs/ 下）
+  timeout-minutes: 120          # 单棒进程超时强杀
+  per-phase-exit: true          # 按阶段起进程（引擎阶段收口即退出，对账器续拉）

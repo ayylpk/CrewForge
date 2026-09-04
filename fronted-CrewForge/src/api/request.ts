@@ -7,7 +7,9 @@ import { ElMessage } from 'element-plus'
  * 响应格式约定（与后端 Result<T> 对齐）：{ code, msg, data }，code=1 成功
  */
 const request = axios.create({
-  baseURL: 'http://localhost:8080',
+  // C10：基址从 VITE_API_BASE 读（.env 配置），未配则回退本地后端；
+  // 与 sys_settings.java_base_url 同源，部署换端口/域名只改 .env 不改代码
+  baseURL: import.meta.env.VITE_API_BASE || 'http://localhost:8080',
   timeout: 30000,
 })
 

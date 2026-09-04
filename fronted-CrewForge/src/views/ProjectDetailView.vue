@@ -8,6 +8,16 @@
         <span>{{ projectName }}</span>
       </div>
       <div class="topbar-right">
+        <!-- 阶段 2 点火：开工/停止（对账器状态来自 /api/project-run/{id}） -->
+        <span v-if="runStatus?.running" class="run-hint">
+          ⚙ 引擎运行中（pid {{ runStatus.pid }}{{ runStatus.restartCount ? ` · 续拉 ${runStatus.restartCount}` : '' }}）
+        </span>
+        <button v-if="canStop" class="btn-stop" :disabled="stopping" @click="stopWork">
+          {{ stopping ? '停止中…' : '停止' }}
+        </button>
+        <GradientButton v-if="canStart" :disabled="starting" @click="startWork">
+          {{ starting ? '拉起中…' : startLabel }}
+        </GradientButton>
         <GradientButton @click="router.push({ name: 'execution', params: { id: route.params.id } })">
           进入执行面板
         </GradientButton>
@@ -140,11 +150,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import CardShell from '../components/CardShell.vue'
 import GradientButton from '../components/GradientButton.vue'
 import { fetchProjectById } from '../api/project'
+import { startProjectRun, stopProjectRun, fetchRunStatus, type RunStatus } from '../api/projectRun'
 import type { Project, ProjectStatus } from '../types/project'
 
 const router = useRouter()
@@ -177,7 +189,9 @@ interface PlanPhase {
 const plan = computed<PlanPhase[]>(() => {
   if (!project.value?.devPlan) return []
   try {
-    const arr = JSON.parse(project.value.devPlan)
+    const v = JSON.parse(project.value.devPlan)
+    // 引擎 PM 存的是 { phases: [...] }，网页手写可能是数组——两种都认
+    const arr = Array.isArray(v) ? v : v?.phases
     return Array.isArray(arr) ? (arr as PlanPhase[]) : []
   } catch {
     return []
@@ -205,12 +219,87 @@ function goBack() {
   router.push('/projects')
 }
 
+// ===== 阶段 2 点火：开工 / 停止 / 进程状态轮询 =====
+const runStatus = ref<RunStatus | null>(null)
+const starting = ref(false)
+const stopping = ref(false)
+let pollTimer: ReturnType<typeof setInterval> | null = null
+
+async function refreshProject() {
+  project.value = await fetchProjectById(Number(route.params.id))
+}
+
+async function refreshRunStatus() {
+  try {
+    runStatus.value = await fetchRunStatus(Number(route.params.id))
+  } catch {
+    runStatus.value = null // 无账/后端未就绪：按钮组按未运行处理（start 接口自有真错提示）
+  }
+}
+
+/** 引擎是否在跑（进程判活由后端两级完成，前端只看结论） */
+const isRunning = computed(() => runStatus.value?.running === true)
+
+const canStart = computed(() => {
+  if (isRunning.value || !project.value) return false
+  const s = project.value.status
+  // 开工窗口：方案已确认(planning) / 暂停·失败续跑 / 执行中但对账账本 stopped（手动停过）
+  return s === 'planning' || s === 'paused' || s === 'failed' || (s === 'executing' && runStatus.value?.runState === 'stopped')
+})
+const canStop = computed(() => isRunning.value || project.value?.status === 'executing')
+const startLabel = computed(() => {
+  const s = project.value?.status
+  return s === 'paused' || s === 'failed' || (s === 'executing' && runStatus.value?.runState === 'stopped') ? '继续开工' : '🔥 开工'
+})
+
+async function startWork() {
+  starting.value = true
+  try {
+    await startProjectRun(Number(route.params.id))
+    ElMessage.success('引擎已拉起，流水线开跑——去执行面板看任务流转')
+    await Promise.all([refreshProject(), refreshRunStatus()])
+    router.push({ name: 'execution', params: { id: route.params.id } })
+  } finally {
+    starting.value = false
+  }
+}
+
+async function stopWork() {
+  try {
+    await ElMessageBox.confirm(
+      '将终止引擎进程并暂停续拉（在途任务停在当前粒度，续开工从断点接上）。确定停止？',
+      '停止运行',
+      { type: 'warning', confirmButtonText: '停止', cancelButtonText: '再想想' },
+    )
+  } catch {
+    return
+  }
+  stopping.value = true
+  try {
+    await stopProjectRun(Number(route.params.id))
+    ElMessage.success('已停止（对账器不会再自动续拉，点「继续开工」可恢复）')
+    await Promise.all([refreshProject(), refreshRunStatus()])
+  } finally {
+    stopping.value = false
+  }
+}
+
 onMounted(async () => {
   try {
-    project.value = await fetchProjectById(Number(route.params.id))
+    await refreshProject()
   } finally {
     loading.value = false
   }
+  await refreshRunStatus()
+  // 10s 轻轮询：项目状态 + 进程账本（开工→跑完→done 全程无人肉刷新）
+  pollTimer = setInterval(() => {
+    void refreshProject().catch(() => {})
+    void refreshRunStatus()
+  }, 10_000)
+})
+
+onBeforeUnmount(() => {
+  if (pollTimer) clearInterval(pollTimer)
 })
 
 /** 概览锚点滚动 */
@@ -255,6 +344,35 @@ function downloadZip() {
   font-size: 13px;
   cursor: pointer;
   transition: all 0.2s;
+}
+/* ===== 开工/停止按钮区 ===== */
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.run-hint {
+  font-size: 12px;
+  color: var(--green);
+  white-space: nowrap;
+}
+.btn-stop {
+  height: 40px;
+  padding: 0 16px;
+  border-radius: var(--radius-sm);
+  border: 1px solid rgba(242, 96, 96, 0.45);
+  background: rgba(242, 96, 96, 0.08);
+  color: #f26060;
+  font-size: 13px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.btn-stop:hover:not(:disabled) {
+  background: rgba(242, 96, 96, 0.18);
+}
+.btn-stop:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 .btn-back:hover {
   border-color: var(--border2);

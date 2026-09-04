@@ -1,5 +1,6 @@
-import mysql, { type RowDataPacket, type ResultSetHeader } from "mysql2/promise";
+import type { RowDataPacket, ResultSetHeader } from "mysql2/promise";
 import type { ExecTask } from "./common";
+import { pool } from "./db";   // 连接池统一在 db.ts（阶段 2 并池）
 
 /** 任务状态（对应看板四列） */
 export type TaskStatus = "todo" | "doing" | "done" | "failed";
@@ -25,16 +26,6 @@ export interface Task {
     update_time?: string;
     deleted?: number;
 }
-
-const pool = mysql.createPool({
-    host: "localhost",
-    user: "root",
-    // DB 密码从 .env 读取（bun 自动加载），禁止硬编码明文入库
-    password: process.env.DB_PASSWORD ?? "",
-    database: "crewforge",
-    waitForConnections: true,
-    connectionLimit: 5,
-});
 
 // ============================================================
 // 基础 CRUD

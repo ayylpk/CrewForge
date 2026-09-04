@@ -10,9 +10,11 @@
 import type { BaseMessage } from "@langchain/core/messages";
 import type { Graph, GraphNode } from "@langchain/langgraph";
 import { randomUUID } from "node:crypto";
-import mysql, { type RowDataPacket } from "mysql2/promise";
+import type { RowDataPacket } from "mysql2/promise";
 import { type FunctionItem} from "./manager"
 import { initModels } from "./models";
+import { pool } from "./db";
+import { javaBaseUrl } from "./settings";
 
 enum NODE { 
     "START",
@@ -36,13 +38,7 @@ const INITFUNCTIONS:Record<string,any> = {
 }
 
 
-const pool = mysql.createPool({
-    host: "localhost",
-    user: "root",
-    // DB 密码从 .env 读取（bun 自动加载），禁止硬编码明文入库
-    password: process.env.DB_PASSWORD ?? "",
-    database: "crewforge",
-})
+// 连接池统一在 db.ts（阶段 2 并池：原先本文件与 task.ts 各一池、参数还硬编码）
 
 // 一行 sys_agent_node（节点声明，不是实现——实现由代码注册表提供）
 // 注意：这里不继承 RowDataPacket——它是"声明"类型，普通对象字面量要能直接赋值
@@ -230,7 +226,8 @@ export async function upsertProjectFile(projectId: number, filePath: string, con
         );
     }
     // agent 修改 → 通知 Java 清缓存（查询侧每次写缓存，仅修改侧清；失败不阻塞）
-    fetch(`http://localhost:8080/api/projectfile/cache/clear/${projectId}`, { method: "POST" })
+    // A7 根治：基址走 sys_settings.java_base_url（读不到时 settings.ts 内藏 localhost 兜底）
+    fetch(`${javaBaseUrl()}/api/projectfile/cache/clear/${projectId}`, { method: "POST" })
         .catch(() => { /* 后端未启动等场景忽略 */ });
 }
 
@@ -253,6 +250,25 @@ export async function getProjectConfirmMode(projectId: number): Promise<number> 
     );
     if (!rows || rows.length === 0) return 0;
     return rows[0]!.confirm_mode ?? 0;
+}
+
+/** 读取 dev_plan（JSON.parse 结果，脏数据/未定稿返回 null）+ 当前 status —— 阶段 2 续跑判定：有现成 plan 就跳过 PM 对话直接开工 */
+export async function getProjectPlan(projectId: number): Promise<{ plan: unknown | null; status: string | null }> {
+    if (!projectId) return { plan: null, status: null };
+    const [rows] = await pool.query<RowDataPacket[]>(
+        "SELECT dev_plan, status FROM sys_project WHERE id = ? AND deleted = 0 LIMIT 1",
+        [projectId],
+    );
+    if (!rows || rows.length === 0) return { plan: null, status: null };
+    const r = rows[0]!;
+    // ⚠️ dev_plan 是 JSON 列：mysql2 驱动自动反序列化成对象。按 TEXT 习惯 String() 再 parse
+    //   会得到 "[object Object]" 抛异常→伪装成"无 plan"，续跑永远回炉 PM 对话（阶段 2 live 逮到，F6 同坑三番）。
+    let plan: unknown | null = null;
+    try {
+        const raw = r.dev_plan as unknown;
+        if (raw != null) plan = typeof raw === "string" ? JSON.parse(raw) : raw;
+    } catch { /* 脏 JSON 视同无 plan */ }
+    return { plan, status: (r.status as string) ?? null };
 }
 
 /** 读取项目需求文本（sys_project.description + clarified_req 合并）——全绿灯首轮注入 PM 对话用（B2 需求注入） */

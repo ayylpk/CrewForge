@@ -25,9 +25,11 @@ import { BackendEngineer } from "./backendEngineer";
 import { FrontendEngineer } from "./frontendEngineer";
 import { TestEngineer } from "./testEngineer";
 import { Maintainer } from "./maintainer";
-import { getProjectAgents, getProjectNodes, getEdges, getProjectConfirmMode, getProjectRequirement } from "./Node";
+import { getProjectAgents, getProjectNodes, getEdges, getProjectConfirmMode, getProjectRequirement, getProjectPlan, updateProjectField } from "./Node";
 import { CliQuestioner, type Questioner } from "./GraphFactory";
-import { closeTaskBridge } from "./task";   // 出口保险：退出前冲干净在途 sys_task 写（9/3 run10 T4 竞态）
+import { closeTaskBridge, getTasksByProject, type Task } from "./task";   // 出口保险：退出前冲干净在途 sys_task 写（9/3 run10 T4 竞态）
+import { archiveProjectDir } from "./runEnv";
+import { refreshSettings } from "./settings";
 
 
 export interface TeamBundle {
@@ -90,8 +92,69 @@ export async function buildTeam(
     return { station, messageAgents, managers };
 }
 
-/** 项目级主流程：建团队 → 消息版常驻 → PM 多轮对话定稿 → 逐阶段下发架构师 → 等待收敛 */
+/** plan 形状校验（阶段 2 续跑用）：网页手填的 dev_plan 可能不对版，phases 非空且每阶段有数字 phase+name 才可用 */
+function usablePhases(plan: unknown): any[] | null {
+    const phases = (plan as any)?.phases;
+    if (!Array.isArray(phases) || phases.length === 0) return null;
+    const ok = phases.every((p: any) => Number.isInteger(Number(p?.phase)) && typeof p?.name === "string" && p.name);
+    return ok ? phases : null;
+}
+
+/**
+ * 断点续跑定位：第一个"没做完"的阶段下标。
+ * 阶段完成 = sys_task 里该 phase 有行且每行都是定论（done 通过 / failed 放弃或待重做）。
+ * ⚠️ failed 算定论是刻意的：failed→返工是**进程内** merger/maintainer 阶梯的事，跨进程重启后
+ *    bridgeTasks 只吃 todo 不吃 failed——若把它算未完成，对账器会无限重拆死循环；
+ *    人想把 failed 捡回来就在看板点重跑（变 todo），前端"开工"按钮再拉进程自然复活。
+ * 返回 phases.length 表示全部完成；无行阶段=没拆过任务，从这里开工。
+ */
+export async function findResumeIndex(projectId: number, phases: any[]): Promise<number> {
+    const tasks = await getTasksByProject(projectId);
+    const byPhase = new Map<number, Task[]>();
+    for (const t of tasks) {
+        if (t.phase_id == null) continue;
+        (byPhase.get(t.phase_id) ?? byPhase.set(t.phase_id, []).get(t.phase_id)!).push(t);
+    }
+    for (let i = 0; i < phases.length; i++) {
+        const rows = byPhase.get(Number(phases[i].phase)) ?? [];
+        if (rows.length === 0 || rows.some((r) => r.status !== "done" && r.status !== "failed")) return i;
+    }
+    return phases.length;
+}
+
+/**
+ * 逐阶段下发架构师，等到每个阶段的 phase_request（阶段边界信号）。
+ * 返回 "done"=全部阶段收工；"boundary"=在阶段边界主动收工（EXIT_AT_PHASE_BOUNDARY=1，
+ * Java 对账器会拉下一个进程从续跑点接着干——9/2 拍板"按阶段起进程"，断点续跑白送）。
+ */
+async function drivePhases(
+    station: TransferStation,
+    projectId: number,
+    plan: unknown,
+    phases: any[],
+    startIdx: number,
+    exitAtBoundary: boolean,
+): Promise<"done" | "boundary"> {
+    for (let i = startIdx; i < phases.length; i++) {
+        const isLast = i === phases.length - 1;
+        station.sendMessage("manager", "architect", JSON.stringify({ type: "phase_plan", plan, phase: phases[i], projectId }));
+        console.log(`[runner] → 架构师：阶段 ${phases[i].phase}「${phases[i].name}」`);
+        // 收阶段边界：maintainer 发 phase_done → 架构师发 phase_request 给 manager —— runner 代为响应
+        const req = await station.waitForMessage("manager");
+        const data = req ? JSON.parse(req.content) : null;
+        console.log(`[runner] 收到架构师请求：${data?.type ?? "?"}（阶段 ${data?.phase ?? "?"}）`);
+        if (!isLast && exitAtBoundary) {
+            console.log(`[runner] 阶段 ${phases[i].phase} 收口，按阶段边界退出（等 Java 对账续拉）`);
+            return "boundary";
+        }
+    }
+    return "done";
+}
+
+/** 项目级主流程：建团队 → 有 plan 直接开工（续跑），没有才 PM 对话 → 逐阶段下发 → 终态落库 */
 export async function runProject(projectId: number, questioner: Questioner): Promise<void> {
+    // 按阶段起进程模式（Java spawn 注入；手工跑默认关=旧行为单进程跑完全部阶段）
+    const exitAtBoundary = process.env.EXIT_AT_PHASE_BOUNDARY === "1";
     const { station, messageAgents, managers } = await buildTeam(projectId);
 
     // 1. 消息版团队常驻：start() 内含 while(true) 消息循环**永不 resolve**，必须 fire-and-forget
@@ -111,74 +174,93 @@ export async function runProject(projectId: number, questioner: Questioner): Pro
     const missing = need.filter((n) => !n.ok()).map((n) => n.label);
     if (missing.length > 0) {
         console.error(`[runner] ⚠️ 团队缺席「${missing.join("、")}」——请先到团队视图配齐成员再开工（本轮中止，不空烧 LLM）`);
+        // 配置错重拉也没用，直接终态，不留给对账器空转（阶段 2 孤儿回收配套）
+        await updateProjectField(projectId, { status: "failed" }).catch(() => {});
         process.exit(2);
     }
 
-    // 2. 图版 Manager：PM 多轮对话直到需求定稿（flag=true）
-    //    注意：同 thread 下 messages 由 reducer 追加，每轮只传"用户新输入"，不传全量（避免重复）
-    for (const manager of managers) {
-        const thread = `project-${projectId}`;
-        // ★ B2 需求注入：PM 对话是纯 messages 上下文——先把库里需求作为开场白喂进去。
-        //   缺这步，全绿灯模式对着空气喊"定稿"，PM 按契约拒绝空功能清单（9/2 阶段1验收实锤）。
-        const requirement = await getProjectRequirement(projectId);
-        if (!requirement) console.warn("[runner] ⚠️ 项目 description/clarified_req 均为空——PM 无法提炼功能，请先在网页端填写需求");
-        const seed = requirement ? [new HumanMessage(`【项目需求】\n${requirement}`)] : [];
-        let state: any = await manager.run({ messages: seed, projectId }, thread, questioner);
-        // 读取项目确认模式：全绿灯(0) → 一次都不确认，自动定稿
-        let confirmMode = 0;
-        try { confirmMode = await getProjectConfirmMode(projectId); } catch { /* 默认 0 */ }
-        const isAuto = confirmMode === 0;
-        if (isAuto) console.log("[runner] 全绿灯模式：自动推进，无需人工确认");
+    // 2. plan 来源二选一：DB 已有 dev_plan → 跳过 PM 对话直接开工（网页"确认方案→开工"零终端链路）；
+    //    没有 → 图版 Manager 多轮对话直到定稿（终端手工跑的首轮路径）
+    const dbPlan = (await getProjectPlan(projectId)).plan;
+    let plan: unknown = dbPlan;
+    let phases = usablePhases(dbPlan);
+    if (!phases) {
+        plan = null;   // 校验不过的脏 dev_plan 不带进对话路径
+        for (const manager of managers) {
+            const thread = `project-${projectId}`;
+            // ★ B2 需求注入：PM 对话是纯 messages 上下文——先把库里需求作为开场白喂进去。
+            //   缺这步，全绿灯模式对着空气喊"定稿"，PM 按契约拒绝空功能清单（9/2 阶段1验收实锤）。
+            const requirement = await getProjectRequirement(projectId);
+            if (!requirement) console.warn("[runner] ⚠️ 项目 description/clarified_req 均为空——PM 无法提炼功能，请先在网页端填写需求");
+            const seed = requirement ? [new HumanMessage(`【项目需求】\n${requirement}`)] : [];
+            let state: any = await manager.run({ messages: seed, projectId }, thread, questioner);
+            // 读取项目确认模式：全绿灯(0) 或 Java spawn（AUTO_CONFIRM=1，无终端）→ 自动定稿
+            // ⚠️ 只看 confirmMode 的话混合(1)模式在子进程里会拿 "y" 当对话输入空转 30 轮（A9 根治）
+            let confirmMode = 0;
+            try { confirmMode = await getProjectConfirmMode(projectId); } catch { /* 默认 0 */ }
+            const isAuto = confirmMode === 0 || process.env.AUTO_CONFIRM === "1";
+            if (isAuto) console.log(`[runner] 自动推进模式（confirmMode=${confirmMode}${process.env.AUTO_CONFIRM === "1" ? " + AUTO_CONFIRM" : ""}），无需人工确认`);
 
-        let turns = 0;
-        while (!state?.flag && turns < 30) {
-            const reply = state?.messages?.at(-1);
-            if (reply) {
-                const text = typeof reply.content === "string" ? reply.content : JSON.stringify(reply.content);
-                console.log(`\n[PM] ${text}`);
-            }
-            // 全绿灯模式：自动输入"定稿"跳过 PM 对话
-            if (isAuto) {
-                console.log("[runner] 全绿灯模式：自动定稿");
-                state = await manager.run({ messages: [new HumanMessage("定稿")], projectId }, thread, questioner);
+            let turns = 0;
+            while (!state?.flag && turns < 30) {
+                const reply = state?.messages?.at(-1);
+                if (reply) {
+                    const text = typeof reply.content === "string" ? reply.content : JSON.stringify(reply.content);
+                    console.log(`\n[PM] ${text}`);
+                }
+                // 全绿灯模式：自动输入"定稿"跳过 PM 对话
+                if (isAuto) {
+                    console.log("[runner] 全绿灯模式：自动定稿");
+                    state = await manager.run({ messages: [new HumanMessage("定稿")], projectId }, thread, questioner);
+                    turns++;
+                    continue;
+                }
+                const userInput = await questioner.ask({
+                    questionId: `pm-${projectId}-${turns}`,
+                    prompt: "（输入下一句需求；输入 定稿 结束需求确认）",
+                    options: ["定稿"],
+                });
+                state = await manager.run({ messages: [new HumanMessage(userInput)], projectId }, thread, questioner);
                 turns++;
-                continue;
             }
-            const userInput = await questioner.ask({
-                questionId: `pm-${projectId}-${turns}`,
-                prompt: "（输入下一句需求；输入 定稿 结束需求确认）",
-                options: ["定稿"],
-            });
-            state = await manager.run({ messages: [new HumanMessage(userInput)], projectId }, thread, questioner);
-            turns++;
-        }
-        if (turns >= 30) console.log("[runner] PM 对话轮次超限，中止");
+            if (turns >= 30) console.log("[runner] PM 对话轮次超限，中止");
 
-        const plan = state?.plan;
-        if (!plan || !Array.isArray(plan.phases) || plan.phases.length === 0) {
-            console.log("[runner] 需求未产出 plan（用户未定稿），流程结束");
-            continue;
+            plan = state?.plan;
+            phases = usablePhases(plan);
+            if (phases) break;
+            console.log("[runner] 需求未产出 plan（用户未定稿），试下一个项目经理");
         }
-
-        // 3. ★ 阶段流转：逐阶段发 phase_plan 给架构师，等 phase_request 再发下一阶段
-        //    （architect 收 maintainer 的 phase_done 后发 phase_request 给 manager —— runner 代为响应）
-        const phases: any[] = plan.phases;
-        for (let i = 0; i < phases.length; i++) {
-            station.sendMessage("manager", "architect", JSON.stringify({ type: "phase_plan", plan, phase: phases[i], projectId }));
-            console.log(`[runner] → 架构师：阶段 ${phases[i].phase}「${phases[i].name}」`);
-            if (i < phases.length - 1) {
-                const req = await station.waitForMessage("manager");
-                const data = req ? JSON.parse(req.content) : null;
-                console.log(`[runner] 收到架构师请求：${data?.type ?? "?"}（阶段 ${data?.phase ?? "?"}）`);
-            }
+        if (!phases) {
+            if (managers.length === 0) console.log("[runner] 项目未配置项目经理成员，且库里无 dev_plan——无法开工");
+            await updateProjectField(projectId, { status: "failed" }).catch(() => {});
+            return;
         }
-        // 4. 最后一个阶段：再收一次 phase_request（或阶段完成），确认流水线走完
-        const last = await station.waitForMessage("manager");
-        const lastData = last ? JSON.parse(last.content) : null;
-        console.log(`[runner] 流水线完成：${lastData?.type ?? "无后续请求"}`);
+        // 阶段流转前把定稿 plan 写库（saveDevPlan 是 manager 图内行为；对话路径走到这说明库里还没有）
+        console.log(`[runner] PM 定稿，${phases.length} 个阶段`);
+    } else {
+        console.log(`[runner] 检测到库中 dev_plan（${phases.length} 个阶段），跳过 PM 对话直接开工`);
     }
 
-    console.log("[runner] 流程结束（Ctrl+C 退出）");
+    // 3. 续跑点判定（阶段完成=sys_task 该 phase 全 done）；全新开工先清场（F15 拍板：旧树归档不覆盖）
+    const startIdx = await findResumeIndex(projectId, phases);
+    if (startIdx === 0 && (await getTasksByProject(projectId)).length === 0) {
+        const moved = archiveProjectDir(projectId);
+        if (moved) console.log(`[runner] 全新开工，旧产物树已归档 → ${moved}`);
+    }
+    if (startIdx >= phases.length) {
+        console.log("[runner] 全部阶段均已完成（无待办任务），直接收尾 status=done");
+        await updateProjectField(projectId, { status: "done" });
+        return;
+    }
+    if (startIdx > 0) console.log(`[runner] 断点续跑：跳过已完成阶段前 ${startIdx} 个，从阶段 ${phases[startIdx]!.phase}「${phases[startIdx]!.name}」继续`);
+
+    // 4. 逐阶段下发（边界行为见 drivePhases）
+    const outcome = await drivePhases(station, projectId, plan, phases, startIdx, exitAtBoundary);
+    if (outcome === "done") {
+        await updateProjectField(projectId, { status: "done" });
+        console.log("[runner] 全阶段完成 → status=done 已落库");
+    }
+    console.log("[runner] 流程结束");
 }
 
 // ---------- CLI 入口（沙箱：命令行或 Java spawn 直接启动） ----------
@@ -195,6 +277,9 @@ if (import.meta.main) {
   }
 
   console.log(`[runner] 启动项目 ${projectId}...`);
+  // 配置层先热身后开跑：sys_settings 进缓存（30s 心跳刷新，设置页改动半分钟内生效；读失败静默走内置）
+  await refreshSettings(true);
+  setInterval(() => { void refreshSettings(true); }, 30_000).unref();
   runProject(projectId, new CliQuestioner())
     .then(async () => {
       console.log("[runner] 流程结束，冲刷 sys_task 桥后退出");
