@@ -29,6 +29,7 @@ import { getProjectAgents, getProjectNodes, getEdges, getProjectConfirmMode, get
 import { type Questioner } from "./GraphFactory";
 import { pickQuestioner } from "./confirm";
 import { closeTaskBridge, getTasksByProject, type Task } from "./task";   // 出口保险：退出前冲干净在途 sys_task 写（9/3 run10 T4 竞态）
+import { closeTdesignMcp } from "./tdesignMcp";                            // 出口保险：关 TDesign 文档通道（stdio 子进程）
 import { archiveProjectDir } from "./runEnv";
 import { refreshSettings } from "./settings";
 
@@ -286,11 +287,13 @@ if (import.meta.main) {
     .then(async () => {
       console.log("[runner] 流程结束，冲刷 sys_task 桥后退出");
       await closeTaskBridge();   // 等在途写落完（3s 上限兜底），再 exit
+      await closeTdesignMcp();   // 关 TDesign 文档通道（stdio 子进程），没起过则空操作
       process.exit(0);
     })
     .catch(async (e) => {
       console.error("[runner] 进程异常退出:", e);
       await closeTaskBridge().catch(() => {});
+      await closeTdesignMcp().catch(() => {});
       process.exit(1);
     });
 }

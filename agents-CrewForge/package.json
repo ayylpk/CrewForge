@@ -18,10 +18,12 @@
     "@langchain/core": "^1.2.8",
     "@langchain/deepseek": "^1.1.8",
     "@langchain/langgraph": "1.4.9",
+    "@langchain/mcp-adapters": "^1.1.4",
     "@langchain/openai": "1.5.8",
     "@langchain/tavily": "1.2.0",
     "langchain": "1.5.5",
     "mysql2": "3.23.3",
+    "tdesign-mcp-server": "^0.2.4",
     "undici": "7.29.0",
     "zod": "4.4.3"
   }

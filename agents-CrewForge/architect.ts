@@ -31,6 +31,7 @@ import { writeWorkspace, type Pair, type ExecTask, type Plan, type planItem } fr
 import { currentProjectId, projectDir } from "./runEnv";
 import { ensureTasksForPhase, getTasksByStatus, updateStatusByExt } from "./task";
 import { pickQuestioner } from "./confirm";
+import { TDESIGN_THEME_CSS } from "./tdesignMcp";
 
 // ---------- 模型 ----------
 
@@ -91,6 +92,7 @@ export const stack_prompt: string = `
 - 技术选择必须服务于输入中的业务模块和数据需求，不新增业务功能。
 - moduleTech 必须覆盖每个输入模块，module 名必须原样复制。
 - 表字段应能支撑输入中的功能和验收，不设计与当前阶段无关的表。
+- 前端技术栈固定为 Vue 3 + TDesign Vue Next（9/5 拍板 [[frontend-uilib-trial-0903]]）：只在此范围内细化（主题走 --td-* 变量覆盖、按需引入），不得改用其他组件库。
 - 不输出接口路径、文件清单或代码；这些由后续 Agent 负责。
 
 ## 输出
@@ -146,6 +148,7 @@ export const bootstrap_prompt: string = `
 
 ## 约束
 - 只写项目地基文件（脚手架/配置/DDL/占位），绝不写业务代码（Controller/Service/页面组件由开发 Agent 负责）
+- 前端脚手架的 package.json 必须包含 vue、vite、@vitejs/plugin-vue，以及 UI 库 tdesign-vue-next 与按需引入插件 unplugin-vue-components（前端栈固定 Vue3 + TDesign，见 9/5 拍板 [[frontend-uilib-trial-0903]]）
 - path 使用相对路径（如 pom.xml、src/main/resources/application.yml），不含 ../
 - content 必须是完整可用的文件内容；占位文件 content 用空字符串
 - 文件数量控制在合理范围（5-15 个），不要重复造轮子
@@ -262,6 +265,35 @@ type ResolutionFront = z.infer<typeof resolutionSchema>["tasks"][number][1];
 
 // ---------- 节点实现（codeRegistry，DB 的 code_key 引用） ----------
 
+/**
+ * TDesign 地基强制（9/5 集成，代码兜底不靠提示词自觉）：
+ *  ① 前端形态的 package.json（路径以 frontend|web|client|ui 开头，或依赖里已有 vue/vite）
+ *     → 缺 tdesign-vue-next / unplugin-vue-components 就合并进去（已有的绝不动，防覆盖用户改过的版本）；
+ *  ② 整批文件没有含 --td-* 的 theme css → 补一份 frontend/src/styles/td-theme.css。
+ * 背景：stack/bootstrap 提示词会被 DB 旧行覆盖（sys_agent_node 早先入库），代码侧才钉得住。
+ * 导出供 smoke 测试。
+ */
+export function enforceTdesignFoundation(files: { path: string; content: string }[]): void {
+    for (const f of files) {
+        if (!/package\.json$/i.test(f.path) || !f.content) continue;
+        let pkg: any;
+        try { pkg = JSON.parse(f.content); } catch { continue; }   // 非 JSON：留给测试工位，这里不硬来
+        const allDeps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) };
+        const isFrontend = /^(frontend|web|client|ui)[\\/]/i.test(f.path)
+            || Object.keys(allDeps).some(d => /^vue$|^vite$|tdesign/i.test(d));
+        if (!isFrontend) continue;
+        pkg.dependencies = { "tdesign-vue-next": "^1.20.7", ...(pkg.dependencies ?? {}) };
+        pkg.devDependencies = { "unplugin-vue-components": "latest", ...(pkg.devDependencies ?? {}) };
+        f.content = JSON.stringify(pkg, null, 2);
+        console.log(`[architect] TDesign 地基：${f.path} 已合并组件库依赖`);
+    }
+    const hasTheme = files.some(f => /\.css$/i.test(f.path) && (f.content ?? "").includes("--td-"));
+    if (!hasTheme && files.length > 0) {
+        files.push({ path: "frontend/src/styles/td-theme.css", content: TDESIGN_THEME_CSS });
+        console.log("[architect] TDesign 地基：补写 frontend/src/styles/td-theme.css（--td-* 藏青主题兜底）");
+    }
+}
+
 /** 工程地基落地：读 basePlan（actions/ddl）→ LLM 转文件清单 → 逐个写盘（沙箱校验） */
 const bootstrapNode: StateNodeFn = async (state, node) => {
     const basePlan = state?.basePlan;
@@ -311,6 +343,7 @@ const bootstrapNode: StateNodeFn = async (state, node) => {
             { timeoutMs: 300_000 },
         );
         const files = parsed?.files ?? [];
+        enforceTdesignFoundation(files);   // 9/5：代码强制 TDesign 地基（依赖合并 + theme 兜底），防 DB 旧提示词漏掉
         for (const f of files) {
             if (!f?.path) continue;
             try {

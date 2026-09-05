@@ -23,6 +23,10 @@ import { writeWorkspace, readWorkspace, type ExecTask } from "./common";
 import { currentProjectId } from "./runEnv";
 import { updateStatusByExt } from "./task";
 import { nodePrompt, type Node } from "./Node";
+import {
+    TDESIGN_WHITELIST, TDESIGN_WHITELIST_TAGS, TDESIGN_THEME_CSS,
+    fetchComponentDocs, extractUsedComponents, findHallucinated, buildDocsBlock,
+} from "./tdesignMcp";
 
 const FRONTEND_MODEL_JSON = JSON.stringify({
     provider: "deepseek",
@@ -60,18 +64,34 @@ export const file_prompt: string = `
 - 只输出目标文件的完整源代码，不要 JSON、Markdown 代码围栏或额外说明。
 `;
 
+// ---------- TDesign 规约（9/5 MCP 集成） ----------
+// 刻意不写进 design_prompt/file_prompt 常量本体，而是构造函数里"追加"到最终提示词：
+// DB 的 sys_agent_node 早先已入库旧 prompt，只改内置常量对已建 agent 不生效；
+// 代码侧追加 = 无论节点怎么自定义，规约必在场（同 DEFAULT_THEME 的注入姿势）。
+
+/** 工位 A 追加：设计稿必须声明选用组件（→ 代码侧预取文档 + 幻觉闸门的输入） */
+const TDESIGN_DESIGN_RULE = `
+
+## 组件库规约（强制，与上文冲突时以本节为准）
+- UI 统一 TDesign Vue Next，模板只用 \`<t-*>\` 标签；可用组件白名单：${TDESIGN_WHITELIST_TAGS}
+- 白名单外的能力用原生 HTML/CSS 实现，不得发明组件（写了也会在下游闸门被核验打回）。
+- 设计稿末尾必须单起一行声明本任务选用的组件，格式严格为：
+  【组件清单】<t-form>、<t-input>、<t-button>
+  （只列白名单内、本任务真正用到的；一个都不用就写【组件清单】无）`;
+
+/** 工位 B 追加：只准用白名单组件、API 照抄注入的真实文档、主题走 --td-* 变量 */
+const TDESIGN_FILE_RULE = `
+
+## 组件库规约（强制）
+- 只允许 TDesign Vue Next 组件：<t-button> 等 <t-*> 标签，白名单：${TDESIGN_WHITELIST_TAGS}
+- 禁止其他组件库标签（el-*、a-*、van-*、v-* 除 vue 内置外）；禁止凭记忆发明 <t-xxx>。
+- 下方若附带"TDesign 组件真实 API"文档，props/事件名/v-model 一律照抄文档；文档里没有的属性不要写。
+- 颜色/圆角/间距一律引用输入给定的 --td-* 主题变量，不硬编码色值。`;
+
 // ---------- 基建占位（移植自 _legacy-agents；正式版架构师产出 theme.css / request 封装） ----------
 
-const DEFAULT_THEME = `
-:root {
-  --primary: #1a2a4a;      /* 主色：藏青 */
-  --accent: #00d4ff;       /* 强调：赛博蓝 */
-  --bg: #0d1117;           /* 背景 */
-  --card: #161b26;         /* 卡片 */
-  --text: #e6e6e6;         /* 文字 */
-  --radius: 8px;
-}
-`;
+// 主题串在 tdesignMcp.ts 单一来源（architect bootstrap 落盘用的同一份，防提示词与真实文件漂移）
+const DEFAULT_THEME = TDESIGN_THEME_CSS;
 
 const DEFAULT_REQUEST = `
 // request.ts —— 全局请求封装（基建产出）
@@ -101,6 +121,22 @@ function extractGeneratedCode(content: unknown): string | null {
     return code || null;
 }
 
+// ---------- 工具：任务级 TDesign 文档上下文（预取结果 + 通道存活标记） ----------
+
+/** 一个任务共享的文档上下文：docs 组件名→原始文档串；alive=false 表示 MCP 通道已挂（闸门放行） */
+interface TDesignContext {
+    docs: Record<string, string>;
+    alive: boolean;
+}
+
+/** 解析设计稿的【组件清单】声明行 → 组件名列表（剥 <t-> 壳；只留白名单内；≤15 控 prompt 体量）。导出供 smoke 测试 */
+export function parseDesignComponents(design: string | null): string[] {
+    if (!design) return [];
+    const line = design.match(/【组件清单】(.+)/)?.[1] ?? "";
+    const names = [...new Set([...line.matchAll(/t-([a-z][a-z0-9-]*)/g)].map(m => m[1] ?? ""))].filter(Boolean);
+    return names.filter(n => (TDESIGN_WHITELIST as readonly string[]).includes(n)).slice(0, 15);
+}
+
 // ============================================================
 // FrontendEngineer —— 双队列流水线（任务 → 设计稿 → 代码）
 // ============================================================
@@ -117,8 +153,8 @@ export class FrontendEngineer extends BaseAgent {
 
     constructor(name: string, station: TransferStation, nodes: Node[] = []) {
         super(name, roles.frontendEngineer, station);
-        this.designPrompt = nodePrompt(nodes, "页面设计", design_prompt);
-        this.filePrompt = nodePrompt(nodes, "代码实现", file_prompt);
+        this.designPrompt = nodePrompt(nodes, "页面设计", design_prompt) + TDESIGN_DESIGN_RULE;
+        this.filePrompt = nodePrompt(nodes, "代码实现", file_prompt) + TDESIGN_FILE_RULE;
         this.on("task", { fromNames: ["architect", "merger"] }, ({ data }) => {
             const t = data.task as ExecTask;
             this.taskQueue.push({ task: t });
@@ -194,13 +230,23 @@ export class FrontendEngineer extends BaseAgent {
                 continue;
             }
 
+            // TDesign 文档通道（9/5）：设计稿声明的【组件清单】→ 任务级预取真实 API（一任务一次，任务内各文件共享）
+            const comps = parseDesignComponents(design);
+            const tdesign: TDesignContext = { docs: {}, alive: true };
+            if (comps.length > 0) {
+                const fetched = await fetchComponentDocs(comps);
+                if (fetched) Object.assign(tdesign.docs, fetched);
+                else tdesign.alive = false;   // 通道挂 → 幻觉闸门放行（旁路，不阻塞任务）
+                console.log(`[${this.name}] ${task.id} TDesign 预取 ${comps.length} 组件文档${tdesign.alive ? "" : "（通道不可用，闸门降级）"}`);
+            }
+
             // 任务内已生成文件记忆（同任务后写的文件能看到先写的，跨文件衔接）
             const writtenFiles = new Map<string, string>();
             const implementation: { filePath: string; code: string }[] = [];
             let failed = false;
 
             for (const filePath of task.files) {
-                const code = await this.generateFile(task, design, filePath, writtenFiles);
+                const code = await this.generateFile(task, design, filePath, writtenFiles, tdesign);
                 if (!code) { failed = true; break; }
                 implementation.push({ filePath, code });
             }
@@ -225,6 +271,7 @@ export class FrontendEngineer extends BaseAgent {
         design: string | null,
         filePath: string,
         writtenFiles: Map<string, string>,
+        tdesign: TDesignContext,
     ): Promise<string | null> {
         const model = initModels(FRONTEND_MODEL_JSON);
         // 已有文件（本任务内先写的）注入，供最小修改/衔接
@@ -247,12 +294,16 @@ export class FrontendEngineer extends BaseAgent {
         let feedback = "";
         for (let attempt = 1; attempt <= 3; attempt++) {
             const ts = Date.now();
+            // 文档段每轮现拼：闸门补拉的新组件文档从第 2 轮起参与生成（写前必查的闭环）
+            const docsBlock = buildDocsBlock(Object.keys(tdesign.docs), tdesign.docs);
+            const tdesignHint = docsBlock ? `\n\n${docsBlock}` : "";
             try {
                 const res = await invokeWithTimeout<any>(`${task.id} ${filePath}`, DEFAULT_TIMEOUT_MS, sig => model.invoke([
                     new SystemMessage(
                         this.filePrompt +
                         `\n\n## 当前子任务\n${JSON.stringify(fileTask, null, 2)}` +
                         designHint +
+                        tdesignHint +
                         existingContent +
                         dbExistingPrompt +
                         `\n\n## 主题变量\n${DEFAULT_THEME}\n\n## 请求封装\n${DEFAULT_REQUEST}` +
@@ -261,8 +312,32 @@ export class FrontendEngineer extends BaseAgent {
                 ], { signal: sig }));
                 console.log(`[${this.name}] ${task.id} ${filePath} ${Date.now() - ts}ms`);
                 const code = extractGeneratedCode(res.content);
-                if (code) return code;
-                feedback = "\n\n## 上次输出没有提取到代码：请只输出目标文件的完整源代码，不要 Markdown 围栏、JSON 或说明。";
+                if (!code) {
+                    feedback = "\n\n## 上次输出没有提取到代码：请只输出目标文件的完整源代码，不要 Markdown 围栏、JSON 或说明。";
+                    continue;
+                }
+
+                // ---- 幻觉闸门（9/5）：文件用到的每个 <t-*> 必须验真（通道活着才卡，挂了放行=旁路） ----
+                const used = extractUsedComponents(code);
+                if (used.length > 0 && tdesign.alive) {
+                    const fresh = used.filter(n => !(n in tdesign.docs));   // 设计稿没列但写了：补验（真实组件也补文档，下轮可用）
+                    if (fresh.length > 0) {
+                        const extra = await fetchComponentDocs(fresh);
+                        if (extra) Object.assign(tdesign.docs, extra);
+                        else tdesign.alive = false;   // 通道中途挂 → 本任务后续放行
+                    }
+                    const hallucinated = tdesign.alive ? findHallucinated(used, tdesign.docs) : [];
+                    if (hallucinated.length > 0) {
+                        if (attempt < 3) {
+                            feedback = `\n\n## 闸门打回：TDesign 不存在这些组件 ${hallucinated.map(n => `<t-${n}>`).join("、")}。只允许白名单组件或原生 HTML 实现该功能，重新输出完整文件。`;
+                            console.log(`[${this.name}] ${task.id} ${filePath} 闸门：幻觉组件 ${hallucinated.join("、")}（第 ${attempt} 次打回）`);
+                            continue;
+                        }
+                        console.warn(`[${this.name}] ${task.id} ${filePath} 闸门：幻觉组件打回耗尽，本文件判失败`);
+                        return null;   // 宁可失败走返工循环，不交幻觉代码
+                    }
+                }
+                return code;
             } catch (error) {
                 feedback = `\n\n## 上次调用失败，请重试：${(error as Error).message.slice(0, 200)}`;
                 console.log(`[${this.name}] ${task.id} ${filePath} 失败（第 ${attempt} 次）：${(error as Error).message.slice(0, 80)}`);
