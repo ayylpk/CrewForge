@@ -40,5 +40,9 @@ public class Settings {
     private Integer confirmTimeoutMin;
     /** 1=冒烟追加 build（阶段 4 消费，默认关保演示稳定） */
     private Integer smokeBuild;
+    /** T7a 最外层端点总闸：全局同时在飞 LLM 调用上限（默认 6；引擎 concurrency.ts 消费） */
+    private Integer llmConcurrency;
+    /** T7a 工位阶段令牌：每把阶段闸的 token 数（默认 5；前后端各阶段共用此旋钮） */
+    private Integer stationSlots;
     private LocalDateTime updateTime;
 }

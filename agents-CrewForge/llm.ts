@@ -9,6 +9,7 @@
 
 import { SystemMessage, HumanMessage, type BaseMessage } from "@langchain/core/messages";
 import { initModels } from "./models";
+import { gate } from "./concurrency";
 
 /** 默认模型配置（没有 DEEPSEEK_API_KEY 环境变量时用不了，模板不管） */
 export const DEFAULT_MODEL_JSON = JSON.stringify({
@@ -37,24 +38,32 @@ export async function callLLM(
     return typeof res.content === "string" ? res.content : JSON.stringify(res.content);
 }
 
-/** 带超时的模型调用：超时先 abort 底层请求，再以明确错误拒绝（不是只挂个 race 就完事） */
+/** 带超时的模型调用：超时先 abort 底层请求，再以明确错误拒绝（不是只挂个 race 就完事）。
+ *  T7a（9/8）：全仓所有 LLM 调用都收口在这——最外层端点总闸（gate "llm"）就挂这里，
+ *  一个改道管住架构师/PM/四阶段工位/测试全部角色。**排队时间不吃调用超时**：
+ *  先 acquire 再开表（否则闸口排队会被误判成"模型慢"掐死，重蹈 9/2 超时误杀冤案的覆辙）。 */
 export async function invokeWithTimeout<T>(
     label: string,
     ms: number,
     fn: (signal: AbortSignal) => Promise<T>,
 ): Promise<T> {
-    const ctrl = new AbortController();
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const timeout = new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-            ctrl.abort();
-            reject(new Error(`${label} 超时 ${Math.round(ms / 1000)}s，已取消请求`));
-        }, ms);
-    });
+    await gate("llm").acquire();
     try {
-        return await Promise.race([fn(ctrl.signal), timeout]);
+        const ctrl = new AbortController();
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const timeout = new Promise<never>((_, reject) => {
+            timer = setTimeout(() => {
+                ctrl.abort();
+                reject(new Error(`${label} 超时 ${Math.round(ms / 1000)}s，已取消请求`));
+            }, ms);
+        });
+        try {
+            return await Promise.race([fn(ctrl.signal), timeout]);
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
     } finally {
-        if (timer) clearTimeout(timer);
+        gate("llm").release();
     }
 }
 

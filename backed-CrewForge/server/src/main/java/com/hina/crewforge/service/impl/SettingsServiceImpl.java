@@ -51,6 +51,8 @@ public class SettingsServiceImpl implements SettingsService {
         m.put("javaBaseUrl", s.getJavaBaseUrl());
         m.put("confirmTimeoutMin", s.getConfirmTimeoutMin());
         m.put("smokeBuild", s.getSmokeBuild() != null && s.getSmokeBuild() == 1);
+        m.put("llmConcurrency", s.getLlmConcurrency());
+        m.put("stationSlots", s.getStationSlots());
         return m;
     }
 
@@ -105,6 +107,17 @@ public class SettingsServiceImpl implements SettingsService {
             s.setConfirmTimeoutMin(min);
         }
         if (dto.getSmokeBuild() != null) s.setSmokeBuild(dto.getSmokeBuild() ? 1 : 0);
+        if (dto.getLlmConcurrency() != null) {
+            // T7a：端点总闸 1~16（引擎侧还有 clamp 兜底，这里挡明显手滑）
+            int n = dto.getLlmConcurrency();
+            if (n < 1 || n > 16) throw new BaseException("LLM 并发闸需在 1~16 之间");
+            s.setLlmConcurrency(n);
+        }
+        if (dto.getStationSlots() != null) {
+            int n = dto.getStationSlots();
+            if (n < 1 || n > 12) throw new BaseException("阶段令牌需在 1~12 之间");
+            s.setStationSlots(n);
+        }
 
         // openai 路必须有 baseURL；deepseek 路留空=官方端点
         if ("openai".equals(s.getModelKind()) && (s.getModelUrl() == null || s.getModelUrl().isBlank())) {

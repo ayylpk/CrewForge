@@ -25,6 +25,7 @@ import { updateStatusByExt } from "./task";
 import { nodePrompt, type Node } from "./Node";
 import { buildKnown, checkFile, gateFeedback } from "./checkers";
 import { contractPromptBlock, loadContracts } from "./contracts";
+import { gate } from "./concurrency";
 import {
     TDESIGN_WHITELIST, TDESIGN_WHITELIST_TAGS, TDESIGN_THEME_CSS,
     fetchComponentDocs, extractUsedComponents, findHallucinated, buildDocsBlock,
@@ -179,20 +180,25 @@ export class FrontendEngineer extends BaseAgent {
     }
 
     override async onStart(): Promise<void> {
-        // A 工位 ×1 + B 工位 ×2（B 是逐文件生成，通常是瓶颈，多起几个）
-        void this.designWorker();
-        void this.codeWorker();
-        void this.codeWorker();
+        // T7a（9/8 用户拍板，与 backendEngineer 同款）：队列无上限，token 限在制（出厂各 5）
+        for (let i = 0; i < 5; i++) void this.designWorker();
+        for (let i = 0; i < 5; i++) void this.codeWorker();
     }
 
     // ---------- 工位 A：任务 → 设计稿 ----------
 
     private async designWorker(): Promise<void> {
+        const g = gate("frontend.design");
         while (true) {
             const { task } = await this.taskQueue.pop();
-            console.log(`[${this.name}] ${task.id} 进入设计工位`);
-            const design = await this.generateDesign(task);   // 失败返回 null（降级）
-            this.designQueue.push({ task, design });          // 塞进下游，立即回头
+            await g.acquire();
+            try {
+                console.log(`[${this.name}] ${task.id} 进入设计工位`);
+                const design = await this.generateDesign(task);   // 失败返回 null（降级）
+                this.designQueue.push({ task, design });          // 塞进下游，立即回头
+            } finally {
+                g.release();   // A 阶段"落盘"=移交下游（含降级 null）
+            }
         }
     }
 
@@ -222,8 +228,11 @@ export class FrontendEngineer extends BaseAgent {
     // ---------- 工位 B：设计稿 → 逐文件实现 → 写盘 → 交付 ----------
 
     private async codeWorker(): Promise<void> {
+        const g = gate("frontend.code");
         while (true) {
             const { task, design } = await this.designQueue.pop();
+            await g.acquire();   // T7a：领令牌开工——整任务（含 TDesign 预取+逐文件+统一写盘）算一件在制
+            try {
             console.log(`[${this.name}] ${task.id} 进入实现工位${design ? "" : "（设计稿缺失，单步实现）"}`);
             if (task.files.length === 0) {
                 // 9/3 run11 修正：无 UI 任务（Swagger 调试类，架构师明示"无新增前端界面"）= 没有文件要写就是完成，
@@ -269,6 +278,9 @@ export class FrontendEngineer extends BaseAgent {
             }
             console.log(`[${this.name}] ${task.id} 前端实现已写入 workspace/`);
             this.send("merger", { type: "task_result", task, success: true });
+            } finally {
+                g.release();   // ★ 真落盘或判失败之后才归还（backend 同款，finally 罩住全部 continue/异常路径）
+            }
         }
     }
 

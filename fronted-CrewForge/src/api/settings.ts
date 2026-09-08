@@ -19,6 +19,10 @@ export interface RuntimeSettings {
   javaBaseUrl?: string | null
   confirmTimeoutMin?: number
   smokeBuild?: boolean
+  /** T7a：最外层端点总闸（全局在飞 LLM 调用上限，默认 6） */
+  llmConcurrency?: number | null
+  /** T7a：工位阶段令牌（每把阶段闸在制上限，默认 5） */
+  stationSlots?: number | null
 }
 
 export function fetchSettings(): Promise<RuntimeSettings> {

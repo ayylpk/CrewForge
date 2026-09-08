@@ -24,6 +24,7 @@ import { updateStatusByExt } from "./task";
 import { nodePrompt, type Node } from "./Node";
 import { buildKnown, checkFile, gateFeedback } from "./checkers";
 import { contractPromptBlock, loadContracts } from "./contracts";
+import { gate } from "./concurrency";
 
 const BACKEND_MODEL_JSON = JSON.stringify({
     provider: "deepseek",
@@ -130,21 +131,27 @@ export class BackendEngineer extends BaseAgent {
     }
 
     override async onStart(): Promise<void> {
-        // A 工位 ×2 + B 工位 ×2（并行度：瓶颈在 queue2 就多加 B，反之加 A）
-        void this.pseudoWorker();
-        void this.pseudoWorker();
-        void this.codeWorker();
-        void this.codeWorker();
+        // T7a（9/8 用户拍板）：队列不设上限，token 限在制——工位数对齐 station_slots（出厂 5），
+        // 真并发由全局闸管（同进程多实例共享一把）：2 个后端实例×5 worker=10 个取货员，
+        // 但全端同时在制伪代码 ≤5、在制代码任务 ≤5；空等的 worker 停在 pop 上，不占令牌
+        for (let i = 0; i < 5; i++) void this.pseudoWorker();
+        for (let i = 0; i < 5; i++) void this.codeWorker();
     }
 
     // ---------- 工位 A：任务 → 伪代码 ----------
 
     private async pseudoWorker(): Promise<void> {
+        const g = gate("backend.pseudo");
         while (true) {
             const { task } = await this.taskQueue.pop();
-            console.log(`[${this.name}] ${task.id} 进入伪代码工位`);
-            const pseudo = await this.generatePseudo(task);   // 失败返回 null（降级）
-            this.pseudoQueue.push({ task, pseudo });          // 塞进下游，立即回去处理下一个
+            await g.acquire();
+            try {
+                console.log(`[${this.name}] ${task.id} 进入伪代码工位`);
+                const pseudo = await this.generatePseudo(task);   // 失败返回 null（降级）
+                this.pseudoQueue.push({ task, pseudo });          // 塞进下游，立即回头处理下一个
+            } finally {
+                g.release();   // A 阶段的"落盘"=移交下游；降级路径（null）同样移交，都算归还
+            }
         }
     }
 
@@ -174,8 +181,11 @@ export class BackendEngineer extends BaseAgent {
     // ---------- 工位 B：伪代码 → 代码 → 写盘 → 交付 ----------
 
     private async codeWorker(): Promise<void> {
+        const g = gate("backend.code");
         while (true) {
             const { task, pseudo } = await this.pseudoQueue.pop();
+            await g.acquire();   // T7a：领令牌开工——整任务（逐文件生成+统一写盘）算一件在制
+            try {
             console.log(`[${this.name}] ${task.id} 进入代码工位${pseudo ? "" : "（伪代码缺失，单步生成）"}`);
             if (task.files.length === 0) {
                 this.send("merger", { type: "task_result", task, success: true });
@@ -210,6 +220,9 @@ export class BackendEngineer extends BaseAgent {
             }
             console.log(`[${this.name}] ${task.id} 后端实现已写入 workspace/`);
             this.send("merger", { type: "task_result", task, success: true });
+            } finally {
+                g.release();   // ★ 真落盘或判失败之后才归还（用户拍板的归还时机；finally 罩住全部 continue/异常路径）
+            }
         }
     }
 

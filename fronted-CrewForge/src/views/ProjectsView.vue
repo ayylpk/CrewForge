@@ -204,6 +204,19 @@
                 <span class="dim">阶段 4 启用；默认关保演示稳定</span>
               </label>
             </div>
+            <!-- T7a 并发令牌闸：队列无上限，token 限在制（30s 热调，看日志尾延迟拧阀门） -->
+            <div class="provider-row">
+              <span class="provider-label">LLM 总闸</span>
+              <input v-model.number="cfg.llmConcurrency" class="input" type="number" min="1" max="16"
+                     placeholder="6" />
+              <span class="dim">全局同时在飞调用上限（并发过高尾延迟暴涨，9/3 实测）</span>
+            </div>
+            <div class="provider-row">
+              <span class="provider-label">阶段令牌</span>
+              <input v-model.number="cfg.stationSlots" class="input" type="number" min="1" max="12"
+                     placeholder="5" />
+              <span class="dim">前后端每阶段同时在制任务数（落盘/失败才归还）</span>
+            </div>
           </div>
         </div>
 
@@ -273,6 +286,8 @@ async function openApiSettings() {
       javaBaseUrl: s.javaBaseUrl || '',
       confirmTimeoutMin: s.confirmTimeoutMin ?? 30,
       smokeBuild: !!s.smokeBuild,
+      llmConcurrency: s.llmConcurrency ?? undefined,
+      stationSlots: s.stationSlots ?? undefined,
     }
   } catch {
     /* 拦截器已提示 */

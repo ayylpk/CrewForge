@@ -22,4 +22,8 @@ public class SettingsDTO {
     private String javaBaseUrl;
     private Integer confirmTimeoutMin;
     private Boolean smokeBuild;
+    /** T7a 端点总闸并发上限 */
+    private Integer llmConcurrency;
+    /** T7a 阶段在制令牌数 */
+    private Integer stationSlots;
 }

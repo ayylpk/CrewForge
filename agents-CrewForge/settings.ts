@@ -28,6 +28,10 @@ export interface RtSettings {
     confirmTimeoutMin: number;
     /** 冒烟是否追加 build（阶段 4 消费） */
     smokeBuild: boolean;
+    /** T7a 最外层端点总闸：全局同时最多几个 LLM 调用在飞（默认 6；F1 实测 8 并发炸尾延迟） */
+    llmConcurrency: number;
+    /** T7a 阶段在制令牌：每把工位阶段闸的 token 数（默认 5；前后端各阶段共用这一个旋钮） */
+    stationSlots: number;
 }
 
 let cached: RtSettings | null = null;
@@ -51,6 +55,8 @@ export async function refreshSettings(force = false): Promise<void> {
                 javaBaseUrl: (r.java_base_url as string)?.trim() || "http://localhost:8080",
                 confirmTimeoutMin: Number(r.confirm_timeout_min ?? 30) || 30,
                 smokeBuild: Number(r.smoke_build ?? 0) === 1,
+                llmConcurrency: Number(r.llm_concurrency ?? 6) || 6,
+                stationSlots: Number(r.station_slots ?? 5) || 5,
             };
             loadedAt = Date.now();
         }
