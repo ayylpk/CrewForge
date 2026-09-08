@@ -19,7 +19,7 @@ import { BaseAgent } from "./BaseAgent";
 import { roles, type TransferStation, WorkQueue } from "./Hub";
 import { initModels } from "./models";
 import { invokeWithTimeout, DEFAULT_TIMEOUT_MS } from "./llm";
-import { writeWorkspace, readWorkspace, type ExecTask } from "./common";
+import { writeWorkspace, readWorkspace, sliceGuard, type ExecTask } from "./common";
 import { currentProjectId, projectDir } from "./runEnv";
 import { updateStatusByExt } from "./task";
 import { nodePrompt, type Node } from "./Node";
@@ -301,15 +301,16 @@ export class FrontendEngineer extends BaseAgent {
         const pid = currentProjectId();
         const known = buildKnown(pid != null ? projectDir(pid) : null, writtenFiles, task.files);
         const contract = contractPromptBlock(await loadContracts());       // T2：契约头部注入（旁路=无契约空串）
+        const guard = sliceGuard(task.files.length);                       // T4：竖切大任务收敛为 2 次×420s
 
         let feedback = "";
-        for (let attempt = 1; attempt <= 3; attempt++) {
+        for (let attempt = 1; attempt <= guard.maxAttempt; attempt++) {
             const ts = Date.now();
             // 文档段每轮现拼：闸门补拉的新组件文档从第 2 轮起参与生成（写前必查的闭环）
             const docsBlock = buildDocsBlock(Object.keys(tdesign.docs), tdesign.docs);
             const tdesignHint = docsBlock ? `\n\n${docsBlock}` : "";
             try {
-                const res = await invokeWithTimeout<any>(`${task.id} ${filePath}`, DEFAULT_TIMEOUT_MS, sig => model.invoke([
+                const res = await invokeWithTimeout<any>(`${task.id} ${filePath}`, guard.timeoutMs, sig => model.invoke([
                     new SystemMessage(
                         this.filePrompt +
                         contract +
@@ -340,7 +341,7 @@ export class FrontendEngineer extends BaseAgent {
                     }
                     const hallucinated = tdesign.alive ? findHallucinated(used, tdesign.docs) : [];
                     if (hallucinated.length > 0) {
-                        if (attempt < 3) {
+                        if (attempt < guard.maxAttempt) {
                             feedback = `\n\n## 闸门打回：TDesign 不存在这些组件 ${hallucinated.map(n => `<t-${n}>`).join("、")}。只允许白名单组件或原生 HTML 实现该功能，重新输出完整文件。`;
                             console.log(`[${this.name}] ${task.id} ${filePath} 闸门：幻觉组件 ${hallucinated.join("、")}（第 ${attempt} 次打回）`);
                             continue;
@@ -350,10 +351,10 @@ export class FrontendEngineer extends BaseAgent {
                     }
                 }
                 // ---- T1 编译闸门（9/8）：幻觉过了还要过编译——语法/SFC 结构/相对引用一锅查，
-                // 与幻觉闸共用 attempt×3 名额，耗尽同样判文件失败走返工（宁失败不交坏码）----
+                // 与幻觉闸共用本轮工位 attempt 名额，耗尽同样判文件失败走返工（宁失败不交坏码）----
                 const problems = await checkFile(filePath, code, known);
                 if (problems.length > 0) {
-                    if (attempt < 3) {
+                    if (attempt < guard.maxAttempt) {
                         feedback = gateFeedback(attempt, problems);
                         console.log(`[${this.name}] ${task.id} ${filePath} 编译闸门：${problems.join("；").slice(0, 80)}（第 ${attempt} 次打回）`);
                         continue;

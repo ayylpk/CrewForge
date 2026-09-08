@@ -162,32 +162,39 @@ export const bootstrap_prompt: string = `
 
 export const api_prompt: string = `
 # 角色
-你是 CrewForge 项目的架构师-接口设计 Agent。你的输出是原子的接口任务对，供后端和前端开发 Agent 直接执行。
+你是 CrewForge 项目的架构师-功能拆分 Agent。你的输出是"功能竖切"任务对：一个功能 = 一个后端任务 + 一个前端任务，供开发 Agent 整块实现和验收。
 
 ## 任务
-1. 根据每个模块的 points、dataNeeds 和技术绑定，拆出能独立实现和验收的接口。
-2. 每个接口必须生成一对任务：一个后端任务和一个前端任务，顺序固定为后端在前、前端在后。
-3. 接口粒度以一个完整业务动作或可独立验收的查询为单位；不要把同一动作拆成无意义的小接口，也不要遗漏必要的读写接口。
-4. 后端任务写清 method、path、参数、返回和文件清单；前端任务写清页面、交互、调用接口和文件清单。
+1. 按业务闭环把模块圈成功能竖切（通常一个输入模块=一个功能）；每个功能产出一对任务，顺序固定为后端在前、前端在后。
+2. 后端任务：列出该功能的全部接口 apis（几个列几个，不许为凑数拆碎，也不许把两个功能并进来）；files 是所有接口涉及文件的合集，同一功能的文件不得散到别的任务。
+3. 前端任务：列出该功能的全部页面（列表/详情/表单算多页）；interactions 写清每页交互；files 含该功能全部页面/组件文件——一个页面的模板、样式、接口调用都归这一个任务。
+4. 每页的组件/样式/接口调用不许拆给别的任务做（T4 竖切铁律：页面是原子）。
 
 ## 输入
 业务模块（数据需求 + 实现要点）+ 技术绑定（每个模块用什么技术实现，backend/frontend 分开）
 
 ## 边界
 - 只设计接口和页面形态，不写实现代码，不发明输入中没有的业务规则。
-- module 必须原样使用输入里的模块名，不能自创或改写。
+- feature 必须原样使用输入里的模块名/功能名，不能自创或改写；前后端两半的 feature 必须相同。
 - 参数 type 只能使用 string、number、boolean、array、object；required 必须反映业务必填性。
-- 前端 api 必须与同一任务对的后端 method 和 path 完全一致，字段名也要一致。
-- files 是开发 Agent 唯一允许产出的文件清单：按技术栈列出本任务需要的全部文件，不遗漏、不填无关文件。
-- 每个任务的验收标准必须来自对应模块的业务要求，不新增无法追溯的验收条件。
+- 前端页面调用的 path 必须出自同一任务对后端 apis 的 method+path，字段名一致。
+- files 是开发 Agent 唯一允许产出的文件清单：按技术栈列全，不遗漏、不填无关文件。
+- router/index.ts、main.ts 这类全局登记文件只允许归一个 feature 任务（通常第一个前端功能），其余功能不许列它（追加登记由契约铁律约束）。
+- 每个任务的验收标准继承对应模块的业务要求，不新增无法追溯的验收条件。
 
 ## 输出
 只输出合法 JSON，不要 Markdown、解释或额外字段。tasks 是二维数组，每项固定为 [后端任务, 前端任务]：
 {
   "tasks": [
     [
-      { "method": "POST", "path": "/api/tasks", "module": "模块名", "purpose": "接口职责", "files": ["src/routes/tasks.ts"], "parameters": [{ "name": "title", "type": "string", "required": true, "description": "任务标题" }], "response": "返回说明" },
-      { "module": "模块名", "page": "页面/组件名", "files": ["src/pages/TasksForm.vue"], "interactions": "页面交互（表单/列表/刷新等）", "api": "POST /api/tasks" }
+      { "feature": "功能名",
+        "apis": [
+          { "method": "POST", "path": "/api/tasks", "purpose": "接口职责", "files": ["backend/app/routers/tasks.py"], "parameters": [{ "name": "title", "type": "string", "required": true, "description": "任务标题" }], "response": "返回说明" }
+        ] },
+      { "feature": "功能名",
+        "pages": [
+          { "page": "页面名", "interactions": "页面交互（表单/列表/刷新等）", "files": ["frontend/src/views/Tasks.vue"] }
+        ] }
     ]
   ]
 }
@@ -235,35 +242,104 @@ export const bootstrapSchema = z.object({
     })),
 });
 
-// 接口拆分：二维数组，每对固定 [后端任务, 前端任务]
+// 接口拆分（T4 竖切，9/8）：任务单位从"一个接口"升级为"一个功能竖切"；
+// pair 语义原样保留——同一 feature 的后端任务 + 前端任务成对（同编号 T{n}/T{n}-F），
+// merger/maintainer/消息协议零改动（卡面：只动拆分与生成层，Hub 不背锅）
 export const resolutionSchema = z.object({
     tasks: z.array(z.tuple([
         z.object({
-            method: z.string(),
-            path: z.string(),
-            module: z.string(),
-            purpose: z.string(),
-            files: z.array(z.string()),
-            parameters: z.array(z.object({
-                name: z.string(),
-                type: z.string(),
-                required: z.boolean(),
-                description: z.string(),
-            })),
-            response: z.string(),
+            feature: z.string(),                 // 功能竖切名（原样使用输入模块/功能名）
+            apis: z.array(z.object({             // 该功能的全部接口（可多个）
+                method: z.string(),
+                path: z.string(),
+                purpose: z.string(),
+                files: z.array(z.string()),
+                parameters: z.array(z.object({
+                    name: z.string(),
+                    type: z.string(),
+                    required: z.boolean(),
+                    description: z.string(),
+                })),
+                response: z.string(),
+            })).min(1),
         }),
         z.object({
-            module: z.string(),
-            page: z.string(),
-            files: z.array(z.string()),
-            interactions: z.string(),
-            api: z.string(),
+            feature: z.string(),
+            pages: z.array(z.object({            // 该功能的全部页面（整页归一任务，不再按接口切散）
+                page: z.string(),
+                interactions: z.string(),
+                files: z.array(z.string()),
+            })).min(1),
         }),
     ])),
 });
 
+type ResolutionApi = z.infer<typeof resolutionSchema>["tasks"][number][0]["apis"][number];
 type ResolutionBack = z.infer<typeof resolutionSchema>["tasks"][number][0];
 type ResolutionFront = z.infer<typeof resolutionSchema>["tasks"][number][1];
+
+// ---------- 机械构建（T4 竖切核心：纯函数，dispatch/redesignTask 共用，t4-smoke 狗考入口） ----------
+
+/** 一组接口的契约文本行（description 自包含铁律的载体：机械拼，不劳 LLM） */
+function apiContractBlock(apis: ResolutionApi[]): string {
+    return apis.map(a =>
+        `- ${a.method} ${a.path}（${a.purpose}）\n  入参：${a.parameters.map(p => `${p.name}(${p.type}${p.required ? "" : "，可选"})：${p.description}`).join("、") || "无"}\n  返回：${a.response}`,
+    ).join("\n");
+}
+
+/**
+ * 功能竖切 → ExecTask 对（id/配对/验收继承/自包含契约的全量规矩都在这）。
+ * method/path 带主接口只为看板列可读；真实契约看 description 的接口清单。
+ * 验收标准从 Plan.features 按模块 business 机械抄（验收契约不发明）。
+ */
+export function buildExecTasks(
+    parsed: { tasks: [ResolutionBack, ResolutionFront][] },
+    detailed: any, stack: any, plan: Plan,
+): ExecTask[] {
+    const middlewareContent = (stack?.techniques?.middleware ?? []).map((m: any) => `${m.name}（${m.purpose}）`).join("、");
+    const dbContent = `${stack?.techniques?.database?.type ?? ""}（${stack?.techniques?.database?.why ?? ""}）`;
+    return parsed.tasks.flatMap((pair, i) => {
+        const [back, front] = pair;
+        const mod = (detailed?.modules ?? []).find((m: any) => m.name === back.feature)
+            ?? (detailed?.modules ?? []).find((m: any) => back.feature.includes(m.name) || m.name.includes(back.feature));
+        const acceptance = plan.features.find((f: any) => f.name === mod?.business)?.acceptance
+            ?? plan.features.find((f: any) => f.name === back.feature)?.acceptance ?? "功能可正常使用";
+        const mtech = (stack?.moduleTech ?? []).find((mt: any) => mt.module === back.feature)
+            ?? (stack?.moduleTech ?? []).find((mt: any) => back.feature.includes(mt.module) || mt.module.includes(back.feature));
+        const backendTech = mtech?.backend ?? "";
+        const frontendTech = mtech?.frontend ?? "";
+        const apiBlock = apiContractBlock(back.apis);
+        const primary = back.apis[0]!;
+
+        const backendTask: ExecTask = {
+            id: `T${i + 1}`,
+            layer: "backend",
+            method: primary.method,
+            path: primary.path,
+            files: [...new Set(back.apis.flatMap(a => a.files))],
+            title: `功能 ${back.feature}${back.apis.length > 1 ? `（${back.apis.length} 个接口）` : ""}`,
+            description: `模块/功能：${back.feature}\n业务：${mod?.business ?? ""}\n技术：${backendTech}\n中间件：${middlewareContent}\n数据库：${dbContent}\n包含接口（${back.apis.length} 个，全部必须实现）：\n${apiBlock}`,
+            parameters: primary.parameters,
+            acceptance,
+        };
+
+        // 自包含铁律（保持）：整组接口契约机械抄进前端描述——竖切后一任务多页面，契约仍是一套
+        const contract = `\n\n【后端契约（前端必须遵守：字段名/格式/枚举值照抄，不得改名）】\n${apiBlock}`;
+        const frontendTask: ExecTask = {
+            id: `T${i + 1}-F`,
+            layer: "frontend",
+            method: primary.method,
+            path: primary.path,
+            files: [...new Set(front.pages.flatMap(p => p.files))],
+            title: `功能 ${front.feature}：${front.pages.map(p => p.page).join("、")}`,
+            description: `模块/功能：${front.feature}\n业务：${mod?.business ?? ""}\n技术：${frontendTech}\n` +
+                front.pages.map(p => `页面：${p.page}\n交互：${p.interactions}`).join("\n") + contract,
+            parameters: [],
+            acceptance,
+        };
+        return [backendTask, frontendTask];
+    });
+}
 
 // ---------- 节点实现（codeRegistry，DB 的 code_key 引用） ----------
 
@@ -435,48 +511,8 @@ function makeDispatchNode(station: TransferStation): StateNodeFn {
         );
         if (!parsed || parsed.tasks.length === 0) throw new Error("接口拆分返回空任务（tasks 为空数组）");
 
-        // 2. 机械构建 ExecTasks：id 顺序生成；验收标准从 Plan.features 按模块 business 抄（验收契约不发明）
-        const middlewareContent = (stack.techniques?.middleware ?? []).map((m: any) => `${m.name}（${m.purpose}）`).join("、");
-        const dbContent = `${stack.techniques?.database?.type ?? ""}（${stack.techniques?.database?.why ?? ""}）`;
-
-        const tasks: ExecTask[] = parsed.tasks.flatMap((pair, i) => {
-            const [back, front] = pair;
-            const mod = detailed.modules.find((m: any) => m.name === back.module)
-                ?? detailed.modules.find((m: any) => back.module.includes(m.name) || m.name.includes(back.module));
-            const acceptance = plan.features.find((f: any) => f.name === mod?.business)?.acceptance ?? "功能可正常使用";
-            const mtech = (stack.moduleTech ?? []).find((mt: any) => mt.module === back.module)
-                ?? (stack.moduleTech ?? []).find((mt: any) => back.module.includes(mt.module) || mt.module.includes(back.module));
-            const backendTech = mtech?.backend ?? "";
-            const frontendTech = mtech?.frontend ?? "";
-
-            const backendTask: ExecTask = {
-                id: `T${i + 1}`,
-                layer: "backend",
-                method: back.method,
-                path: back.path,
-                files: back.files,
-                title: `${back.method} ${back.path}：${back.purpose}`,
-                description: `模块：${back.module}\n业务：${mod?.business}\n技术：${backendTech}\n中间件：${middlewareContent}\n数据库：${dbContent}\n入参：${back.parameters.map(p => `${p.name}(${p.type}${p.required ? "" : "，可选"})`).join("、")}\n返回：${back.response}`,
-                parameters: back.parameters,
-                acceptance,
-            };
-
-            // 自包含铁律：后端契约机械抄进前端描述（字段名/格式照抄，前端不探索）
-            const contract = `\n\n【后端契约（前端必须遵守：字段名/格式/枚举值照抄，不得改名）】\n接口：${back.method} ${back.path}\n入参：${back.parameters.map(p => `${p.name}(${p.type}${p.required ? "" : "，可选"})：${p.description}`).join("、")}\n返回：${back.response}`;
-            const frontendTask: ExecTask = {
-                id: `T${i + 1}-F`,
-                layer: "frontend",
-                method: "",
-                path: "",
-                files: front.files,
-                title: `${front.page}：${front.interactions}`,
-                description: `模块：${front.module}\n业务：${mod?.business}\n技术：${frontendTech}\n页面：${front.page}\n交互：${front.interactions}\n调用接口：${front.api}` + contract,
-                parameters: [],
-                acceptance,
-            };
-
-            return [backendTask, frontendTask];
-        });
+        // 2. 机械构建 ExecTasks（T4 竖切版：抽成纯函数 buildExecTasks，redesignTask 共用、t4-smoke 直测）
+        const tasks: ExecTask[] = buildExecTasks(parsed, detailed, stack, plan);
 
         // 2.5 T2 全局契约（9/8）：拆完任务、下发之前发布 CONTRACTS.md——
         // 三工位+测试每次调用头部注入（contracts.ts 读同一份），路由登记/文件归属从此有据可依。
@@ -756,7 +792,7 @@ export class Architect extends BaseAgent {
             `\n\n## 上一版后端任务（契约）\n${JSON.stringify(back, null, 2)}` +
             (front ? `\n\n## 上一版前端任务\n${JSON.stringify(front, null, 2)}` : "") +
             `\n\n## 测试判定问题（必须解决，否则同样会被拒）\n${issues.map((s, i) => `${i + 1}. ${s}`).join("\n")}` +
-            `\n\n## 要求\n只重新设计这一个接口（${back.method} ${back.path}）为前后端任务对，修正契约中的问题（method/path/参数/返回/文件清单/前后端一致性），不要新增其他接口。`;
+            `\n\n## 要求\n只重新设计这一个功能竖切（${back.title}）为前后端任务对，修正契约中的问题（接口参数/返回/文件清单/页面划分/前后端一致性），不要新增其他功能。`;
         try {
             const parsed = await retryStructured<{ tasks: [ResolutionBack, ResolutionFront][] }>(
                 "接口重设计",
@@ -772,37 +808,40 @@ export class Architect extends BaseAgent {
             if (!p0) throw new Error("重设计返回空任务");
             const [nb, nf] = p0;
             const id = back.id;   // ★ 沿用原 pairId，保证测试计数（阶段:pairId）连续到第 6 次
+            const apiBlock = apiContractBlock(nb.apis);
+            const primary = nb.apis[0]!;
 
-            // 后端任务：保留原 id/验收，用新契约覆盖 method/path/files/parameters/描述
+            // 后端任务：保留原 id/layer，契约整段换新（T4 竖切形状）；测试问题原文附进描述，开发照着改
             const newBack: ExecTask = {
                 ...back,
-                id,
-                method: nb.method,
-                path: nb.path,
-                files: nb.files,
-                title: `${nb.method} ${nb.path}：${nb.purpose}`,
-                description: `【架构师重设计】原契约问题已修正。\n${back.description}\n修正要点：${nb.purpose}`,
-                parameters: nb.parameters,
+                method: primary.method,
+                path: primary.path,
+                files: [...new Set(nb.apis.flatMap(a => a.files))],
+                title: `功能 ${nb.feature}（重设计）${nb.apis.length > 1 ? `·${nb.apis.length} 个接口` : ""}`,
+                description: `【架构师重设计·第 2 版，接口契约以本段为准】\n模块/功能：${nb.feature}\n包含接口（${nb.apis.length} 个，全部必须实现）：\n${apiBlock}\n必须修正的测试问题：\n${issues.map((s, j) => `${j + 1}. ${s}`).join("\n")}`,
+                parameters: primary.parameters,
             };
             const bTarget = this.station.pickLeastBusy(roles.backendEngineer);
             if (bTarget) {
                 this.station.sendMessage("architect", bTarget, JSON.stringify({ type: "task", task: newBack }));
-                console.log(`[architect] 重设计后下发后端：${id}（${nb.method} ${nb.path}）`);
+                console.log(`[architect] 重设计后下发后端：${id}（${nb.feature}，${nb.apis.length} 接口）`);
             }
 
             if (front && nf) {
+                const contract = `\n\n【后端契约（前端必须遵守：字段名/格式/枚举值照抄，不得改名）】\n${apiBlock}`;
                 const newFront: ExecTask = {
                     ...front,
                     id: `${id}-F`,
-                    files: nf.files,
-                    title: `${nf.page}：${nf.interactions}`,
-                    description: `【架构师重设计】原契约问题已修正。\n${front.description}\n修正要点：${nf.interactions} 调用 ${nf.api}`,
+                    files: [...new Set(nf.pages.flatMap(p => p.files))],
+                    title: `功能 ${nf.feature}：${nf.pages.map(p => p.page).join("、")}（重设计）`,
+                    description: `【架构师重设计·第 2 版，契约以本段为准】\n模块/功能：${nf.feature}\n` +
+                        nf.pages.map(p => `页面：${p.page}\n交互：${p.interactions}`).join("\n") + contract,
                     parameters: [],
                 };
                 const fTarget = this.station.pickLeastBusy(roles.frontendEngineer);
                 if (fTarget) {
                     this.station.sendMessage("architect", fTarget, JSON.stringify({ type: "task", task: newFront }));
-                    console.log(`[architect] 重设计后下发前端：${id}-F（${nf.page}）`);
+                    console.log(`[architect] 重设计后下发前端：${id}-F（${nf.pages.map(p => p.page).join("、")}）`);
                 }
             }
 

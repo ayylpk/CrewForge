@@ -18,7 +18,7 @@ import { BaseAgent } from "./BaseAgent";
 import { roles, type TransferStation, WorkQueue } from "./Hub";
 import { initModels } from "./models";
 import { invokeWithTimeout, DEFAULT_TIMEOUT_MS } from "./llm";
-import { writeWorkspace, readWorkspace, type ExecTask } from "./common";
+import { writeWorkspace, readWorkspace, sliceGuard, type ExecTask } from "./common";
 import { currentProjectId, projectDir } from "./runEnv";
 import { updateStatusByExt } from "./task";
 import { nodePrompt, type Node } from "./Node";
@@ -244,11 +244,12 @@ export class BackendEngineer extends BaseAgent {
         const pid = currentProjectId();
         const known = buildKnown(pid != null ? projectDir(pid) : null, writtenFiles, task.files);
         const contract = contractPromptBlock(await loadContracts());   // T2：契约头部注入（旁路同伪代码工位）
+        const guard = sliceGuard(task.files.length);                   // T4：竖切大任务收敛为 2 次×420s
         let feedback = "";
-        for (let attempt = 1; attempt <= 3; attempt++) {
+        for (let attempt = 1; attempt <= guard.maxAttempt; attempt++) {
             const ts = Date.now();
             try {
-                const res = await invokeWithTimeout<any>(`${task.id} 代码`, DEFAULT_TIMEOUT_MS, sig => model.invoke([
+                const res = await invokeWithTimeout<any>(`${task.id} 代码`, guard.timeoutMs, sig => model.invoke([
                     new SystemMessage(
                         this.codePrompt +
                         contract +
@@ -267,10 +268,10 @@ export class BackendEngineer extends BaseAgent {
                     feedback = "\n\n## 上次输出没有提取到代码：请只输出目标文件的完整源代码，不要 Markdown 围栏、JSON 或说明。";
                     continue;
                 }
-                // ---- 编译闸门打回：吃 attempt×3 名额（同前端幻觉闸姿势），耗尽=文件失败走返工，宁失败不交坏码 ----
+                // ---- 编译闸门打回：吃本轮工位 attempt 名额（同前端幻觉闸姿势），耗尽=文件失败走返工，宁失败不交坏码 ----
                 const problems = await checkFile(filePath, code, known);
                 if (problems.length > 0) {
-                    if (attempt < 3) {
+                    if (attempt < guard.maxAttempt) {
                         feedback = gateFeedback(attempt, problems);
                         console.log(`[${this.name}] ${task.id} ${filePath} 编译闸门：${problems.join("；").slice(0, 80)}（第 ${attempt} 次打回）`);
                         continue;

@@ -8,6 +8,15 @@ import fs from "node:fs";
 import path from "node:path";
 import { currentProjectId, safeRealPath } from "./runEnv";
 
+/**
+ * T4 竖切护栏（9/8，卡面：竖切任务单任务失败重试≤2、超时 420s）：
+ * 大任务（files≥3）单文件生成轮次收敛为 2、超时放宽到 420s——页面级输出量大，
+ * 单文件马拉松 3×420s 烧不起；≤2 文件的老形态保持 3 次 / 300s 不变（不伤已验证行为）。
+ */
+export function sliceGuard(fileCount: number): { maxAttempt: number; timeoutMs: number } {
+    return fileCount >= 3 ? { maxAttempt: 2, timeoutMs: 420_000 } : { maxAttempt: 3, timeoutMs: 300_000 };
+}
+
 /** 可执行任务（架构师产出 → 开发执行 → 合并器配对 → 测试判定） */
 export interface ExecTask {
     id: string;
