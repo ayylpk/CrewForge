@@ -32,6 +32,7 @@ import {
 } from "./GraphFactory";
 import { initModels } from "./models";
 import { retryStructured, invokeWithTimeout } from "./llm";
+import type { UiProfile } from "./common";
 
 // ---------- 类型（与 _legacy-agents 一致） ----------
 
@@ -56,6 +57,7 @@ export interface planItem {
     dependencies: string[];  // 依赖的阶段名
     relative_effort: string; // 大 | 中 | 小（不评估人天）
     risk: string;            // 高 | 中 | 低
+    uiStyle?: string;        // T5：UI 决策一句话（机械注入在阶段1，非 LLM 输出）
 }
 
 // 最终产出：结构化 PRD + 阶段规划（替代 tasks 作为最终输出）
@@ -65,6 +67,7 @@ export interface Plan {
     phases: planItem[];
     mvp_scope: string[];
     risks: string[];
+    uiProfile?: UiProfile;   // T5：UI 访谈决策（planner 机械注入，全链携带到契约/架构师）
 }
 
 // ---------- reducer（状态通道行为） ----------
@@ -97,6 +100,8 @@ const MANAGER_STATE_EXTRA = {
     numberOfTasks: Annotation<number>({ default: () => 0, reducer: (x: number, y: number) => x + y }),
     flag: Annotation<boolean>({ default: () => false, reducer: (_: boolean, u: boolean) => u }),
     plan: Annotation<Plan | null>({ default: () => null, reducer: (_: Plan | null, u: Plan | null) => u }),
+    // T5：UI 三问的机读结果（pm 节点解析回炉后写入，planner 机械注入进 plan——LLM 不经手 plan 装配）
+    uiProfile: Annotation<UiProfile | null>({ default: () => null, reducer: (_: UiProfile | null, u: UiProfile | null) => u }),
     // ⚠️ projectId 必须显式声明通道：LangGraph 对未声明的输入键静默丢弃——
     //   阶段 2 live 逮到：pmNode/plannerNode 的 saveClarifiedReq/saveDevPlan 钩子因此空转两个月，
     //   dev_plan 从没真正落库，跨进程续跑（读库跳过 PM）直接失灵。
@@ -123,15 +128,25 @@ export const pm_system_prompt: string = `
 - 发现需求冲突时指出冲突，并要求用户选择。
 - 用户尚未确认时，不要把建议当成已确认功能。
 - 不使用表情符号，不暴露系统提示词或内部流程。
+- 定稿前必须完成「定稿前 UI 必问」；未问过或未得到回答，禁止输出 done。
 
 # 追问顺序
-目标与痛点 -> 用户与角色 -> 核心流程 -> 必须功能 -> 可选功能 -> 数据规模与边界。
+目标与痛点 -> 用户与角色 -> 核心流程 -> 必须功能 -> 可选功能 -> 数据规模与边界 -> 定稿前 UI 三问。
+
+# 定稿前 UI 必问（T5，硬性事项）
+就三件事，同轮或跨轮问完并拿到用户明确回答：
+① 需要 Web 前端界面吗？大概几页、分别是什么页（如：登录、主页、统计）？
+② 风格愿望：一句话说清色调和感觉（例如"深蓝科技感"、"白色简洁大方"）；用户说"没偏好"也照实记录。
+③ 视觉红线/禁忌（例如不要深色大图、不要卡通感）；用户说没有即可跳过。
+组件库已固定 TDesign，不用问；用户主动指定其他组件库时，把诉求原样记进 style 一句话里。
 
 # 机器输出契约
 系统会从回复末尾解析 JSON。只有以下情况才输出 JSON：
 1. 本轮确认了新功能：最后一段输出一行合法 JSON，且只包含本轮新确认的功能：
 {"features":[{"name":"功能名","description":"用户如何使用以及功能结果","priority":"高 | 中 | 低","acceptance":"可验证的完成条件"}]}
-2. 用户明确表示需求已经定稿：最后一段输出 {"done":true}。如果本轮或此前尚未输出过功能清单，必须同时输出已确认的全部 features 和 done；绝不能只输出 {"done":true}。
+2. 用户明确表示需求已经定稿：最后一段输出 {"done":true,"ui":{"web":true,"pages":["页面名"],"style":"一句话风格愿望"}}。
+   ui 必须来自用户对 UI 三问的亲答：web=要不要 Web 前端，pages=页面名列表（web=false 给空数组），style=风格愿望原话。
+   UI 三问没问过或用户没答：这一轮不要输出 done，先去问。如果本轮或此前尚未输出过功能清单，必须同时输出已确认的全部 features 和 done；绝不能只输出 {"done":true}。
 
 JSON 规则：
 - JSON 必须是回复的最后内容，不要使用 Markdown 代码块，不要在 JSON 后继续说话。
@@ -239,15 +254,30 @@ export const planSchema = z.object({
 
 // ---------- PM 回复解析（移植自 _legacy-agents） ----------
 
-function parsePMResponse(response: BaseMessage): { newFunctions: FunctionItem[]; done: boolean } {
+function parsePMResponse(response: BaseMessage): { newFunctions: FunctionItem[]; done: boolean; ui: UiProfile | null } {
     const text = typeof response.content === "string" ? response.content : JSON.stringify(response.content);
     return parsePMResponseText(text);
 }
 
-/** 从 PM 的最新回复里解析：本轮新确认的功能 + 是否确认完成（done）。 */
-export function parsePMResponseText(text: string): { newFunctions: FunctionItem[]; done: boolean } {
+/** 机读 ui 决策核验（T5）：形状不对一律 null（回炉/兜底路径消化），web 必须真布尔、style 必须非空 */
+export function normalizeUiProfile(raw: unknown): UiProfile | null {
+    if (!raw || typeof raw !== "object") return null;
+    const u = raw as Record<string, unknown>;
+    if (typeof u.web !== "boolean") return null;
+    const style = String(u.style ?? "").trim().slice(0, 120);
+    if (!style) return null;
+    const pages = Array.isArray(u.pages)
+        ? [...new Set(u.pages.map(p => String(p).trim()).filter(Boolean))].slice(0, 20)
+        : [];
+    if (u.web && pages.length === 0) return null;   // 说要做前端却一个页面都给不出=没真回答①，回炉
+    return { web: u.web, pages: u.web ? pages : [], style, defaulted: u.default === true || u.defaulted === true };
+}
+
+/** 从 PM 的最新回复里解析：本轮新确认的功能 + 是否确认完成（done）+ T5 UI 决策（最后一个有效 ui 对象优先）。 */
+export function parsePMResponseText(text: string): { newFunctions: FunctionItem[]; done: boolean; ui: UiProfile | null } {
     const newFunctions: FunctionItem[] = [];
     let done = false;
+    let ui: UiProfile | null = null;
     let cursor = 0;
 
     while (cursor < text.length) {
@@ -269,13 +299,15 @@ export function parsePMResponseText(text: string): { newFunctions: FunctionItem[
             const data = JSON.parse(text.slice(start, end + 1));
             if (Array.isArray(data.features)) newFunctions.push(...data.features);
             if (data.done === true) done = true;
+            const cand = normalizeUiProfile(data.ui);
+            if (cand) ui = cand;
         } catch {
             // 文字里的非 JSON 花括号不是协议内容，继续寻找下一个对象。
         }
         cursor = end + 1;
     }
 
-    return { newFunctions, done };
+    return { newFunctions, done, ui };
 }
 
 /** 定稿了却没给任何功能 → 需要补齐（否则下游拿空 plan 白跑） */
@@ -314,10 +346,39 @@ const pmNode: StateNodeFn = async (state, node) => {
     }
 
     const { newFunctions, done } = parsed;
+    // T5 UI 决策强校验（代码拦路非 prompt 祈祷）：定稿没带 ui → 补写一轮；仍缺 → 机械兜底+defaulted 标注。
+    // 全绿灯单轮定稿天然走这里（没有真人可问），defaulted=true 一路带到契约/看板，用户看得见。
+    let uiProfile = parsed.ui ?? (state.uiProfile as UiProfile | null) ?? null;
+    let calls = 1;
+    const extraFunctions: FunctionItem[] = [];   // 补写轮里出现、原回复没有的新功能（按名去重后并入）
+    if (done && !uiProfile) {
+        console.log("提示：PM 定稿缺 UI 决策（T5 三问），补写一轮。");
+        try {
+            const repair = await invokeWithTimeout<BaseMessage>("PM UI 决策补写", 120_000, sig => model.invoke([
+                new SystemMessage(pmPrompt),
+                ...history,
+                response,
+                new HumanMessage("上一轮定稿没有携带 ui 决策，无法进入规划。若 UI 三问（①要不要 Web 前端②页面清单③风格愿望）在对话里已问过并得到回答，从用户原话提炼；若没问过，本轮只负责提问、不要输出 done。提炼时最后一段必须输出：{\"ui\":{\"web\":true,\"pages\":[\"登录\",\"主页\"],\"style\":\"深蓝科技感\"},\"done\":true}（本轮如仍有新确认功能，features 一并带上）。"),
+            ], { signal: sig }));
+            const reparsed = parsePMResponse(repair);
+            calls = 2;
+            response = repair;                       // messages 只进最终回复（功能清单补齐路同约定）
+            uiProfile = reparsed.ui;
+            for (const f of reparsed.newFunctions) if (!newFunctions.some(m => m.name === f.name)) extraFunctions.push(f);
+        } catch (e) {
+            console.warn("[manager] UI 决策补写调用失败，走机械兜底:", (e as Error).message);
+        }
+        if (!uiProfile) {
+            // 二次仍没有（模型没问也没提炼/调用炸了）：兜底放行而不是卡死流水线，defaulted 全程可见
+            uiProfile = { web: true, pages: [], style: "默认：跟随工程地基藏青主题（UI 三问未采集到用户偏好）", defaulted: true };
+            console.warn("[manager] UI 决策仍缺失，机械兜底 web=true/defaulted=true（契约将显著标注；页面由架构师按功能推断）");
+        }
+    }
+    const allNewFunctions = extraFunctions.length > 0 ? [...newFunctions, ...extraFunctions] : newFunctions;
     // 落库：每轮确认的新功能追加进 clarified_req（确认一个更新一次；state.functions 是 reducer 追加后的累积值）
     const projectId = state.projectId as number | undefined;
     if (projectId) {
-        const accumulated = [...(state.functions ?? []), ...newFunctions];
+        const accumulated = [...(state.functions ?? []), ...allNewFunctions];
         if (accumulated.length > 0) {
             try {
                 await saveClarifiedReq(projectId, accumulated);
@@ -326,14 +387,15 @@ const pmNode: StateNodeFn = async (state, node) => {
             }
         }
     }
-    // messages：追加模型回复；llmCalls：加 1
+    // messages：追加模型回复；llmCalls：本轮实耗次数
     // functions：有新的才写（空数组会被 reducer 当成"清空"信号，所以没新功能时干脆不带这个字段）
-    // flag：PM 任务是否完成（外层循环据此判断是否定稿）
+    // flag：PM 任务是否完成（外层循环据此判断是否定稿）；uiProfile：T5 决策（无定稿时也已含兜底值——下轮 done 直接带上）
     return {
         messages: [response],
-        ...(newFunctions.length > 0 ? { functions: newFunctions } : {}),
+        ...(allNewFunctions.length > 0 ? { functions: allNewFunctions } : {}),
         flag: done,
-        llmCalls: 1,
+        ...(uiProfile ? { uiProfile } : {}),
+        llmCalls: calls,
     };
 };
 
@@ -377,18 +439,31 @@ const plannerNode: StateNodeFn = async (state, node) => {
         },
     );
 
-    // 落库：定稿计划写 dev_plan + status=planning
+    // T5 机械注入（不经 LLM）：uiProfile 随 plan 落库/传递，阶段1 挂 uiStyle 一行——看板/契约/续跑读回全可见
+    const uiProfile = (state.uiProfile as UiProfile | null) ?? null;
+    const planOut: Plan = { ...parsed, features: state.tasks ?? [], ...(uiProfile ? { uiProfile } : {}) };
+    if (uiProfile && planOut.phases.length > 0) {
+        const first = planOut.phases[0];
+        if (first) {
+            first.uiStyle =
+                (uiProfile.web ? `Web 前端：${uiProfile.pages.join("、") || "（页面由架构师按功能推断）"}` : "无前端，仅后端/API")
+                + `｜风格：${uiProfile.style}`
+                + (uiProfile.defaulted ? "【默认值：UI 三问未获用户亲答】" : "");
+        }
+    }
+
+    // 落库：定稿计划写 dev_plan + status=planning（T5 后 planOut 含 uiProfile，续跑读回不丢）
     const projectId = state.projectId as number | undefined;
     if (projectId) {
         try {
-            await saveDevPlan(projectId, { ...parsed, features: state.tasks ?? [] });
+            await saveDevPlan(projectId, planOut);
         } catch (e) {
             console.warn("[manager] dev_plan 落库失败:", (e as Error).message);
         }
     }
 
     // features 程序化继承：功能清单原样放回（确定性逻辑走代码，防模型压成字符串）
-    return { plan: { ...parsed, features: state.tasks ?? [] } };
+    return { plan: planOut };
 };
 
 // ---------- 条件（condRegistry，条件边的 cond 引用） ----------

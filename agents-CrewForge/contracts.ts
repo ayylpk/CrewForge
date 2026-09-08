@@ -83,7 +83,12 @@ export const CONTRACT_STYLE_SECTION = [
 /** 拼装最终 md：确定性三段 + LLM 两段。LLM 段落缺失/格式漂了也只丢那两段，骨架照落 */
 export function assembleContracts(phaseNo: number, plan: Plan | null, llm: { pages: string; shared: string } | null): string {
     const head = `# 项目契约（阶段 ${phaseNo} 生成，所有工位 prompt 头部注入；本阶段产物以此为准）\n\n` +
-        `业务目标：${plan?.phases.find(p => p.phase === phaseNo)?.goal ?? plan?.mvp_scope?.join("；") ?? "（见任务清单）"}\n\n`;
+        `业务目标：${plan?.phases.find(p => p.phase === phaseNo)?.goal ?? plan?.mvp_scope?.join("；") ?? "（见任务清单）"}\n\n` +
+        // T5 接通：PM 访谈的 UI 决策直通契约（defaulted=没问到用户，全工位看得见）
+        (plan?.uiProfile
+            ? `界面决策（PM 访谈）：${plan.uiProfile.web ? `要 Web 前端，页面意向 ${plan.uiProfile.pages.join("、") || "（按功能推断）"}` : "不做前端，仅后端/API"}｜风格愿望：${plan.uiProfile.style}`
+                + (plan.uiProfile.defaulted ? "（**默认值，未经用户亲答**——有异议走确认门提给人类）" : "（用户亲答，不得违背）") + "\n\n"
+            : "");
     const pages = llm?.pages?.trim() || "- （契约登记降级：LLM 未产出页面清单，各任务按自身 files 自行约束，router 改动归各任务）";
     const shared = llm?.shared?.trim() || "- 无";
     return head +

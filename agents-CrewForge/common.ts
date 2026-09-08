@@ -39,6 +39,19 @@ export interface planItem {
     dependencies: string[];
     relative_effort: string;
     risk: string;
+    uiStyle?: string;        // T5：UI 决策一行（manager planner 机械注入在阶段1，全绿灯带"默认值"标注）
+}
+
+/** T5 UI 访谈决策（PM 定稿必带，plan.uiProfile 全链携带 → T2 契约消费） */
+export interface UiProfile {
+    /** 要不要 Web 前端 */
+    web: boolean;
+    /** 页面/主要界面清单（web=false 时可为空） */
+    pages: string[];
+    /** 风格愿望一句话（用户原话提炼；未采访问得=兜底串） */
+    style: string;
+    /** true=值非用户亲答（全绿灯/回炉耗尽兜底），契约与看板须标注 */
+    defaulted: boolean;
 }
 
 /** 全量计划（PM 产出 → 消息携带传给架构师） */
@@ -48,6 +61,8 @@ export interface Plan {
     phases: planItem[];
     mvp_scope: string[];
     risks: string[];
+    /** T5：UI 决策（机械注入，不由 LLM 输出——防它忘/瞎编字段名） */
+    uiProfile?: UiProfile;
 }
 
 // 写盘（沙箱：只能写当前项目的房间，逃逸直接抛错）
