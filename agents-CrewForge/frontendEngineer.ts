@@ -20,9 +20,10 @@ import { roles, type TransferStation, WorkQueue } from "./Hub";
 import { initModels } from "./models";
 import { invokeWithTimeout, DEFAULT_TIMEOUT_MS } from "./llm";
 import { writeWorkspace, readWorkspace, type ExecTask } from "./common";
-import { currentProjectId } from "./runEnv";
+import { currentProjectId, projectDir } from "./runEnv";
 import { updateStatusByExt } from "./task";
 import { nodePrompt, type Node } from "./Node";
+import { buildKnown, checkFile, gateFeedback } from "./checkers";
 import {
     TDESIGN_WHITELIST, TDESIGN_WHITELIST_TAGS, TDESIGN_THEME_CSS,
     fetchComponentDocs, extractUsedComponents, findHallucinated, buildDocsBlock,
@@ -249,6 +250,9 @@ export class FrontendEngineer extends BaseAgent {
                 const code = await this.generateFile(task, design, filePath, writtenFiles, tdesign);
                 if (!code) { failed = true; break; }
                 implementation.push({ filePath, code });
+                // T1 顺带修（9/8）：writtenFiles 生成一个补一个（原先任务全成后才统一 set，生成期恒空，
+                // "已存在文件注入/闸门已知文件集"名存实亡）——backendEngineer 同款注释，不重复
+                writtenFiles.set(filePath, code);
             }
 
             if (failed) {
@@ -290,6 +294,10 @@ export class FrontendEngineer extends BaseAgent {
         } catch { /* 静默失败，无旧内容也正常 */ }
         const designHint = design ? `\n\n## 页面设计稿（接口字段/组件结构必须照抄）\n${design}` : "";
         const fileTask = { ...task, files: [filePath] };
+        // T1 编译闸门（9/8）：known = 磁盘树 ∪ 本任务已生成 ∪ 计划内（backend 同注释）。
+        // 每轮现建：并行 B 工位刚落盘的文件、上一文件新写的内容，下一文件校验时都算已知
+        const pid = currentProjectId();
+        const known = buildKnown(pid != null ? projectDir(pid) : null, writtenFiles, task.files);
 
         let feedback = "";
         for (let attempt = 1; attempt <= 3; attempt++) {
@@ -336,6 +344,18 @@ export class FrontendEngineer extends BaseAgent {
                         console.warn(`[${this.name}] ${task.id} ${filePath} 闸门：幻觉组件打回耗尽，本文件判失败`);
                         return null;   // 宁可失败走返工循环，不交幻觉代码
                     }
+                }
+                // ---- T1 编译闸门（9/8）：幻觉过了还要过编译——语法/SFC 结构/相对引用一锅查，
+                // 与幻觉闸共用 attempt×3 名额，耗尽同样判文件失败走返工（宁失败不交坏码）----
+                const problems = await checkFile(filePath, code, known);
+                if (problems.length > 0) {
+                    if (attempt < 3) {
+                        feedback = gateFeedback(attempt, problems);
+                        console.log(`[${this.name}] ${task.id} ${filePath} 编译闸门：${problems.join("；").slice(0, 80)}（第 ${attempt} 次打回）`);
+                        continue;
+                    }
+                    console.warn(`[${this.name}] ${task.id} ${filePath} 编译闸门打回耗尽，本文件判失败`);
+                    return null;
                 }
                 return code;
             } catch (error) {

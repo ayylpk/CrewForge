@@ -32,6 +32,7 @@ import { currentProjectId, projectDir } from "./runEnv";
 import { ensureTasksForPhase, getTasksByStatus, updateStatusByExt } from "./task";
 import { pickQuestioner } from "./confirm";
 import { TDESIGN_THEME_CSS } from "./tdesignMcp";
+import { buildKnown, checkBatch } from "./checkers";
 
 // ---------- 模型 ----------
 
@@ -337,13 +338,24 @@ const bootstrapNode: StateNodeFn = async (state, node) => {
                             feedback,
                         ),
                     ], { signal: sig });
-                return result as { files: { path: string; content: string }[] };
+                const out = result as { files: { path: string; content: string }[] };
+                out.files = out.files ?? [];
+                // T1 编译闸门（9/8）：地基一次吐几十个完整文件，同样过检——代码强制（enforce 挪进回调）
+                // 之后整批校验，任一台红就 throw：retryStructured 把报错原文截 400 字喂回下一轮
+                // （卡面"编译器报错原文喂回、话术同 retryStructured"零新增机关，现成反馈环直接复用）
+                enforceTdesignFoundation(out.files);
+                const pid = currentProjectId();
+                const known = buildKnown(pid != null ? projectDir(pid) : null, undefined, out.files.map(f => f.path));
+                const reds = await checkBatch(out.files, known);
+                if (reds.size > 0) {
+                    throw new Error(`地基文件未过编译闸门：${[...reds.entries()].map(([p, ps]) => `${p} → ${ps.join("；")}`).join(" ｜ ")}`);
+                }
+                return out;
             },
             // 地基是流水线输出量最大的节点（5-15 个完整文件内容），180s 默认超时不够，单独放宽到 300s
             { timeoutMs: 300_000 },
         );
         const files = parsed?.files ?? [];
-        enforceTdesignFoundation(files);   // 9/5：代码强制 TDesign 地基（依赖合并 + theme 兜底），防 DB 旧提示词漏掉
         for (const f of files) {
             if (!f?.path) continue;
             try {

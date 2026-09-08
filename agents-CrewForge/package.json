@@ -9,6 +9,7 @@
   "devDependencies": {
     "@types/bun": "latest",
     "@types/node": "26.2.0",
+    "@vue/compiler-sfc": "^3.5.42",
     "esbuild": "0.28.2"
   },
   "peerDependencies": {

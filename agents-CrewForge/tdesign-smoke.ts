@@ -69,10 +69,10 @@ async function main() {
         { path: "src/main/resources/application.yml", content: "server:\n  port: 8080" },
     ];
     enforceTdesignFoundation(files);
-    const fe = JSON.parse(files[0].content);
+    const fe = JSON.parse(files[0]?.content ?? "{}");
     ok(!!fe.dependencies["tdesign-vue-next"] && !!fe.devDependencies["unplugin-vue-components"] && fe.dependencies.vue === "^3.5.0",
         "前端 package.json：注入 tdesign + 保留原依赖");
-    ok(!JSON.parse(files[1].content).dependencies["tdesign-vue-next"], "后端 package.json 不误伤");
+    ok(!JSON.parse(files[1]?.content ?? "{}").dependencies["tdesign-vue-next"], "后端 package.json 不误伤");
     ok(files.some(f => f.path.endsWith("td-theme.css") && f.content.includes("--td-brand-color")),
         "无 theme 文件时补写 --td-* 主题");
 

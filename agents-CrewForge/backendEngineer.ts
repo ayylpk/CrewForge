@@ -19,9 +19,10 @@ import { roles, type TransferStation, WorkQueue } from "./Hub";
 import { initModels } from "./models";
 import { invokeWithTimeout, DEFAULT_TIMEOUT_MS } from "./llm";
 import { writeWorkspace, readWorkspace, type ExecTask } from "./common";
-import { currentProjectId } from "./runEnv";
+import { currentProjectId, projectDir } from "./runEnv";
 import { updateStatusByExt } from "./task";
 import { nodePrompt, type Node } from "./Node";
+import { buildKnown, checkFile, gateFeedback } from "./checkers";
 
 const BACKEND_MODEL_JSON = JSON.stringify({
     provider: "deepseek",
@@ -189,6 +190,10 @@ export class BackendEngineer extends BaseAgent {
                 const code = await this.generateFile(task, pseudo, filePath, writtenFiles);
                 if (!code) { failed = true; break; }
                 implementation.push({ filePath, code });
+                // T1 顺带修（9/8）：writtenFiles 原先只在任务全部成功后统一补——生成期永远是空的，
+                // 注释宣称的"本任务先写文件注入/闸门已知文件集"实际都没吃到。生成一个补一个才符合原意
+                // （写在 implementation 旁：任务失败时这两个内存结构整体作废，磁盘未污染，无副作用）
+                writtenFiles.set(filePath, code);
             }
 
             if (failed) {
@@ -232,6 +237,10 @@ export class BackendEngineer extends BaseAgent {
             : "\n\n## 提示\n伪代码生成失败，请一次性输出完整可运行的源代码。";
         // 只看当前一个文件的契约与提示词（提示词本身按"目标文件 files 中的文件"措辞，缩小到单文件即逐文件产出）
         const fileTask = { ...task, files: [filePath] };
+        // T1 编译闸门（9/8，v3 §2-T1）：写盘不是交付——返回前必须过编译。
+        // known = 磁盘树(runs/pN) ∪ 本任务已生成 ∪ 计划内路径（存在性可核，内容未生成的自动跳名核验）
+        const pid = currentProjectId();
+        const known = buildKnown(pid != null ? projectDir(pid) : null, writtenFiles, task.files);
         let feedback = "";
         for (let attempt = 1; attempt <= 3; attempt++) {
             const ts = Date.now();
@@ -250,8 +259,22 @@ export class BackendEngineer extends BaseAgent {
                 ], { signal: sig }));
                 console.log(`[${this.name}] ${task.id} 代码 ${Date.now() - ts}ms`);
                 const code = extractGeneratedCode(res.content);
-                if (code) return code;
-                feedback = "\n\n## 上次输出没有提取到代码：请只输出目标文件的完整源代码，不要 Markdown 围栏、JSON 或说明。";
+                if (!code) {
+                    feedback = "\n\n## 上次输出没有提取到代码：请只输出目标文件的完整源代码，不要 Markdown 围栏、JSON 或说明。";
+                    continue;
+                }
+                // ---- 编译闸门打回：吃 attempt×3 名额（同前端幻觉闸姿势），耗尽=文件失败走返工，宁失败不交坏码 ----
+                const problems = await checkFile(filePath, code, known);
+                if (problems.length > 0) {
+                    if (attempt < 3) {
+                        feedback = gateFeedback(attempt, problems);
+                        console.log(`[${this.name}] ${task.id} ${filePath} 编译闸门：${problems.join("；").slice(0, 80)}（第 ${attempt} 次打回）`);
+                        continue;
+                    }
+                    console.warn(`[${this.name}] ${task.id} ${filePath} 编译闸门打回耗尽，本文件判失败`);
+                    return null;
+                }
+                return code;
             } catch (error) {
                 feedback = `\n\n## 上次调用失败，请重试：${(error as Error).message.slice(0, 200)}`;
                 console.log(`[${this.name}] ${task.id} 代码失败（第 ${attempt} 次）：${(error as Error).message.slice(0, 80)}`);
