@@ -66,12 +66,23 @@ cd fronted-CrewForge && npm install && npm run dev    # :5173
 - [x] 阶段 1 sys_task 桥：看板从假卡片换成任务真数据（9/3 结清：live done/failed 全流转 + 拔库旁路 + 重跑复活实测）
 - [x] 阶段 2 点火 + 配置层（9/4 结清：Web 点开工→跑完零终端实测；按阶段起进程——引擎阶段收口退出、Java 对账器 30s 续拉、kill 进程实锤复活、无进展 5 次熔断；cc-switch 设置页 sys_settings 单行 + 掩码回显 + 测试连接 + OpenAI 兼容端点吃 DashScope/Ollama/vLLM；断点续跑=读库 dev_plan 跳过 PM 对话按任务状态定位；超时 30→120min；产物树 RUNS_ROOT 统一仓库根 + 全新开工自动归档旧树）
 - [x] 阶段 3 确认门 Web 回路（9/4 结清：sys_confirm 六件套 + 引擎 HttpQuestioner（AUTO_CONFIRM→自动 y / 管理进程→Web 问答卡 / 手工→stdin 三分流）+ 执行页就地问答浮层卡；手动模式实弹 3 阶段 10 问 10 答跑完；对账器/看门狗"等答免死"；超时 lazy 放行=选项第一项；live 抓修 saveDevPlan 状态倒退与 updateStatusByExt 跨阶段串台——补了 ExecTask.phase 使写侧与幂等键对称）
-- [ ] 阶段 4 冒烟验证闭环（到这里 = 面试演示可用）
+- [x] 生成侧 TDesign 化（9/5：frontendEngineer 挂 tdesign-mcp-server 先查后写 + 幻觉组件闸门；tdesign-smoke 19/19）
+- [x] **v3 质量六卡（9/8 全天贯通，确定性冒烟 138 断言全绿；live 层挂首轮开工）**：
+  T1 编译自修闸门（写盘前 esbuild/sfc/py_compile 校验+报错喂回自修）→
+  T2 全局契约 CONTRACTS.md（拆分后下发前登记页面/文件归属，登记制铁律代码写死）→
+  T5 PM 三问（UI 决策绑进定稿协议，缺了补写+兜底全程标注）→
+  T3 模型分层双档（role_models/model_pro 设置页热生效，不配=零变化）→
+  T6 测试强化（机械三查编译/色值/渲染 + 六项硬清单 + 假通过机器改判 + headless Edge 截图留档）→
+  T4 功能竖切（一个功能=一对任务，页面是原子不再切散；3/6 计数护栏原样）
+- [ ] 阶段 4 冒烟验证闭环（整树 install+build 物理终验；任务级校验已被 T1 前置吸收）——到这里 = 面试演示完整体
 - [ ] 阶段 5 PM 在线化热更新 / 阶段 6 加分项
+
+**运行成本**（T3 双档；粗估，首两轮 live 实测校准）：demo 档（架构师/测试/前端 pro）≈ ¥8~20/轮；回归档（全 flash）≈ ¥2~4/轮。切换零改码：设置页填「Pro 档模型」+ 角色档位 JSON，30s 热生效；都不填 = 全局名单档。
 
 **已知边界**（诚实清单，熔断降级后在此记录）：
 - 进度字段恒 0（sys_task 已可用且状态真实，统计口径在阶段 4 随冒烟一并做）
-- 测试工位纸面审、不执行代码（阶段 4 冒烟补）
+- 测试工位已有机械三查（编译/色值/渲染真开页面）+ 六项清单纸审，但**"全树能 build"仍无物理证据**——阶段 4 冒烟补（sys_settings.smoke_build）
+- 渲染审依赖本机 Edge + 生成物 `bun install` 成功；起不来自动 skip 带理由进测试报告（不静默、不拦路）
 - `DeskTop-CrewForge` 桌面端为前端暴力拷贝，已封存于仓库外（`F:/code/_archive/`，真做时壳引用 web dist）
 
 ## 说明
