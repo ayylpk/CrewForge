@@ -20,6 +20,7 @@ import { retryStructured } from "./llm";
 import { type Pair, type ExecTask } from "./common";
 import { nodePrompt, type Node } from "./Node";
 import { currentProjectId, safePath, safeExists } from "./runEnv";
+import { contractPromptBlock, loadContracts } from "./contracts";
 
 
 const TEST_MODEL_JSON = JSON.stringify({
@@ -125,6 +126,7 @@ export class TestEngineer extends BaseAgent {
         // 2. LLM 契约判定（失败带反馈重试；LLM 调用失败按 fail 处理，不崩流水线）
         const backFiles = readTaskFiles(pair.back);
         const frontFiles = pair.front ? readTaskFiles(pair.front) : [];
+        const contract = contractPromptBlock(await loadContracts());   // T2：判定的"全局真相"参照（登记制/契约基约违例=问题）
         let verdict: Verdict;
         try {
             verdict = await retryStructured<Verdict>(
@@ -136,6 +138,7 @@ export class TestEngineer extends BaseAgent {
                         .invoke([
                             new SystemMessage(
                                 this.judgePrompt +
+                                contract +
                                 `\n\n## 后端任务（契约）\n${JSON.stringify(pair.back, null, 2)}` +
                                 `\n\n## 后端产出代码\n${backFiles.map(f => `--- ${f.filePath} ---\n${f.content}`).join("\n")}` +
                                 (pair.front

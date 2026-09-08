@@ -33,6 +33,7 @@ import { ensureTasksForPhase, getTasksByStatus, updateStatusByExt } from "./task
 import { pickQuestioner } from "./confirm";
 import { TDESIGN_THEME_CSS } from "./tdesignMcp";
 import { buildKnown, checkBatch } from "./checkers";
+import { publishContracts } from "./contracts";
 
 // ---------- 模型 ----------
 
@@ -476,6 +477,12 @@ function makeDispatchNode(station: TransferStation): StateNodeFn {
 
             return [backendTask, frontendTask];
         });
+
+        // 2.5 T2 全局契约（9/8）：拆完任务、下发之前发布 CONTRACTS.md——
+        // 三工位+测试每次调用头部注入（contracts.ts 读同一份），路由登记/文件归属从此有据可依。
+        // 发布失败只 warn 不拦下发（旁路）；契约本身也随 writeWorkspace 落库进 sys_project_file
+        try { await publishContracts(phaseNo, plan, tasks); }
+        catch (e) { console.warn("[architect] 契约发布异常（旁路，工位按无契约运行）:", (e as Error).message); }
 
         // 3. 副作用：按层分流下发开发 + 声明给维护（final）+ 通知合并器清配对缓存
         for (const t of tasks) {

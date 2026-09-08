@@ -24,6 +24,7 @@ import { currentProjectId, projectDir } from "./runEnv";
 import { updateStatusByExt } from "./task";
 import { nodePrompt, type Node } from "./Node";
 import { buildKnown, checkFile, gateFeedback } from "./checkers";
+import { contractPromptBlock, loadContracts } from "./contracts";
 import {
     TDESIGN_WHITELIST, TDESIGN_WHITELIST_TAGS, TDESIGN_THEME_CSS,
     fetchComponentDocs, extractUsedComponents, findHallucinated, buildDocsBlock,
@@ -197,13 +198,14 @@ export class FrontendEngineer extends BaseAgent {
 
     private async generateDesign(task: ExecTask): Promise<string | null> {
         const model = initModels(FRONTEND_MODEL_JSON);
+        const contract = contractPromptBlock(await loadContracts());   // T2：契约头部注入（设计稿的页面/路由归属以此为准）
         let feedback = "";
         for (let attempt = 1; attempt <= 3; attempt++) {
             const ts = Date.now();
             try {
                 // 工位超时 9/3 拍板：与主链同级 300s（旧 180s 两档制被 run10 击穿，见 backendEngineer 同款注释）
                 const res = await invokeWithTimeout<any>(`${task.id} 设计稿`, DEFAULT_TIMEOUT_MS, sig => model.invoke([
-                    new SystemMessage(this.designPrompt + `\n\n## 当前任务\n${JSON.stringify(task, null, 2)}` + feedback),
+                    new SystemMessage(this.designPrompt + contract + `\n\n## 当前任务\n${JSON.stringify(task, null, 2)}` + feedback),
                 ], { signal: sig }));
                 console.log(`[${this.name}] ${task.id} 设计稿 ${Date.now() - ts}ms`);
                 const design = extractGeneratedCode(res.content);
@@ -298,6 +300,7 @@ export class FrontendEngineer extends BaseAgent {
         // 每轮现建：并行 B 工位刚落盘的文件、上一文件新写的内容，下一文件校验时都算已知
         const pid = currentProjectId();
         const known = buildKnown(pid != null ? projectDir(pid) : null, writtenFiles, task.files);
+        const contract = contractPromptBlock(await loadContracts());       // T2：契约头部注入（旁路=无契约空串）
 
         let feedback = "";
         for (let attempt = 1; attempt <= 3; attempt++) {
@@ -309,6 +312,7 @@ export class FrontendEngineer extends BaseAgent {
                 const res = await invokeWithTimeout<any>(`${task.id} ${filePath}`, DEFAULT_TIMEOUT_MS, sig => model.invoke([
                     new SystemMessage(
                         this.filePrompt +
+                        contract +
                         `\n\n## 当前子任务\n${JSON.stringify(fileTask, null, 2)}` +
                         designHint +
                         tdesignHint +

@@ -23,6 +23,7 @@ import { currentProjectId, projectDir } from "./runEnv";
 import { updateStatusByExt } from "./task";
 import { nodePrompt, type Node } from "./Node";
 import { buildKnown, checkFile, gateFeedback } from "./checkers";
+import { contractPromptBlock, loadContracts } from "./contracts";
 
 const BACKEND_MODEL_JSON = JSON.stringify({
     provider: "deepseek",
@@ -149,13 +150,14 @@ export class BackendEngineer extends BaseAgent {
 
     private async generatePseudo(task: ExecTask): Promise<string | null> {
         const model = initModels(BACKEND_MODEL_JSON);
+        const contract = contractPromptBlock(await loadContracts());   // T2：契约头部注入（无契约=空串，旁路）
         let feedback = "";
         for (let attempt = 1; attempt <= 3; attempt++) {
             const ts = Date.now();
             try {
                 // 工位超时 9/3 拍板：与主链同级 300s（旧 180s 两档制被击穿——run10 代码步实测 178~256s 尾延迟，3 发全误杀致整阶段 0 通过）
                 const res = await invokeWithTimeout<any>(`${task.id} 伪代码`, DEFAULT_TIMEOUT_MS, sig => model.invoke([
-                    new SystemMessage(this.skeletonPrompt + `\n\n## 当前任务\n${JSON.stringify(task, null, 2)}` + feedback),
+                    new SystemMessage(this.skeletonPrompt + contract + `\n\n## 当前任务\n${JSON.stringify(task, null, 2)}` + feedback),
                 ], { signal: sig }));
                 console.log(`[${this.name}] ${task.id} 伪代码 ${Date.now() - ts}ms`);
                 const pseudo = extractGeneratedCode(res.content);
@@ -241,6 +243,7 @@ export class BackendEngineer extends BaseAgent {
         // known = 磁盘树(runs/pN) ∪ 本任务已生成 ∪ 计划内路径（存在性可核，内容未生成的自动跳名核验）
         const pid = currentProjectId();
         const known = buildKnown(pid != null ? projectDir(pid) : null, writtenFiles, task.files);
+        const contract = contractPromptBlock(await loadContracts());   // T2：契约头部注入（旁路同伪代码工位）
         let feedback = "";
         for (let attempt = 1; attempt <= 3; attempt++) {
             const ts = Date.now();
@@ -248,6 +251,7 @@ export class BackendEngineer extends BaseAgent {
                 const res = await invokeWithTimeout<any>(`${task.id} 代码`, DEFAULT_TIMEOUT_MS, sig => model.invoke([
                     new SystemMessage(
                         this.codePrompt +
+                        contract +
                         `\n\n## 当前任务\n${JSON.stringify(fileTask, null, 2)}` +
                         `\n\n## 当前目标文件\n${filePath}` +
                         `\n\n## 项目路径\nworkspace` +
