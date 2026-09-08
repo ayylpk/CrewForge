@@ -32,6 +32,8 @@ export interface RtSettings {
     llmConcurrency: number;
     /** T7a 阶段在制令牌：每把工位阶段闸的 token 数（默认 5；前后端各阶段共用这一个旋钮） */
     stationSlots: number;
+    /** T7b 工位工具模式：true=前后端开发用 read/write/edit 工具循环交付（端点兼容性 live 验证后再开） */
+    toolMode: boolean;
 }
 
 let cached: RtSettings | null = null;
@@ -57,6 +59,7 @@ export async function refreshSettings(force = false): Promise<void> {
                 smokeBuild: Number(r.smoke_build ?? 0) === 1,
                 llmConcurrency: Number(r.llm_concurrency ?? 6) || 6,
                 stationSlots: Number(r.station_slots ?? 5) || 5,
+                toolMode: Number(r.tool_mode ?? 0) === 1,   // 列缺失=关（旁路：默认走验证过的老路）
             };
             loadedAt = Date.now();
         }

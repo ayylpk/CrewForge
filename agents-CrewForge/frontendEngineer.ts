@@ -26,6 +26,8 @@ import { nodePrompt, type Node } from "./Node";
 import { buildKnown, checkFile, gateFeedback } from "./checkers";
 import { contractPromptBlock, loadContracts } from "./contracts";
 import { gate } from "./concurrency";
+import { FILE_TOOLS, TOOL_PROTOCOL, runToolFileJob, type ToolExecCtx } from "./fileTools";
+import { runtimeSettings } from "./settings";
 import {
     TDESIGN_WHITELIST, TDESIGN_WHITELIST_TAGS, TDESIGN_THEME_CSS,
     fetchComponentDocs, extractUsedComponents, findHallucinated, buildDocsBlock,
@@ -145,6 +147,8 @@ export function parseDesignComponents(design: string | null): string[] {
 // ============================================================
 
 export class FrontendEngineer extends BaseAgent {
+    /** T7b：工具模式一次性判死（同 backendEngineer） */
+    private toolModeDead = false;
     /** queue1：等设计稿的任务 */
     private readonly taskQueue = new WorkQueue<{ task: ExecTask }>();
     /** queue2：设计稿完成、等实现的任务 */
@@ -313,7 +317,50 @@ export class FrontendEngineer extends BaseAgent {
         const pid = currentProjectId();
         const known = buildKnown(pid != null ? projectDir(pid) : null, writtenFiles, task.files);
         const contract = contractPromptBlock(await loadContracts());       // T2：契约头部注入（旁路=无契约空串）
-        const guard = sliceGuard(task.files.length);                       // T4：竖切大任务收敛为 2 次×420s
+        const guard = sliceGuard(task.files.length);                       // T4：竖切大任务收敛为 2 次×600s
+        // ---- T7b 工具模式（默认关，backendEngineer 同注释）。幻觉闸挂进工具的 extraGate 位：
+        // write/edit 内容里的 <t-*> 红=拒绝落盘+错因回给模型（9/5 闸门语义原样搬家，不再吃 attempt 名额）----
+        if (runtimeSettings()?.toolMode && !this.toolModeDead) {
+            try {
+                const toolModel = initModels(JSON.stringify({ ...JSON.parse(FRONTEND_MODEL_JSON), tools: FILE_TOOLS }), "frontend");
+                const ctx: ToolExecCtx = {
+                    pid, written: writtenFiles, planned: task.files, landed: null,
+                    extraGate: async (fp, code) => {
+                        if (!tdesign.alive) return [];
+                        const used = extractUsedComponents(code);
+                        if (used.length === 0) return [];
+                        const fresh = used.filter(n => !(n in tdesign.docs));
+                        if (fresh.length > 0) {
+                            const extra = await fetchComponentDocs(fresh);
+                            if (extra) Object.assign(tdesign.docs, extra);
+                            else { tdesign.alive = false; return []; }   // 通道中途挂→附加闸放行
+                        }
+                        const hall = tdesign.alive ? findHallucinated(used, tdesign.docs) : [];
+                        return hall.length > 0
+                            ? [`TDesign 不存在组件：${hall.map(n => `<t-${n}>`).join("、")}——改用白名单组件或原生 HTML 实现该功能`]
+                            : [];
+                    },
+                };
+                const landed = await runToolFileJob({
+                    system: this.filePrompt + contract
+                        + `\n\n## 当前子任务\n${JSON.stringify(fileTask, null, 2)}` + designHint
+                        + (buildDocsBlock(Object.keys(tdesign.docs), tdesign.docs) || "")
+                        + existingContent + dbExistingPrompt
+                        + `\n\n## 主题变量\n${DEFAULT_THEME}\n\n## 请求封装\n${DEFAULT_REQUEST}`
+                        + TOOL_PROTOCOL,
+                    targetFile: filePath, ctx,
+                    maxRounds: task.files.length >= 3 ? 6 : 4,
+                    timeoutMs: guard.timeoutMs,
+                    label: `${task.id} ${filePath}`,
+                    invoke: (msgs, sig) => toolModel.invoke(msgs, { signal: sig }),
+                });
+                if (landed == null) console.warn(`[${this.name}] ${task.id} ${filePath} 工具轮次耗尽/弃赛，本文件判失败`);
+                return landed;
+            } catch (e) {
+                this.toolModeDead = true;
+                console.warn(`[${this.name}] 工具模式异常（${(e as Error).message.slice(0, 120)}），本进程退回单发老路，当前文件立即重走`);
+            }
+        }
 
         let feedback = "";
         for (let attempt = 1; attempt <= guard.maxAttempt; attempt++) {

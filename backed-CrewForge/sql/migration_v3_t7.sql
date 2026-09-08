@@ -9,4 +9,5 @@
 -- 消费方：引擎 concurrency.ts（30s 热调；Java 侧校验 llm 1~16 / slots 1~12）
 ALTER TABLE sys_settings
     ADD COLUMN llm_concurrency INT NULL DEFAULT 6 COMMENT 'T7a 端点总闸：全局在飞 LLM 调用上限（默认 6）',
-    ADD COLUMN station_slots  INT NULL DEFAULT 5 COMMENT 'T7a 阶段令牌：每把工位阶段闸的在制上限（默认 5）';
+    ADD COLUMN station_slots  INT NULL DEFAULT 5 COMMENT 'T7a 阶段令牌：每把工位阶段闸的在制上限（默认 5）',
+    ADD COLUMN tool_mode      TINYINT NULL DEFAULT 0 COMMENT 'T7b 工位工具模式：1=前后端开发走 read/write/edit 工具循环（默认 0=单发老路，端点兼容性 live 验证后再开）';

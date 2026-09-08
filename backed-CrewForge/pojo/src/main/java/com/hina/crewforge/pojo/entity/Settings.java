@@ -44,5 +44,7 @@ public class Settings {
     private Integer llmConcurrency;
     /** T7a 工位阶段令牌：每把阶段闸的 token 数（默认 5；前后端各阶段共用此旋钮） */
     private Integer stationSlots;
+    /** T7b 工位工具模式 1=read/write/edit 工具循环（默认 0=单发老路） */
+    private Integer toolMode;
     private LocalDateTime updateTime;
 }

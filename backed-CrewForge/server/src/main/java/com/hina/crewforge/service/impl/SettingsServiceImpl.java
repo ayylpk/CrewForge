@@ -53,6 +53,7 @@ public class SettingsServiceImpl implements SettingsService {
         m.put("smokeBuild", s.getSmokeBuild() != null && s.getSmokeBuild() == 1);
         m.put("llmConcurrency", s.getLlmConcurrency());
         m.put("stationSlots", s.getStationSlots());
+        m.put("toolMode", s.getToolMode() != null && s.getToolMode() == 1);
         return m;
     }
 
@@ -118,6 +119,7 @@ public class SettingsServiceImpl implements SettingsService {
             if (n < 1 || n > 12) throw new BaseException("阶段令牌需在 1~12 之间");
             s.setStationSlots(n);
         }
+        if (dto.getToolMode() != null) s.setToolMode(dto.getToolMode() ? 1 : 0);
 
         // openai 路必须有 baseURL；deepseek 路留空=官方端点
         if ("openai".equals(s.getModelKind()) && (s.getModelUrl() == null || s.getModelUrl().isBlank())) {

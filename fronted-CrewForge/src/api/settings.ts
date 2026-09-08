@@ -23,6 +23,8 @@ export interface RuntimeSettings {
   llmConcurrency?: number | null
   /** T7a：工位阶段令牌（每把阶段闸在制上限，默认 5） */
   stationSlots?: number | null
+  /** T7b：工位工具模式（1=前后端开发走 read/write/edit 工具循环；端点兼容性验证后再开） */
+  toolMode?: boolean
 }
 
 export function fetchSettings(): Promise<RuntimeSettings> {

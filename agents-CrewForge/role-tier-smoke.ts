@@ -22,7 +22,7 @@ function rt(over: Partial<RtSettings> = {}): RtSettings {
     return {
         modelName: null, modelPro: null, roleModels: null, modelUrl: null, apiKey: null,
         modelKind: "deepseek", javaBaseUrl: "http://localhost:8080", confirmTimeoutMin: 30, smokeBuild: false,
-        llmConcurrency: 6, stationSlots: 5,
+        llmConcurrency: 6, stationSlots: 5, toolMode: false,
         ...over,
     };
 }

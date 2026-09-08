@@ -25,6 +25,8 @@ import { nodePrompt, type Node } from "./Node";
 import { buildKnown, checkFile, gateFeedback } from "./checkers";
 import { contractPromptBlock, loadContracts } from "./contracts";
 import { gate } from "./concurrency";
+import { FILE_TOOLS, TOOL_PROTOCOL, runToolFileJob, type ToolExecCtx } from "./fileTools";
+import { runtimeSettings } from "./settings";
 
 const BACKEND_MODEL_JSON = JSON.stringify({
     provider: "deepseek",
@@ -96,6 +98,8 @@ function extractGeneratedCode(content: unknown): string | null {
 // ============================================================
 
 export class BackendEngineer extends BaseAgent {
+    /** T7b：工具模式一次性判死（端点不支持 function-calling 等）→ 本进程全退回单发老路 */
+    private toolModeDead = false;
     /** queue1：等伪代码的任务 */
     private readonly taskQueue = new WorkQueue<{ task: ExecTask }>();
     /** queue2：伪代码完成、等代码的任务 */
@@ -257,7 +261,33 @@ export class BackendEngineer extends BaseAgent {
         const pid = currentProjectId();
         const known = buildKnown(pid != null ? projectDir(pid) : null, writtenFiles, task.files);
         const contract = contractPromptBlock(await loadContracts());   // T2：契约头部注入（旁路同伪代码工位）
-        const guard = sliceGuard(task.files.length);                   // T4：竖切大任务收敛为 2 次×420s
+        const guard = sliceGuard(task.files.length);                   // T4：竖切大任务收敛为 2 次×600s
+        // ---- T7b 工具模式（sys_settings.tool_mode 默认关）：runToolFileJob 走 read/write/edit 交付——
+        // 工具内 write/edit 自带过闸+落盘+文件锁，落地即返回；轮次耗尽=文件失败走返工；
+        // 抛异常（端点不支持 function-calling 等）→ 本进程永久退回下面的单发老路（旁路，一把都算不清就不赌）----
+        if (runtimeSettings()?.toolMode && !this.toolModeDead) {
+            try {
+                const toolModel = initModels(JSON.stringify({ ...JSON.parse(BACKEND_MODEL_JSON), tools: FILE_TOOLS }), "backend");
+                const ctx: ToolExecCtx = { pid, written: writtenFiles, planned: task.files, landed: null };
+                const landed = await runToolFileJob({
+                    system: this.codePrompt + contract
+                        + `\n\n## 当前任务\n${JSON.stringify(fileTask, null, 2)}`
+                        + `\n\n## 当前目标文件\n${filePath}`
+                        + `\n\n## 项目路径\nworkspace`
+                        + taskExistingPrompt + existingPrompt + pseudoHint + TOOL_PROTOCOL,
+                    targetFile: filePath, ctx,
+                    maxRounds: task.files.length >= 3 ? 6 : 4,   // 竖切多文件任务给足修补轮次（单发老路是 2~3 attempt）
+                    timeoutMs: guard.timeoutMs,
+                    label: `${task.id} ${filePath}`,
+                    invoke: (msgs, sig) => toolModel.invoke(msgs, { signal: sig }),
+                });
+                if (landed == null) console.warn(`[${this.name}] ${task.id} ${filePath} 工具轮次耗尽/弃赛，本文件判失败`);
+                return landed;   // 已落盘；codeWorker 末尾对同内容再幂等写一次（upsert 无害），协议零改动
+            } catch (e) {
+                this.toolModeDead = true;
+                console.warn(`[${this.name}] 工具模式异常（${(e as Error).message.slice(0, 120)}），本进程退回单发老路，当前文件立即重走`);
+            }
+        }
         let feedback = "";
         for (let attempt = 1; attempt <= guard.maxAttempt; attempt++) {
             const ts = Date.now();

@@ -217,6 +217,13 @@
                      placeholder="5" />
               <span class="dim">前后端每阶段同时在制任务数（落盘/失败才归还）</span>
             </div>
+            <div class="provider-row">
+              <span class="provider-label">工位工具模式</span>
+              <label class="switch-line">
+                <input v-model="cfg.toolMode" type="checkbox" />
+                <span class="dim">T7b：前后端开发改用 read/write/edit 工具交付（默认关=单发老路；端点工具兼容性 live 验证后再开）</span>
+              </label>
+            </div>
           </div>
         </div>
 
@@ -288,6 +295,7 @@ async function openApiSettings() {
       smokeBuild: !!s.smokeBuild,
       llmConcurrency: s.llmConcurrency ?? undefined,
       stationSlots: s.stationSlots ?? undefined,
+      toolMode: !!s.toolMode,
     }
   } catch {
     /* 拦截器已提示 */

@@ -78,7 +78,7 @@ function main() {
 
     console.log("=== ③ sliceGuard 护栏 ===");
     ok(sliceGuard(2).maxAttempt === 3 && sliceGuard(2).timeoutMs === 300_000, "接口对时代的小任务行为原样");
-    ok(sliceGuard(3).maxAttempt === 2 && sliceGuard(3).timeoutMs === 420_000, "竖切≥3 文件：2 次×420s（卡面值）");
+    ok(sliceGuard(3).maxAttempt === 2 && sliceGuard(3).timeoutMs === 600_000, "竖切≥3 文件：2 次×600s（T7a 复核后上调，卡面原值 420）");
     ok(sliceGuard(b1.files.length).maxAttempt === 3, "本例 T1 后端 2 文件<3 → 走老行为（护栏不误伤小任务）", `files=${b1.files.length}`);
     ok(sliceGuard(f1.files.length + 2).maxAttempt === 2, "≥3 文件即收敛（3 文件竖切任务）");
 

@@ -25,7 +25,9 @@ Node.ts         DB 读取层（成员/节点/边/落库钩子）｜ models.ts �
 checkers.ts     ★ T1 编译闸门：esbuild/@vue/compiler-sfc/py_compile/JSON + import 存在性&导出名核验
 contracts.ts    ★ T2 全局契约：CONTRACTS.md 生成（代码拼骨架+LLM 登记页面/模块归属）+ 工位头部注入
 renderGate.ts   ★ T6 渲染审：vite dev 惰性起服 + headless Edge dump-dom/截图（_shots/）+ 白屏判定
-llm.ts / tools.ts / common.ts  模型调用封装 / 工具声明 / 类型、写盘与 T4 sliceGuard
+concurrency.ts  ★ T7a 令牌闸：队列无上限、token 限在制（四阶段闸各 5 + 端点总闸 6，设置页热调，落盘/失败才归还）
+fileTools.ts    ★ T7b 工位文件工具：read/write/edit 工具循环（工具内过闸+落盘+文件锁；tool_mode 默认关，异常自动退老路）
+llm.ts / tools.ts / common.ts  模型调用封装（含端点总闸挂点）/ 工具声明 / 类型、写盘与 T4 sliceGuard
 settings.ts     sys_settings 30s 缓存（cc-switch 配置层引擎半边）
 ```
 
@@ -39,11 +41,13 @@ settings.ts     sys_settings 30s 缓存（cc-switch 配置层引擎半边）
 | `role-tier-smoke.ts` | T3 档位解析/旁路底线（不配=逐字节不变） | 20 绿 |
 | `render-smoke.ts` | T6 白屏判定/色扫/假通过改判/skip 旁路 | 16 绿 |
 | `t4-smoke.ts` | T4 竖切 schema/buildExecTasks 狗考/护栏 | 19 绿 |
+| `t7-smoke.ts` | T7a 令牌闸：在制≤限额/异常归还/排队不吃超时/clamp | 9 绿 |
+| `t7b-smoke.ts` | T7b 文件工具：三工具语义/文件锁/循环机械终止 | 19 绿 |
 | `tdesign-smoke.ts` | 9/5 文档通道+地基（要网络） | 19 绿 |
 | `bridge-smoke.ts` | 阶段 1 任务桥（旁路设计，离线可跑） | 11 绿 |
 
 ```bash
-for s in compile-gate-smoke contracts-smoke pm-ui-smoke role-tier-smoke render-smoke t4-smoke bridge-smoke; do bun run $s.ts || break; done
+for s in compile-gate-smoke contracts-smoke pm-ui-smoke role-tier-smoke render-smoke t4-smoke t7-smoke t7b-smoke bridge-smoke; do bun run $s.ts || break; done
 ```
 
 ## 本地跑

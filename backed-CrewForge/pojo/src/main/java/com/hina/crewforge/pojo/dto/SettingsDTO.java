@@ -26,4 +26,6 @@ public class SettingsDTO {
     private Integer llmConcurrency;
     /** T7a 阶段在制令牌数 */
     private Integer stationSlots;
+    /** T7b 工位工具模式 */
+    private Boolean toolMode;
 }
