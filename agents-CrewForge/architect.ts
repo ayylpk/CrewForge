@@ -327,7 +327,7 @@ const bootstrapNode: StateNodeFn = async (state, node) => {
         const parsed = await retryStructured<{ files: { path: string; content: string }[] }>(
             "工程地基落地",
             async (feedback, sig) => {
-                const model = initModels(ARCHITECT_MODEL_JSON);
+                const model = initModels(ARCHITECT_MODEL_JSON, "architect");
                 const result = await model
                     .withStructuredOutput(bootstrapSchema, { method: "jsonMode", name: "extract_bootstrap" })
                     .invoke([
@@ -426,7 +426,7 @@ function makeDispatchNode(station: TransferStation): StateNodeFn {
         const parsed = await retryStructured<{ tasks: [ResolutionBack, ResolutionFront][] }>(
             "接口拆分",
             async (feedback, sig) => {
-                const model = initModels(ARCHITECT_MODEL_JSON);
+                const model = initModels(ARCHITECT_MODEL_JSON, "architect");
                 const result = await model
                     .withStructuredOutput(resolutionSchema, { method: "jsonMode", name: "extract_resolution" })
                     .invoke([new SystemMessage(api_prompt + `\n\n## 业务模块（阶段${detailed.phase}）\n${modulesContent}\n\n## 技术绑定\n${techContent}` + feedback)], { signal: sig });
@@ -761,7 +761,7 @@ export class Architect extends BaseAgent {
             const parsed = await retryStructured<{ tasks: [ResolutionBack, ResolutionFront][] }>(
                 "接口重设计",
                 async (feedback, sig) => {
-                    const model = initModels(ARCHITECT_MODEL_JSON);
+                    const model = initModels(ARCHITECT_MODEL_JSON, "architect");
                     const result = await model
                         .withStructuredOutput(resolutionSchema, { method: "jsonMode", name: "extract_resolution" })
                         .invoke([new SystemMessage(prompt + feedback)], { signal: sig });

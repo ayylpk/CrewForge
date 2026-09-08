@@ -132,7 +132,7 @@ export class TestEngineer extends BaseAgent {
             verdict = await retryStructured<Verdict>(
                 `测试判定 ${pairKey}`,
                 async (feedback, sig) => {
-                    const model = initModels(TEST_MODEL_JSON);
+                    const model = initModels(TEST_MODEL_JSON, "test");
                     const result = await model
                         .withStructuredOutput(verdictSchema, { method: "jsonMode", name: "extract_verdict" })
                         .invoke([

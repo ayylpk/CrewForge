@@ -197,7 +197,7 @@ export class FrontendEngineer extends BaseAgent {
     }
 
     private async generateDesign(task: ExecTask): Promise<string | null> {
-        const model = initModels(FRONTEND_MODEL_JSON);
+        const model = initModels(FRONTEND_MODEL_JSON, "pseudo");   // T3：A 工位（设计稿）归 pseudo 档
         const contract = contractPromptBlock(await loadContracts());   // T2：契约头部注入（设计稿的页面/路由归属以此为准）
         let feedback = "";
         for (let attempt = 1; attempt <= 3; attempt++) {
@@ -279,7 +279,7 @@ export class FrontendEngineer extends BaseAgent {
         writtenFiles: Map<string, string>,
         tdesign: TDesignContext,
     ): Promise<string | null> {
-        const model = initModels(FRONTEND_MODEL_JSON);
+        const model = initModels(FRONTEND_MODEL_JSON, "frontend");   // T3：B 工位（页面实现）归 frontend 档
         // 已有文件（本任务内先写的）注入，供最小修改/衔接
         const existing = [...writtenFiles.entries()]
             .filter(([knownPath]) => task.files.includes(knownPath))

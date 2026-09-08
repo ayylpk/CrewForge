@@ -43,6 +43,8 @@ public class SettingsServiceImpl implements SettingsService {
             return m;   // 空配置（首次/未跑种子）→ 前端表单留默认
         }
         m.put("modelName", s.getModelName());
+        m.put("modelPro", s.getModelPro());
+        m.put("roleModels", s.getRoleModels());
         m.put("modelUrl", s.getModelUrl());
         m.put("modelKind", s.getModelKind());
         m.put("apiKey", mask(s.getApiKey()));          // ★ 只回显掩码，不回明文
@@ -64,6 +66,28 @@ public class SettingsServiceImpl implements SettingsService {
             s.setId(ROW_ID);
         }
         if (dto.getModelName() != null) s.setModelName(blankToNull(dto.getModelName()));
+        if (dto.getModelPro() != null) s.setModelPro(blankToNull(dto.getModelPro()));
+        if (dto.getRoleModels() != null) {
+            // T3 角色档位：存的是 JSON 文本（引擎侧坏值回落内置表=旁路），这里只挡明显不合法的形状，别让脏数据入库
+            String raw = blankToNull(dto.getRoleModels());
+            if (raw != null) {
+                try {
+                    var node = objectMapper.readTree(raw);
+                    if (!node.isObject()) throw new BaseException("role_models 需为 JSON 对象，如 {\"test\":\"pro\"}");
+                    node.fields().forEachRemaining(en -> {
+                        String v = en.getValue().asText("");
+                        if (!List.of("pro", "flash").contains(v)) {
+                            throw new BaseException("role_models 档位只能是 pro 或 flash（角色 " + en.getKey() + " 传了 " + v + "）");
+                        }
+                    });
+                } catch (BaseException be) {
+                    throw be;
+                } catch (Exception e) {
+                    throw new BaseException("role_models 不是合法 JSON: " + e.getMessage());
+                }
+            }
+            s.setRoleModels(raw);
+        }
         if (dto.getModelUrl() != null) s.setModelUrl(blankToNull(dto.getModelUrl()));
         if (dto.getModelKind() != null) s.setModelKind(dto.getModelKind());
         // apiKey：掩码占位符（前端原样回传）或空 = 不动库里已有的；带 * 或 "****" 开头视为未修改

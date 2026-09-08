@@ -9,6 +9,10 @@ import request from './request'
 /** 与后端 SettingsDTO/getMasked 对齐（smokeBuild 后端出参是 boolean） */
 export interface RuntimeSettings {
   modelName?: string | null
+  /** T3：pro 档模型名（空=不分层，pro 角色退回全局名） */
+  modelPro?: string | null
+  /** T3：角色→档位 JSON 文本 {architect:"pro",...}（留空=内置档位表） */
+  roleModels?: string | null
   modelUrl?: string | null
   apiKey?: string | null   // 永远掩码（****末4位 / null）
   modelKind?: string       // 'deepseek' | 'openai'

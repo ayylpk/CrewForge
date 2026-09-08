@@ -115,6 +115,14 @@ function extractJson(content: unknown): any {
     return JSON.parse(text.slice(start, end + 1));
 }
 
+// DB 节点声明 → T3 分层角色（schemaKey/codeKey 前缀约定：architect_* / manager_*）；认不出=不分层（全局名行为）
+function graphRoleOf(row: Node): string | undefined {
+    const key = `${row.schemaKey ?? ""} ${row.codeKey ?? ""}`;
+    if (key.includes("architect_")) return "architect";
+    if (key.includes("manager_")) return "manager";
+    return undefined;
+}
+
 function llmNode(row: Node): GraphNode<any> {
     const output = row.output;
     if (!output) throw new Error(`llm 节点 ${row.nodeName} 缺 output 列（产出通道名，如 plan/tasks）`);
@@ -128,7 +136,7 @@ function llmNode(row: Node): GraphNode<any> {
     let schemaReady = false;
 
     return async (state: any) => {
-        if (!model) model = initModels(row.model || "{}");
+        if (!model) model = initModels(row.model || "{}", graphRoleOf(row));
         if (!schemaReady) {
             schema = row.schemaKey ? schemaRegistry.get(row.schemaKey) : null;
             schemaReady = true;

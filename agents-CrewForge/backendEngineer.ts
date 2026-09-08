@@ -149,7 +149,7 @@ export class BackendEngineer extends BaseAgent {
     }
 
     private async generatePseudo(task: ExecTask): Promise<string | null> {
-        const model = initModels(BACKEND_MODEL_JSON);
+        const model = initModels(BACKEND_MODEL_JSON, "pseudo");   // T3：A 工位（伪代码）归 pseudo 档
         const contract = contractPromptBlock(await loadContracts());   // T2：契约头部注入（无契约=空串，旁路）
         let feedback = "";
         for (let attempt = 1; attempt <= 3; attempt++) {
@@ -219,7 +219,7 @@ export class BackendEngineer extends BaseAgent {
         filePath: string,
         writtenFiles: Map<string, string>,
     ): Promise<string | null> {
-        const model = initModels(BACKEND_MODEL_JSON);
+        const model = initModels(BACKEND_MODEL_JSON, "backend");   // T3：B 工位（代码实现）归 backend 档
         // 本任务内先写的文件注入，供跨文件衔接（避免重复实现或引用不存在的函数）
         const taskExisting = [...writtenFiles.entries()]
             .filter(([knownPath]) => task.files.includes(knownPath))

@@ -178,6 +178,17 @@
                 <option v-for="m in MODEL_PRESETS" :key="m" :value="m" />
               </datalist>
             </div>
+            <!-- T3 模型分层双档：pro 档模型名 + 角色档位（留空=不启用分层，全员走上面全局模型名） -->
+            <div class="provider-row">
+              <span class="provider-label">Pro 档模型</span>
+              <input v-model="cfg.modelPro" class="input" type="text" list="cf-model-presets"
+                     placeholder="留空=不分层；填了则 pro 角色用它（如 deepseek-v4-pro）" />
+            </div>
+            <div class="provider-row">
+              <span class="provider-label">角色档位</span>
+              <input v-model="cfg.roleModels" class="input" type="text"
+                     placeholder='JSON，如 {"test":"pro","frontend":"pro","backend":"flash"}；留空=内置表(架构师/测试/前端 pro)' />
+            </div>
             <div class="provider-row">
               <span class="provider-label">回调基址</span>
               <input v-model="cfg.javaBaseUrl" class="input" type="text" placeholder="引擎回调 Java：http://localhost:8080" />
@@ -257,6 +268,8 @@ async function openApiSettings() {
       modelUrl: s.modelUrl || '',
       apiKey: '',   // 永不回显明文；留空=保持
       modelName: s.modelName || '',
+      modelPro: s.modelPro || '',
+      roleModels: s.roleModels || '',
       javaBaseUrl: s.javaBaseUrl || '',
       confirmTimeoutMin: s.confirmTimeoutMin ?? 30,
       smokeBuild: !!s.smokeBuild,

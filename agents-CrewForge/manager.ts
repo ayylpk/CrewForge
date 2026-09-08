@@ -321,7 +321,7 @@ export function requiresFeatureRepair(done: boolean, newFeatureCount: number, ex
 /** PM 对话：完整对话历史 + 系统提示词（节点 prompt 优先，空回退内置）→ 解析 features/done → 缺功能定稿时补齐一次 */
 const pmNode: StateNodeFn = async (state, node) => {
     const pmPrompt = node?.systemPrompt?.trim() || pm_system_prompt;
-    const model = initModels(PLANNING_MODEL_JSON);
+    const model = initModels(PLANNING_MODEL_JSON, "manager");
     const history: BaseMessage[] = state.messages ?? [];
 
     let response = await invokeWithTimeout<BaseMessage>("PM 对话", 120_000, sig => model.invoke([
@@ -409,7 +409,7 @@ const disposeNode: StateNodeFn = async (state, node) => {
     const parsed = await retryStructured<{ tasks: typeOfTasks[] }>(
         "功能细化",
         async (feedback, sig) => {
-            const model = initModels(PLANNING_MODEL_JSON);
+            const model = initModels(PLANNING_MODEL_JSON, "manager");
             const result = await model
                 .withStructuredOutput(disposeSchema, { method: "jsonMode", name: "extract_tasks" })
                 .invoke([new SystemMessage(detailPrompt + "\n\n## 功能清单\n" + functionsContent + feedback)], { signal: sig });
@@ -431,7 +431,7 @@ const plannerNode: StateNodeFn = async (state, node) => {
     const parsed = await retryStructured<{ project: string; phases: planItem[]; mvp_scope: string[]; risks: string[] }>(
         "阶段规划",
         async (feedback, sig) => {
-            const model = initModels(PLANNING_MODEL_JSON);
+            const model = initModels(PLANNING_MODEL_JSON, "manager");
             const result = await model
                 .withStructuredOutput(planSchema, { method: "jsonMode", name: "extract_plan" })
                 .invoke([new SystemMessage(planPrompt + "\n\n## 已确认的详细功能清单\n" + tasksContent + feedback)], { signal: sig });

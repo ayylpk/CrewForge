@@ -10,8 +10,12 @@ import type { RowDataPacket } from "mysql2/promise";
  */
 
 export interface RtSettings {
-    /** 全局模型名（设置页一旦填写即覆盖所有角色内置名；按角色分档是 v3 T3 的事） */
+    /** 全局模型名（设置页一旦填写即覆盖所有角色内置名；T3 在其上再分档） */
     modelName: string | null;
+    /** T3 pro 档模型名（空=分层不启用，pro 角色退回全局名） */
+    modelPro: string | null;
+    /** T3 角色→档位 JSON 文本 {architect:"pro",...}（VARCHAR 存文本防 F6 JSON 列三番坑；坏值回落内置表） */
+    roleModels: string | null;
     /** openai 兼容端点 baseURL（modelKind=openai 必填） */
     modelUrl: string | null;
     /** 端点密钥（空=沿用 .env 的 DEEPSEEK_API_KEY） */
@@ -39,6 +43,8 @@ export async function refreshSettings(force = false): Promise<void> {
         if (r) {
             cached = {
                 modelName: (r.model_name as string)?.trim() || null,
+                modelPro: (r.model_pro as string)?.trim() || null,
+                roleModels: (r.role_models as string)?.trim() || null,   // 列缺失（迁移未跑）=null → models.ts 回落内置档位表
                 modelUrl: (r.model_url as string)?.trim() || null,
                 apiKey: (r.api_key as string)?.trim() || null,
                 modelKind: (r.model_kind as string)?.trim() || "deepseek",

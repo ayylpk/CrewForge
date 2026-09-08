@@ -106,7 +106,7 @@ export async function publishContracts(phaseNo: number, plan: Plan | null, tasks
     const taskLines = tasks.map(t => `- ${t.id} [${t.layer}] ${t.title}｜files: ${t.files.join(", ") || "（无）"}`).join("\n");
     try {
         const llm = await retryStructured("契约登记", async (feedback, sig) => {
-            const model = initModels(CONTRACTS_MODEL_JSON);
+            const model = initModels(CONTRACTS_MODEL_JSON, "contracts");
             const result = await model
                 .withStructuredOutput(contracts_schema, { method: "jsonMode", name: "extract_contracts" })
                 .invoke([new SystemMessage(

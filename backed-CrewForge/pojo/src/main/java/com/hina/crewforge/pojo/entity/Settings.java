@@ -22,8 +22,12 @@ public class Settings {
     /** 单行配置，恒为 1 */
     @TableId(type = IdType.INPUT)
     private Integer id;
-    /** 模型名（设置页一旦填写=全局覆盖所有角色内置模型名；按角色分档是 v3 T3） */
+    /** 模型名（设置页一旦填写=全局覆盖所有角色内置模型名） */
     private String modelName;
+    /** T3 pro 档模型名（空=不分层，pro 角色退回全局名；引擎 models.ts 消费） */
+    private String modelPro;
+    /** T3 角色→档位 JSON 文本 {"architect":"pro",...}（VARCHAR 存文本防 JSON 列 parse 坑；空=引擎内置表） */
+    private String roleModels;
     /** openai 兼容端点 baseURL（modelKind=openai 必填；deepseek 留空=官方） */
     private String modelUrl;
     /** 端点密钥（HTTP 层只进不出：回显一律掩码） */

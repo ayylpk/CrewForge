@@ -11,6 +11,10 @@ import lombok.Data;
 @Data
 public class SettingsDTO {
     private String modelName;
+    /** T3 pro 档模型名 */
+    private String modelPro;
+    /** T3 角色档位 JSON 文本 */
+    private String roleModels;
     private String modelUrl;
     private String apiKey;
     /** deepseek | openai */
