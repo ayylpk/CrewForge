@@ -29,25 +29,28 @@ export const TDESIGN_WHITELIST: readonly string[] = [
 export const TDESIGN_WHITELIST_TAGS = TDESIGN_WHITELIST.map(n => `<t-${n}>`).join(" ");
 
 /**
- * 藏青/午夜蓝赛博主题（--td-* CSS 变量覆盖，[[crewforge-frontend-style]] 色系）。
+ * 蓝天白云绿草地主题（--td-* CSS 变量覆盖，9/8 用户拍板换装：清爽透亮眼前一亮）。
  * 单一来源双消费：frontendEngineer 注入生成提示词 + architect bootstrap 落盘成真实 theme 文件。
+ * （控制台自身的藏青风格在 fronted-CrewForge，与此处无关。）
  */
 export const TDESIGN_THEME_CSS = `/* td-theme.css —— CrewForge 主题：覆盖 TDesign --td-* 变量
    （必须放在 tdesign-vue-next 自带样式之后引入，后声明者优先生效） */
 :root {
-  --td-brand-color: #00d4ff;              /* 主色：赛博蓝 */
-  --td-brand-color-hover: #33ddff;
-  --td-brand-color-active: #00aed1;
-  --td-radius-default: 8px;
-  --td-bg-color-page: #0d1117;            /* 页面底：午夜黑蓝 */
-  --td-bg-color-container: #161b26;       /* 容器/卡片：藏青 */
-  --td-bg-color-container-hover: #1c2331;
-  --td-bg-color-secondarycontainer: #1a2130;
-  --td-text-color-primary: #e6e6e6;
-  --td-text-color-secondary: #9aa4b2;
-  --td-text-color-placeholder: #5c6675;
-  --td-component-border: #2a3547;         /* 描边：暗钢 */
-  --td-component-stroke: #232d3f;
+  --td-brand-color: #38bdf8;              /* 主色：晴空蓝 */
+  --td-brand-color-hover: #7dd3fc;
+  --td-brand-color-active: #0ea5e9;
+  --td-success-color: #22c55e;            /* 语义绿：草地青 */
+  --td-warning-color: #fbbf24;            /* 语义黄：向日葵 */
+  --td-radius-default: 12px;
+  --td-bg-color-page: #f0f9ff;            /* 页面底：淡天光 */
+  --td-bg-color-container: #ffffff;       /* 容器/卡片：云白 */
+  --td-bg-color-container-hover: #e0f2fe;
+  --td-bg-color-secondarycontainer: #ecfdf5;  /* 次级容器：草尖白绿 */
+  --td-text-color-primary: #0f172a;
+  --td-text-color-secondary: #475569;
+  --td-text-color-placeholder: #94a3b8;
+  --td-component-border: #bae6fd;         /* 描边：薄云蓝 */
+  --td-component-stroke: #d1fae5;         /* 分隔：浅草绿 */
 }
 `;
 
