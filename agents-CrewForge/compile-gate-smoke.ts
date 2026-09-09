@@ -5,15 +5,16 @@
 //     ① RED：坏码必拒——F5 四坑的编译期可检变体各造一样（SFC 结构塌/引用不存在的导出名/引用到空/py 语法错）
 //     ② GREEN：好码零误杀——正常 SFC、bare 包、@别名、export* 转发、import type、
 //        计划内未生成文件、多行 import、未认识格式(.java/.yml/.md) 全须放行（宁漏不误杀：误杀=白烧一轮 60~300s LLM）
-//     ③ LOOP：模拟工位自修环——首轮注入坏文件被打回（报错原文进 feedback、截 400 字）、二轮修复变绿、
+//     ③ LOOP：模拟工位自修环——首轮注入坏文件被打回（报错原文进 feedback、截 600 字）、二轮修复变绿、
 //        三轮耗尽判失败——纯 stub 零 LLM，接线逻辑与 backend/frontendEngineer.generateFile 同构
+//     ⑤ p2 复盘修②③（9/9）：文件树注入（list/formatFileTree/fileTreePrompt）+ 打回附候选（导出名/路径相似）
 //
 //   诚实边界（不装）：F5① 的 h('router-view') 白屏与 F5④ 风格分裂在 T1 属"语法合法"类，
 //   归 T6 渲染审 / T2 契约管——本卡用其编译期可检的同类变体（SFC 结构错）占位，映射写死在下面注释里。
 //   卡面第③层 live 验收（跑一轮 p1 全树零编译错）等环境热了随首轮开工一起做。
 // ============================================================
 
-import { buildKnown, checkFile, checkBatch, gateFeedback } from "./checkers";
+import { buildKnown, checkFile, checkBatch, gateFeedback, formatFileTree, fileTreePrompt } from "./checkers";
 
 let pass = 0, fail = 0;
 function ok(cond: boolean, label: string, extra = "") {
@@ -129,7 +130,7 @@ async function main() {
     const first = await simulate([badVue, fixedVue]);
     ok(first.result === fixedVue && first.calls === 2, "首轮坏文件被打回，二轮自修后绿", `result=${!!first.result} calls=${first.calls}`);
     ok(first.feedback.includes("编译闸门打回") && first.feedback.includes("第 1 次"), "打回话术带轮次");
-    ok(first.feedback.length <= 460, `feedback 截断 ≤400 字+话术头（实测 ${first.feedback.length} 字符）`);
+    ok(first.feedback.length <= 660, `feedback 截断 ≤600 字+话术头（p2 修③ 400→600，实测 ${first.feedback.length} 字符）`);
 
     const exhausted = await simulate([badVue, badVue, badVue]);
     ok(exhausted.result === null && exhausted.calls === 3, "打回耗尽：判文件失败（宁失败不交坏码）");
@@ -148,6 +149,56 @@ async function main() {
     ], disk);
     ok(batchBad.size === 1 && (batchBad.get("frontend/src/main.ts") ?? []).join("").includes("App.vue"),
         "地基批引用缺失被打回（retryStructured 会截 400 字喂回）", JSON.stringify([...batchBad]));
+
+    // ============================================================
+    console.log("=== ⑤ p2 复盘修②③（9/9）：文件树注入 + 打回附候选 ===");
+
+    // list()：内存层展示保原始大小写、排序；匹配仍大小写不敏感（normRel 归一）
+    const caseKnown = knownFor({
+        "frontend/src/Utils/MyRequest.ts": `const r = {}; export default r;`,
+        "frontend/src/views/Login.vue": `<template><div/></template>`,
+    });
+    const listed = caseKnown.list();
+    ok(listed.length === 2 && listed.includes("frontend/src/Utils/MyRequest.ts"), "list() 保原始大小写", JSON.stringify(listed));
+    ok(listed[0] === "frontend/src/Utils/MyRequest.ts" && listed[1] === "frontend/src/views/Login.vue", "list() 按路径排序", JSON.stringify(listed));
+    ok(caseKnown.has("frontend/src/utils/myrequest.ts"), "匹配仍大小写不敏感（归一化没破）");
+
+    // 文件树注入：空树旁路；cap 溢出如实标注
+    ok(fileTreePrompt(knownFor({})) === "", "空 known：树段整段省略（旁路，不污染 prompt）");
+    const many = new Map<string, string>();
+    for (let i = 0; i < 85; i++) many.set(`src/f${i}.ts`, "export default 1;");
+    const tree85 = formatFileTree(buildKnown(null, many));
+    ok(tree85.includes("共 85 个文件") && tree85.includes("其余 5 个略"), "cap=80 溢出省略标注", tree85.slice(-40));
+    const tp = fileTreePrompt(knownFor({ "x.ts": "export default 1;" }));
+    ok(tp.includes("项目文件树") && tp.includes("x.ts") && tp.includes("不得发明该路径"), "fileTreePrompt 段头+规矩齐");
+
+    // 修③候选·导出名命中：getUsers 真身在 services/api.js，ghost 路径指 utils/request
+    const candKnown = knownFor({
+        "frontend/src/services/api.js": `const api = { get: () => null };\nexport function getUsers() { return [] }\nexport default api;`,
+        "frontend/src/router/index.js": `export default [];`,
+    });
+    const candProblems = await checkFile("frontend/src/views/UserList.vue",
+        `<script setup>\nimport { getUsers } from "../utils/request";\nconst u = getUsers();\n</script>\n<template><div>{{ u }}</div></template>`, candKnown);
+    const candJoined = candProblems.join("；");
+    ok(candJoined.includes("候选") && candJoined.includes("../services/api.js") && candJoined.includes("getUsers"),
+        "打回带候选：导出名命中 + 从当前文件算好的相对 spec", candJoined.slice(0, 180));
+
+    // 修③候选·路径名相似：../middleware/verify（单数）→ 真身 middlewares/verify（复数，p2 杂散打回同款）
+    const simKnown = knownFor({ "backend/src/middlewares/verify.ts": `export default function verify() {}` });
+    const simProblems = await checkFile("backend/src/routes/user.ts", `import v from "../middleware/verify";\nexport const w = v;`, simKnown);
+    ok(simProblems.join("；").includes("../middlewares/verify.ts"), "路径名相似候选：单复数漂移被逮住", simProblems.join("；").slice(0, 180));
+
+    // 修③底线：无候选不硬凑（宁漏不误带）——报错文案维持原样
+    const noneKnown = knownFor({ "frontend/src/main.ts": `console.log(1);` });
+    const noneProblems = await checkFile("frontend/src/views/X.vue",
+        `<script setup>\nimport { magic } from "../utils/unicorn";\n</script>\n<template><div/></template>`, noneKnown);
+    const noneJoined = noneProblems.join("；");
+    ok(noneJoined.includes("不存在") && !noneJoined.includes("候选"), "凑不出候选：只报原错，不硬带（宁漏不误带）", noneJoined.slice(0, 140));
+
+    // default-only import 不算导出信号（人人都有 default，带出来是噪音）
+    const noiseKnown = knownFor({ "backend/app.js": `export default {};` });
+    const noiseProblems = await checkFile("backend/index.js", `import cfg from "./config";\nconsole.log(cfg);`, noiseKnown);
+    ok(!noiseProblems.join("；").includes("候选"), "default 导出不进候选（防人人都是候选的噪音）", noiseProblems.join("；").slice(0, 120));
 
     // ============================================================
     console.log(`\n=== 汇总：${pass} 绿 / ${fail} 红 ===`);

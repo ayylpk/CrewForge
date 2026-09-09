@@ -74,6 +74,22 @@ export interface Plan {
     uiProfile?: UiProfile;
 }
 
+/**
+ * p2 复盘修①（9/9）：前端请求封装的单一来源常量（同 TDESIGN_THEME_CSS 双消费姿势）。
+ * 幽灵 import 的病根是三处漂移：地基批 LLM 自由发挥（p2 造出 services/api.js）、
+ * 契约接口基约写死 frontend/src/utils/request.ts、前端 prompt 只说"基建产出"没给路径——
+ * 三方各说各话，34 次编译打回里 20 次死在这。现在：
+ *   - architect.ensureRequestFoundation 落盘这份内容（代码强制，DB 旧 prompt 顶不掉）
+ *   - frontendEngineer 注入 prompt 的是同一份（教的路径=盘上真实存在）
+ *   - contracts 接口基约插值同一个常量（不再手抄两份）
+ */
+export const REQUEST_WRAPPER_PATH = "frontend/src/utils/request.ts";
+export const REQUEST_WRAPPER_CODE = `// 全局请求封装（CrewForge 工程地基产出，architect.ensureRequestFoundation 代码保证存在）
+import axios from 'axios';
+const request = axios.create({ baseURL: '/api', timeout: 10000 });
+export default request;
+`;
+
 // 写盘（沙箱：只能写当前项目的房间，逃逸直接抛错）
 export function writeWorkspace(relative: string, code: string): string {
   const pid = currentProjectId();

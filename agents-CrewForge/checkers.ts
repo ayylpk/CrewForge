@@ -9,7 +9,7 @@
 //     checkJson    JSON.parse（地基 package.json 等同款坑）
 //
 //   铁律（[[crewforge-code-over-tools]]）：全部纯函数零 LLM——
-//   报错原文喂回工位自修是调用方的事（复用 attempt×3 骨架，话术同 retryStructured 截 400 字）。
+//   报错原文喂回工位自修是调用方的事（复用 attempt×3 骨架，话术截断见文末 gateFeedback）。
 //   闸门自身绝不误杀：任何"拿不准"（export *、.vue 命名导入、@/ 别名、bare 包名）一律放行——
 //   宁漏不误杀，误杀一次=白烧一轮 60~300s 的 LLM 调用。
 // ============================================================
@@ -36,6 +36,11 @@ export interface GateKnown {
     has(relPath: string): boolean;
     /** 读内容；读不到（计划内未生成/根本不存在）返回 null */
     read(relPath: string): string | null;
+    /**
+     * p2 复盘修②③（9/9）新增：已存在文件（磁盘层 ∪ 内存层，不含计划内未生成）的有序路径列表，
+     * 展示保原始大小写（匹配仍走归一化）。两个消费者：文件树注入 prompt、打回附候选。
+     */
+    list(): string[];
 }
 
 /** 归一化项目内相对路径：反斜杠→斜杠、小写（Windows 大小写不敏感）、剥 ./ */
@@ -43,9 +48,13 @@ function normRel(p: string): string {
     return p.replace(/\\/g, "/").toLowerCase().replace(/^\.\/+/, "");
 }
 
-/** 磁盘目录树快照（跳过 node_modules/dist/_archive/.git——这些不该被 import 相对路径指到源码级核验） */
-function walkProject(rootDir: string): Set<string> {
-    const out = new Set<string>();
+/**
+ * 磁盘目录树快照（跳过 node_modules/dist/_archive/.git——这些不该被 import 相对路径指到源码级核验）。
+ * p2 修②（9/9）改返回 norm→原始路径 的 Map：normRel 会小写化，直接拿归一化路径给模型看
+ * 等于教它"全小写 import"（Windows 侥幸能跑，Linux build 就炸），展示必须保原始大小写。
+ */
+function walkProject(rootDir: string): Map<string, string> {
+    const out = new Map<string, string>();
     const SKIP = new Set(["node_modules", "dist", "_archive", ".git"]);
     const walk = (dir: string, rel: string) => {
         let entries: fs.Dirent[];
@@ -53,7 +62,7 @@ function walkProject(rootDir: string): Set<string> {
         for (const e of entries) {
             const r = rel ? `${rel}/${e.name}` : e.name;
             if (e.isDirectory()) { if (!SKIP.has(e.name)) walk(path.join(dir, e.name), r); }
-            else out.add(normRel(r));
+            else out.set(normRel(r), r.replace(/\\/g, "/"));
         }
     };
     walk(rootDir, "");
@@ -65,21 +74,47 @@ function walkProject(rootDir: string): Set<string> {
  * extra = 本任务已生成/批内文件内容；planned = 还没写但已排定的路径（存在性算有）。
  */
 export function buildKnown(projectRoot: string | null, extra?: Map<string, string>, planned?: string[]): GateKnown {
-    const disk = projectRoot ? walkProject(projectRoot) : new Set<string>();
+    const disk = projectRoot ? walkProject(projectRoot) : new Map<string, string>();
     const mem = new Map<string, string>();
-    for (const [k, v] of extra ?? []) mem.set(normRel(k), v);
+    const names = new Map<string, string>(disk);          // norm → 展示路径（原始大小写；内存层后写覆盖磁盘层）
+    for (const [k, v] of extra ?? []) { const n = normRel(k); mem.set(n, v); names.set(n, k.replace(/\\/g, "/")); }
     const plan = new Set((planned ?? []).map(normRel));
     return {
         has: (p) => { const n = normRel(p); return mem.has(n) || disk.has(n) || plan.has(n); },
         read: (p) => {
             const n = normRel(p);
             if (mem.has(n)) return mem.get(n)!;
-            if (disk.has(n) && projectRoot) {
-                try { return fs.readFileSync(path.join(projectRoot, n), "utf-8"); } catch { return null; }
+            const orig = disk.get(n);
+            if (orig && projectRoot) {
+                // 9/9 顺带修正：磁盘读用原始大小写路径（原先拿归一化小写路径 join，Linux 上会读空）
+                try { return fs.readFileSync(path.join(projectRoot, orig), "utf-8"); } catch { return null; }
             }
             return null;   // 计划内未生成：内容未知，名字核验自动跳过
         },
+        list: () => [...names.values()].sort(),
     };
+}
+
+// ---------- 文件树注入（p2 复盘修②，9/9） ----------
+
+/** 把 known 的现存文件渲染成扁平路径列表（cap 防 token 撑爆，超出如实标注省略数） */
+export function formatFileTree(known: GateKnown, cap = 80): string {
+    const all = known.list();
+    if (all.length === 0) return "";
+    const shown = all.slice(0, cap);
+    const rest = all.length - shown.length;
+    return shown.join("\n") + (rest > 0 ? `\n…（共 ${all.length} 个文件，其余 ${rest} 个略）` : "");
+}
+
+/**
+ * p2 复盘的根因②：模型与闸门信息不对称——buildKnown 知道磁盘上有什么，但实现 prompt 里一个字没提，
+ * 模型只能看着 prompt 里的"官方封装"猜路径。现在把树直接喂进 system prompt：
+ * 打回从"猜谜"变"照抄"。空树（首轮地基/纯内存冒烟）返回空串不污染 prompt。
+ */
+export function fileTreePrompt(known: GateKnown): string {
+    const tree = formatFileTree(known);
+    if (!tree) return "";
+    return `\n\n## 项目文件树（已落盘/本任务已生成——相对 import 只允许指向树内真实路径；树里没有就不得发明该路径，在目标文件内自实现所需逻辑）\n${tree}`;
 }
 
 // ---------- 相对 import 解析 ----------
@@ -171,13 +206,70 @@ function collectExports(src: string): Set<string> | null {
 
 // ---------- import 核验主体（存在性 + 导出名） ----------
 
+/**
+ * p2 复盘修③（9/9）：打回不只说"不存在"，附磁盘候选。
+ * p2 的 smoking gun：模型被打回后只是给 import 加个 .ts 后缀继续猜（TagManager 同一错误复读 6 次）——
+ * 报错不带出路，2 次名额就是白烧。候选两路（纯代码零 LLM）：
+ *   ① 路径名相似：spec 末段与文件名互相包含（request↔requestHelper、middleware↔middlewares 这类漂移）
+ *   ② 导出名命中：想 import 的 { getUsers } 真实存在于别的文件（如 LLM 自创的 services/api.js）
+ * 输出从当前文件算好的**正确相对 spec**——模型照抄即可，不用再自己算 ../ 深度。
+ * 宁漏不误带：一个候选都没有就维持原报错，不硬凑。
+ */
+function candidateHint(known: GateKnown, fromFile: string, spec: string, named: string[] | null): string {
+    const base = (spec.split("/").pop() ?? "").replace(/\.(ts|tsx|js|jsx|mjs|vue|json|css|scss)$/i, "").toLowerCase();
+    if (!base) return "";
+    const pool = known.list();
+    if (pool.length === 0) return "";
+    const self = normRel(fromFile);
+    const dir = path.posix.dirname(self);
+    // 候选路径换算成"从当前文件出发的正确写法"，相对路径补 ./ 前缀防歧义。
+    // ../ 深度一律用归一化（小写）路径算——大小写混排的目录名会让 relative() 从分歧段多吐 ../；
+    // 文件名段最后还以原始大小写（Linux build 认文件名大小写）
+    const toSpec = (p: string) => {
+        let rel = path.posix.relative(dir, normRel(p));
+        if (!rel.startsWith(".")) rel = "./" + rel;
+        const segs = rel.split("/");
+        segs[segs.length - 1] = p.split("/").pop() ?? segs[segs.length - 1]!;
+        return segs.join("/");
+    };
+    const cands: { spec: string; why: string }[] = [];
+    const seen = new Set<string>();
+    // ① 路径名相似（cap 3，短名互含噪音大，≥3 字符才配）
+    for (const p of pool) {
+        if (cands.length >= 3) break;
+        if (normRel(p) === self) continue;
+        const name = (p.split("/").pop() ?? "").replace(/\.[^.]+$/, "").toLowerCase();
+        if (name.length >= 3 && (name.includes(base) || base.includes(name))) {
+            seen.add(p);
+            cands.push({ spec: toSpec(p), why: "文件名相似" });
+        }
+    }
+    // ② 导出名命中（default 人人都有不算信号，只核真实具名；树太大时止步防读盘开销失控）
+    const want = (named ?? []).filter(n => n !== "default");
+    if (want.length > 0 && pool.length <= 600) {
+        for (const p of pool) {
+            if (cands.length >= 3) break;
+            const n = normRel(p);
+            if (seen.has(p) || n === self || !/\.(ts|tsx|js|jsx|mjs|vue)$/i.test(n)) continue;
+            const src = known.read(p);
+            if (!src) continue;                                  // 计划内未生成/读失败：内容未知，不算候选
+            const exp = collectExports(src);
+            if (!exp) continue;                                  // export* 转发拿不准：不误带
+            const hits = want.filter(w => exp.has(w));
+            if (hits.length > 0) cands.push({ spec: toSpec(p), why: `导出 ${hits.slice(0, 3).join("、")}` });
+        }
+    }
+    if (cands.length === 0) return "";
+    return `；磁盘上疑似候选：${cands.map(c => `${c.spec}（${c.why}）`).join("、")} —— 要么改引候选（路径照抄），要么在目标文件内自实现所需逻辑，不要再发明路径`;
+}
+
 async function checkImports(filePath: string, code: string, known: GateKnown): Promise<CheckProblems> {
     const problems: CheckProblems = [];
     for (const { spec, named } of extractImports(code)) {
         if (!spec.startsWith("./") && !spec.startsWith("../")) continue;   // 裸包名/@别名/http：磁盘上没有 node_modules，一律放行（宁漏不误杀）
         const resolved = resolveRel(known, filePath, spec);
         if (!resolved) {
-            problems.push(`import "${spec}" 指向的文件不存在（相对 ${filePath} 解析不到，F5③ 引用到空）`);
+            problems.push(`import "${spec}" 指向的文件不存在（相对 ${filePath} 解析不到，F5③ 引用到空）${candidateHint(known, filePath, spec, named)}`);
             continue;
         }
         if (!named || /\.(vue|css|scss|json|png|svg|jpg)$/.test(resolved)) continue;   // 命名空间/类型/.vue 隐式默认导出等：不核名
@@ -348,6 +440,7 @@ export async function checkBatch(files: { path: string; content: string }[], kno
     const batchKnown: GateKnown = {
         has: (p) => mem.has(normRel(p)) || known.has(p),
         read: (p) => mem.get(normRel(p)) ?? known.read(p),
+        list: () => [...new Set([...mem.keys(), ...known.list()])].sort(),
     };
     const out = new Map<string, CheckProblems>();
     for (const f of files) {
@@ -358,9 +451,12 @@ export async function checkBatch(files: { path: string; content: string }[], kno
     return out;
 }
 
-// ---------- 自修反馈话术（同 retryStructured 的口味：错误原文截 400 字喂回） ----------
+// ---------- 自修反馈话术（同 retryStructured 的口味：错误原文喂回工位） ----------
 
-/** 拼进工位 prompt 尾部的打回段。attempt 只用于日志可读性 */
+/**
+ * 拼进工位 prompt 尾部的打回段。attempt 只用于日志可读性。
+ * p2 复盘修③（9/9）截断 400→600：候选提示挂在报错尾巴上，400 字容易把"出路"截掉、只留"死症"。
+ */
 export function gateFeedback(attempt: number, problems: CheckProblems): string {
-    return `\n\n## 编译闸门打回（第 ${attempt} 次）：上一次产出的文件未通过编译校验，按错误修正后重新输出目标文件完整源代码（不要围栏、JSON 或说明）\n${problems.join("；").slice(0, 400)}`;
+    return `\n\n## 编译闸门打回（第 ${attempt} 次）：上一次产出的文件未通过编译校验，按错误修正后重新输出目标文件完整源代码（不要围栏、JSON 或说明）\n${problems.join("；").slice(0, 600)}`;
 }

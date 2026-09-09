@@ -103,8 +103,12 @@ function fileKnownView(ctx: ToolExecCtx): GateKnown {
 function readViaCtx(ctx: ToolExecCtx, path: string): string | null {
     if (ctx.written.has(path)) return ctx.written.get(path)!;
     if (ctx.pid == null) return null;
+    // 沙箱（9/9 补洞）：write 侧一直有 writeWorkspace/safeRealPath 挡逃逸，读口原先裸奔——
+    // ../ 上跳或绝对路径能摸到产物树外（别的项目/.env）。内存层查过再拦，盘上层只许树内路径
+    const clean = path.replace(/\\/g, "/");
+    if (clean.startsWith("/") || /^[a-zA-Z]:/.test(clean) || clean.split("/").includes("..")) return null;
     try {
-        const full = projectDir(ctx.pid) + "/" + path.replace(/\\/g, "/");
+        const full = projectDir(ctx.pid) + "/" + clean;
         return fs.existsSync(full) ? fs.readFileSync(full, "utf-8") : null;
     } catch { return null; }
 }

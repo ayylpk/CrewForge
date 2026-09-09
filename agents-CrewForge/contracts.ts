@@ -17,7 +17,7 @@ import { SystemMessage } from "@langchain/core/messages";
 import { z } from "zod";
 import { initModels } from "./models";
 import { retryStructured } from "./llm";
-import { readWorkspace, writeWorkspace, type ExecTask, type Plan } from "./common";
+import { readWorkspace, writeWorkspace, type ExecTask, type Plan, REQUEST_WRAPPER_PATH } from "./common";
 
 /** 产物树里的契约文件名（相对 runs/pN，写盘落库同名，工位按此读） */
 export const CONTRACTS_FILE = "CONTRACTS.md";
@@ -39,10 +39,11 @@ export const CONTRACT_LAWS = [
     "5. 后端只在自己的模块目录里加文件；一个业务动作一套文件，禁止在两个根目录（app/ 与 backend/）之间摇摆。",
 ].join("\n");
 
-/** 接口基约（确定性段——具体 path 前缀会随 bootstrap 的 baseURL 配置对齐） */
+/** 接口基约（确定性段——具体 path 前缀会随 bootstrap 的 baseURL 配置对齐）。
+ *  p2 修①（9/9）：request 路径插值 common.ts 常量，与地基落盘/前端 prompt 单一来源，不再手抄 */
 export const CONTRACT_API_BASE = [
     "## 接口基约",
-    "- 前缀 /api/*，请求封装统一走 frontend/src/utils/request.ts（axios 实例，baseURL=/api）",
+    `- 前缀 /api/*，请求封装统一走 ${REQUEST_WRAPPER_PATH}（axios 实例，baseURL=/api，地基代码保证已产出）`,
     "- 响应形态 { code, message, data }，code=0 成功；字段名以各任务的【后端契约】段为准，照抄不改名",
 ].join("\n");
 

@@ -22,7 +22,7 @@ import { writeWorkspace, readWorkspace, sliceGuard, type ExecTask } from "./comm
 import { currentProjectId, projectDir } from "./runEnv";
 import { updateStatusByExt } from "./task";
 import { nodePrompt, type Node } from "./Node";
-import { buildKnown, checkFile, gateFeedback } from "./checkers";
+import { buildKnown, checkFile, gateFeedback, fileTreePrompt } from "./checkers";
 import { contractPromptBlock, loadContracts } from "./contracts";
 import { gate } from "./concurrency";
 import { FILE_TOOLS, TOOL_PROTOCOL, runToolFileJob, type ToolExecCtx } from "./fileTools";
@@ -260,6 +260,9 @@ export class BackendEngineer extends BaseAgent {
         // known = 磁盘树(runs/pN) ∪ 本任务已生成 ∪ 计划内路径（存在性可核，内容未生成的自动跳名核验）
         const pid = currentProjectId();
         const known = buildKnown(pid != null ? projectDir(pid) : null, writtenFiles, task.files);
+        // p2 复盘修②（9/9）：磁盘文件树注入实现 prompt（frontendEngineer 同注释）——
+        // 后端侧治的是 prisma/client、middlewares 单复数那 11 次杂散打回
+        const treeBlock = fileTreePrompt(known);
         const contract = contractPromptBlock(await loadContracts());   // T2：契约头部注入（旁路同伪代码工位）
         const guard = sliceGuard(task.files.length);                   // T4：竖切大任务收敛为 2 次×600s
         // ---- T7b 工具模式（sys_settings.tool_mode 默认关）：runToolFileJob 走 read/write/edit 交付——
@@ -270,7 +273,7 @@ export class BackendEngineer extends BaseAgent {
                 const toolModel = initModels(JSON.stringify({ ...JSON.parse(BACKEND_MODEL_JSON), tools: FILE_TOOLS }), "backend");
                 const ctx: ToolExecCtx = { pid, written: writtenFiles, planned: task.files, landed: null };
                 const landed = await runToolFileJob({
-                    system: this.codePrompt + contract
+                    system: this.codePrompt + contract + treeBlock
                         + `\n\n## 当前任务\n${JSON.stringify(fileTask, null, 2)}`
                         + `\n\n## 当前目标文件\n${filePath}`
                         + `\n\n## 项目路径\nworkspace`
@@ -296,6 +299,7 @@ export class BackendEngineer extends BaseAgent {
                     new SystemMessage(
                         this.codePrompt +
                         contract +
+                        treeBlock +
                         `\n\n## 当前任务\n${JSON.stringify(fileTask, null, 2)}` +
                         `\n\n## 当前目标文件\n${filePath}` +
                         `\n\n## 项目路径\nworkspace` +

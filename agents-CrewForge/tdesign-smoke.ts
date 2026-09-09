@@ -15,7 +15,8 @@ import {
     fetchComponentDocs, buildDocsBlock, TDESIGN_WHITELIST,
 } from "./tdesignMcp";
 import { parseDesignComponents } from "./frontendEngineer";
-import { enforceTdesignFoundation } from "./architect";
+import { enforceTdesignFoundation, ensureRequestFoundation } from "./architect";
+import { REQUEST_WRAPPER_PATH, REQUEST_WRAPPER_CODE } from "./common";
 import { closeTdesignMcp } from "./tdesignMcp";
 
 let pass = 0, fail = 0;
@@ -75,6 +76,38 @@ async function main() {
     ok(!JSON.parse(files[1]?.content ?? "{}").dependencies["tdesign-vue-next"], "后端 package.json 不误伤");
     ok(files.some(f => f.path.endsWith("td-theme.css") && f.content.includes("--td-brand-color")),
         "无 theme 文件时补写 --td-* 主题");
+
+    console.log("=== ③b ensureRequestFoundation（p2 修①：请求封装代码保底） ===");
+    // 无前端形态：不掺和
+    const backOnly = [{ path: "backend/app.py", content: "print(1)" }];
+    ensureRequestFoundation(backOnly);
+    ok(backOnly.length === 1, "纯后端批：不补 request 封装");
+    // 有前端无封装：补契约标准路径 + package.json 合并 axios（保留原依赖）
+    const fe2 = [
+        { path: "frontend/package.json", content: JSON.stringify({ dependencies: { vue: "^3.5.0" } }) },
+        { path: "frontend/src/views/Home.vue", content: "<template><div/></template>" },
+    ];
+    ensureRequestFoundation(fe2);
+    const reqFile = fe2.find(f => f.path === REQUEST_WRAPPER_PATH);
+    ok(!!reqFile && reqFile.content === REQUEST_WRAPPER_CODE,
+        "补写 frontend/src/utils/request.ts（内容与前端 prompt 严格同源）");
+    const pkg2 = JSON.parse(fe2[0]?.content ?? "{}");
+    ok(!!pkg2.dependencies.axios && pkg2.dependencies.vue === "^3.5.0", "axios 合并进前端包且原依赖不丢");
+    // LLM 已自写标准封装：不重复、不覆盖
+    const own = [
+        { path: "frontend/src/views/A.vue", content: "<template><div/></template>" },
+        { path: "frontend/src/utils/request.ts", content: "// own\nexport default 1;" },
+    ];
+    ensureRequestFoundation(own);
+    ok(own.length === 2 && own[1]?.content === "// own\nexport default 1;", "标准封装在场：不动（幂等）");
+    // LLM 另起炉灶（p2 现场 services/api.js）：仍补标准文件——幽灵致命、重复只是瑕疵
+    const drifted = [{ path: "frontend/src/services/api.js", content: "export default {};" }];
+    ensureRequestFoundation(drifted);
+    ok(drifted.length === 2 && drifted[1]?.path === REQUEST_WRAPPER_PATH, "services/api.js 漂移：补标准件共存");
+    // web/ 形态前端根：封装落在 web/src/utils/request.ts（不硬写 frontend）
+    const web = [{ path: "web/src/App.vue", content: "<template><div/></template>" }];
+    ensureRequestFoundation(web);
+    ok(!!web.find(f => f.path === "web/src/utils/request.ts"), "web/ 前端根：路径跟着前端根走");
 
     ok(TDESIGN_WHITELIST.length <= 30 && TDESIGN_WHITELIST.length >= 28, `白名单规模 ${TDESIGN_WHITELIST.length} ≤30`);
 

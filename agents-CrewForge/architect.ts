@@ -27,7 +27,7 @@ import {
     type StateNodeFn, type CondFn,
 } from "./GraphFactory";
 import { type Node, type Edge, saveArchitectOutput, readProjectFile, getProjectConfirmMode } from "./Node";
-import { writeWorkspace, type Pair, type ExecTask, type Plan, type planItem } from "./common";
+import { writeWorkspace, type Pair, type ExecTask, type Plan, type planItem, REQUEST_WRAPPER_PATH, REQUEST_WRAPPER_CODE } from "./common";
 import { currentProjectId, projectDir } from "./runEnv";
 import { ensureTasksForPhase, getTasksByStatus, updateStatusByExt } from "./task";
 import { pickQuestioner } from "./confirm";
@@ -151,6 +151,7 @@ export const bootstrap_prompt: string = `
 ## 约束
 - 只写项目地基文件（脚手架/配置/DDL/占位），绝不写业务代码（Controller/Service/页面组件由开发 Agent 负责）
 - 前端脚手架的 package.json 必须包含 vue、vite、@vitejs/plugin-vue，以及 UI 库 tdesign-vue-next 与按需引入插件 unplugin-vue-components（前端栈固定 Vue3 + TDesign，见 9/5 拍板 [[frontend-uilib-trial-0903]]）
+- 前端脚手架必须产出请求封装 frontend/src/utils/request.ts：创建 axios 实例（baseURL='/api'，timeout=10000）并 default 导出；业务页面统一从该路径 import，不得另起 services/api.js 之类的别名（p2 复盘修①，9/9：契约基约与前端工位 prompt 都钉死这个路径，地基必须供得上）
 - path 使用相对路径（如 pom.xml、src/main/resources/application.yml），不含 ../
 - content 必须是完整可用的文件内容；占位文件 content 用空字符串
 - 文件数量控制在合理范围（5-15 个），不要重复造轮子
@@ -368,7 +369,48 @@ export function enforceTdesignFoundation(files: { path: string; content: string 
     const hasTheme = files.some(f => /\.css$/i.test(f.path) && (f.content ?? "").includes("--td-"));
     if (!hasTheme && files.length > 0) {
         files.push({ path: "frontend/src/styles/td-theme.css", content: TDESIGN_THEME_CSS });
-        console.log("[architect] TDesign 地基：补写 frontend/src/styles/td-theme.css（--td-* 藏青主题兜底）");
+        console.log("[architect] TDesign 地基：补写 frontend/src/styles/td-theme.css（--td-* 主题兜底）");
+    }
+}
+
+/**
+ * p2 复盘修①（9/9）：前端请求封装代码强制保底——34 次编译打回里 20 次死在幽灵 import "../utils/request"。
+ * 病根是三方漂移：bootstrap 批由 LLM 自由发挥（p2 造出 services/api.js），而契约接口基约和
+ * frontendEngineer 的 prompt 都写着 utils/request.ts——模型忠实执行 prompt 就 import 到空。
+ * 规矩（同 enforceTdesignFoundation 姿势：代码兜底不靠提示词自觉，DB 旧 prompt 顶不掉）：
+ *   ① 批内有前端形态文件而标准路径没有封装 → 补写 <前端根>/src/utils/request.ts（内容=common.ts 常量，
+ *      与前端工位注入的 prompt 严格同源，教的路径=盘上真实存在）；
+ *   ② 前端 package.json 缺 axios 就合并进去（有封装没依赖=编译过、build 炸）；
+ *   ③ LLM 另起的名字（services/api.js 等）一律不管——标准文件在场，两种 import 都能命中；
+ *      重复是瑕疵，幽灵才是致命（去重归 #7 扩展名单轨管）。
+ * 导出供 smoke 狗考。
+ */
+export function ensureRequestFoundation(files: { path: string; content: string }[]): void {
+    if (files.length === 0) return;
+    const FRONT_RE = /^(frontend|web|client|ui)[\\/]/i;
+    const front = files.find(f => FRONT_RE.test(f.path ?? ""));
+    if (!front) return;   // 无前端形态（纯后端/web=false 项目）：不掺和
+    // 前端根目录取批内首个前端文件的第一段（通常 frontend/；web/client/ui 形态也钉得住，别硬写死）
+    const root = ((front.path ?? "").replace(/\\/g, "/").split("/")[0] ?? "frontend").toLowerCase();
+    const wrapperPath = root === "frontend" ? REQUEST_WRAPPER_PATH : `${root}/src/utils/request.ts`;
+    const canonicalRe = new RegExp(`^${root}/src/utils/request\\.(ts|js)$`, "i");
+    let hasWrapper = false;
+    for (const f of files) {
+        const p = (f.path ?? "").replace(/\\/g, "/");
+        if (canonicalRe.test(p)) { hasWrapper = true; continue; }
+        if (/package\.json$/i.test(p) && FRONT_RE.test(p) && f.content) {
+            let pkg: any;
+            try { pkg = JSON.parse(f.content); } catch { continue; }   // 非 JSON：留给编译闸门/测试工位，这里不硬来
+            if (!pkg.dependencies?.axios && !pkg.devDependencies?.axios) {
+                pkg.dependencies = { axios: "^1.7.0", ...(pkg.dependencies ?? {}) };
+                f.content = JSON.stringify(pkg, null, 2);
+                console.log(`[architect] p2 修①：${p} 已合并 axios 依赖`);
+            }
+        }
+    }
+    if (!hasWrapper) {
+        files.push({ path: wrapperPath, content: REQUEST_WRAPPER_CODE });
+        console.log(`[architect] p2 修①：补写 ${wrapperPath}（axios 实例，baseURL=/api，与契约/前端 prompt 同源）`);
     }
 }
 
@@ -421,6 +463,7 @@ const bootstrapNode: StateNodeFn = async (state, node) => {
                 // 之后整批校验，任一台红就 throw：retryStructured 把报错原文截 400 字喂回下一轮
                 // （卡面"编译器报错原文喂回、话术同 retryStructured"零新增机关，现成反馈环直接复用）
                 enforceTdesignFoundation(out.files);
+                ensureRequestFoundation(out.files);   // p2 修①（9/9）：契约基约/前端 prompt 都钉 utils/request.ts，地基代码保证供得上
                 const pid = currentProjectId();
                 const known = buildKnown(pid != null ? projectDir(pid) : null, undefined, out.files.map(f => f.path));
                 const reds = await checkBatch(out.files, known);

@@ -19,11 +19,11 @@ import { BaseAgent } from "./BaseAgent";
 import { roles, type TransferStation, WorkQueue } from "./Hub";
 import { initModels } from "./models";
 import { invokeWithTimeout, DEFAULT_TIMEOUT_MS } from "./llm";
-import { writeWorkspace, readWorkspace, sliceGuard, type ExecTask } from "./common";
+import { writeWorkspace, readWorkspace, sliceGuard, type ExecTask, REQUEST_WRAPPER_PATH, REQUEST_WRAPPER_CODE } from "./common";
 import { currentProjectId, projectDir } from "./runEnv";
 import { updateStatusByExt } from "./task";
 import { nodePrompt, type Node } from "./Node";
-import { buildKnown, checkFile, gateFeedback } from "./checkers";
+import { buildKnown, checkFile, gateFeedback, fileTreePrompt } from "./checkers";
 import { contractPromptBlock, loadContracts } from "./contracts";
 import { gate } from "./concurrency";
 import { FILE_TOOLS, TOOL_PROTOCOL, runToolFileJob, type ToolExecCtx } from "./fileTools";
@@ -93,17 +93,17 @@ const TDESIGN_FILE_RULE = `
 - 下方若附带"TDesign 组件真实 API"文档，props/事件名/v-model 一律照抄文档；文档里没有的属性不要写。
 - 颜色/圆角/间距一律引用输入给定的 --td-* 主题变量，不硬编码色值。`;
 
-// ---------- 基建占位（移植自 _legacy-agents；正式版架构师产出 theme.css / request 封装） ----------
-
+// ---------- 基建占位（p2 复盘修①，9/9：路径+内容双同源，不再悬空） ----------
+// 旧文案只写 "request.ts —— 全局请求封装（基建产出）" 不给路径，地基批却未必产出（p2 造的是
+// services/api.js）——34 次打回里 20 次幽灵 import 就是这几行教的。现在：
+//   内容=common.ts 常量（architect.ensureRequestFoundation 落盘用的同一份，教的路径=盘上真实存在）；
+//   路径钉死契约标准 frontend/src/utils/request.ts，由地基代码强制保证在场。
 // 主题串在 tdesignMcp.ts 单一来源（architect bootstrap 落盘用的同一份，防提示词与真实文件漂移）
 const DEFAULT_THEME = TDESIGN_THEME_CSS;
 
-const DEFAULT_REQUEST = `
-// request.ts —— 全局请求封装（基建产出）
-import axios from 'axios';
-const request = axios.create({ baseURL: '/api', timeout: 10000 });
-export default request;
-`;
+const DEFAULT_REQUEST = REQUEST_WRAPPER_CODE + `
+// 用法（页面/组件统一走这个封装，不要另起 axios/fetch 轮子）：
+// import request from '../utils/request';   // ../ 深度按当前文件所在位置调整`;
 
 // ---------- 工具：从回复里提取代码（去一个外层代码围栏） ----------
 
@@ -316,6 +316,9 @@ export class FrontendEngineer extends BaseAgent {
         // 每轮现建：并行 B 工位刚落盘的文件、上一文件新写的内容，下一文件校验时都算已知
         const pid = currentProjectId();
         const known = buildKnown(pid != null ? projectDir(pid) : null, writtenFiles, task.files);
+        // p2 复盘修②（9/9）：磁盘文件树注入实现 prompt——治"模型与闸门信息不对称"，
+        // 打回从猜谜变照抄（known 每轮现建的口径不变：并行工位刚落盘的文件下一文件就能看到）
+        const treeBlock = fileTreePrompt(known);
         const contract = contractPromptBlock(await loadContracts());       // T2：契约头部注入（旁路=无契约空串）
         const guard = sliceGuard(task.files.length);                       // T4：竖切大任务收敛为 2 次×600s
         // ---- T7b 工具模式（默认关，backendEngineer 同注释）。幻觉闸挂进工具的 extraGate 位：
@@ -342,11 +345,11 @@ export class FrontendEngineer extends BaseAgent {
                     },
                 };
                 const landed = await runToolFileJob({
-                    system: this.filePrompt + contract
+                    system: this.filePrompt + contract + treeBlock
                         + `\n\n## 当前子任务\n${JSON.stringify(fileTask, null, 2)}` + designHint
                         + (buildDocsBlock(Object.keys(tdesign.docs), tdesign.docs) || "")
                         + existingContent + dbExistingPrompt
-                        + `\n\n## 主题变量\n${DEFAULT_THEME}\n\n## 请求封装\n${DEFAULT_REQUEST}`
+                        + `\n\n## 主题变量\n${DEFAULT_THEME}\n\n## 请求封装（固定路径 ${REQUEST_WRAPPER_PATH}，地基已代码保证落盘）\n${DEFAULT_REQUEST}`
                         + TOOL_PROTOCOL,
                     targetFile: filePath, ctx,
                     maxRounds: task.files.length >= 3 ? 6 : 4,
@@ -373,12 +376,13 @@ export class FrontendEngineer extends BaseAgent {
                     new SystemMessage(
                         this.filePrompt +
                         contract +
+                        treeBlock +
                         `\n\n## 当前子任务\n${JSON.stringify(fileTask, null, 2)}` +
                         designHint +
                         tdesignHint +
                         existingContent +
                         dbExistingPrompt +
-                        `\n\n## 主题变量\n${DEFAULT_THEME}\n\n## 请求封装\n${DEFAULT_REQUEST}` +
+                        `\n\n## 主题变量\n${DEFAULT_THEME}\n\n## 请求封装（固定路径 ${REQUEST_WRAPPER_PATH}，地基已代码保证落盘）\n${DEFAULT_REQUEST}` +
                         feedback
                     ),
                 ], { signal: sig }));

@@ -1,7 +1,7 @@
 // ============================================================
 // t7b-smoke.ts —— T7b 工位文件工具冒烟（9/8，假模型脚本驱动，零真 LLM）
 //
-//   覆盖：①executeFileTool 三工具语义：write 过闸落盘/红不落、edit 锚点唯一性/锁内重读、read 截断与不存在
+//   覆盖：①executeFileTool 三工具语义：write 过闸落盘/红不落、edit 锚点唯一性/锁内重读、read 截断与不存在+沙箱（../与绝对路径被拒，9/9 补洞）
 //         ②越界写（非目标文件）与 extraGate（幻觉闸搬家）拒绝路径
 //         ③withPathLock 同路径严格串行
 //         ④runToolFileJob 工具循环：红→edit 修→落地即终止（机械判定）、白卷提醒一次再犯判负、轮次耗尽 null
@@ -73,6 +73,11 @@ async function main() {
     ok(readMiss.ok === false && readMiss.result.includes("不存在"), "read 缺失文件=错误材料回给模型");
     const readHit = await executeFileTool(e1, "e1.ts", "read", { path: "e1.ts" });
     ok(readHit.ok === true && readHit.result.includes("export const"), "read 命中返内容", readHit.result.slice(0, 40));
+    // 9/9 补洞：读口沙箱——写口一直有 safeRealPath 挡逃逸，读口原先裸奔（../ 上跳能摸产物树外）
+    const readEsc = await executeFileTool(e1, "e1.ts", "read", { path: "../../../Windows/win.ini" });
+    ok(readEsc.ok === false, "read 沙箱：../ 上跳被拒", readEsc.result.slice(0, 60));
+    const readAbs = await executeFileTool(e1, "e1.ts", "read", { path: "/etc/passwd" });
+    ok(readAbs.ok === false, "read 沙箱：绝对路径被拒", readAbs.result.slice(0, 60));
     const ghostGateCtx = freshCtx(async (_fp, code) => (code.includes("<t-ghost") ? ["TDesign 不存在组件：<t-ghost>"] : []));
     const vueBad = await executeFileTool(ghostGateCtx, "V.vue", "write", { path: "V.vue", content: "<template><t-ghost></t-ghost></template>" });
     ok(vueBad.ok === false && vueBad.result.includes("t-ghost") && !landedOnDisk("V.vue"),
