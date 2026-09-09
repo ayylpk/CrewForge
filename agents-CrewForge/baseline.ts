@@ -79,12 +79,30 @@ function section(stack: unknown, name: string): RecordLike {
     return record(techniques[name] ?? root[name]);
 }
 
+function legacyModuleTech(stack: unknown): { frontend: string; backend: string } {
+    const rows = record(stack).moduleTech;
+    if (!Array.isArray(rows)) return { frontend: "", backend: "" };
+    const first = record(rows[0]);
+    return {
+        frontend: typeof first.frontend === "string" ? first.frontend : "",
+        backend: typeof first.backend === "string" ? first.backend : "",
+    };
+}
+
+function firstTechnology(value: string, preferred: RegExp, fallback: string): string {
+    const match = value.match(preferred)?.[0]?.trim();
+    if (match) return match;
+    const first = value.split("+")[0]?.trim();
+    return first || fallback;
+}
+
 /** Resolve the final baseline from current and legacy architecture stack shapes. */
 export function resolveProjectBaseline(stack: unknown): ProjectBaseline {
     const root = record(stack);
     const techniques = record(root.techniques);
     const frontend = section(stack, "frontend");
     const backend = section(stack, "backend");
+    const legacy = legacyModuleTech(stack);
     const database = record(techniques.database ?? root.database);
     const auth = record(techniques.auth ?? root.auth);
     const frontendSelected = Object.keys(frontend).length > 0;
@@ -95,17 +113,17 @@ export function resolveProjectBaseline(stack: unknown): ProjectBaseline {
 
     return {
         frontend: {
-            framework: text(frontend.framework ?? frontend.name, PROJECT_BASELINE.frontend.framework),
-            ui: text(frontend.ui ?? frontend.uiLibrary ?? frontend.componentLibrary, PROJECT_BASELINE.frontend.ui),
-            build: text(frontend.build ?? frontend.buildTool, PROJECT_BASELINE.frontend.build),
+            framework: text(frontend.framework ?? frontend.name, firstTechnology(legacy.frontend, /(?:Vue|React|Angular|Svelte|Solid)(?:\s+[^+]+)?/i, PROJECT_BASELINE.frontend.framework)),
+            ui: text(frontend.ui ?? frontend.uiLibrary ?? frontend.componentLibrary, firstTechnology(legacy.frontend, /(?:Element Plus|Ant Design|Ant Design Vue|TDesign|Material UI|MUI|Naive UI)/i, PROJECT_BASELINE.frontend.ui)),
+            build: text(frontend.build ?? frontend.buildTool, firstTechnology(legacy.frontend, /(?:Vite|Webpack|Rspack|Next\.js|Nuxt)/i, PROJECT_BASELINE.frontend.build)),
             // This path is intentionally stable: it is the import contract that prevents ghost wrappers.
             requestPath: PROJECT_BASELINE.frontend.requestPath,
             enabled: bool(frontend.enabled, frontendSelected ? true : PROJECT_BASELINE.frontend.enabled),
         },
         backend: {
-            framework: text(backend.framework ?? backend.name, PROJECT_BASELINE.backend.framework),
-            language: text(backend.language ?? backend.runtime, PROJECT_BASELINE.backend.language),
-            orm: text(backend.orm ?? backend.persistence, PROJECT_BASELINE.backend.orm),
+            framework: text(backend.framework ?? backend.name, firstTechnology(legacy.backend, /(?:Spring Boot|FastAPI|Django|Express|NestJS|Rails|Laravel|ASP\.NET Core)(?:\s+\d+(?:\.\d+)*)?/i, PROJECT_BASELINE.backend.framework)),
+            language: text(backend.language ?? backend.runtime, firstTechnology(legacy.backend, /(?:Java|Python|TypeScript|JavaScript|Go|Ruby|PHP|C#)(?:\s+\d+(?:\.\d+)*)?/i, PROJECT_BASELINE.backend.language)),
+            orm: text(backend.orm ?? backend.persistence, firstTechnology(legacy.backend, /(?:MyBatis-Plus|SQLAlchemy|Django ORM|Prisma|TypeORM|Hibernate|Entity Framework)(?:\s+\w+)?/i, PROJECT_BASELINE.backend.orm)),
             enabled: bool(backend.enabled, backendSelected ? true : PROJECT_BASELINE.backend.enabled),
         },
         database: databaseName,

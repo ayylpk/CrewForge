@@ -4,7 +4,7 @@ import { initModels } from "./models";
 import { retryStructured } from "./llm";
 import { readWorkspace, writeWorkspace, type ExecTask, type Plan, REQUEST_WRAPPER_PATH } from "./common";
 import { bannedDependencyList } from "./foundation";
-import { baselinePromptBlock, API_ERROR_CODE, API_SUCCESS_CODE } from "./baseline";
+import { baselinePromptBlock, API_ERROR_CODE, API_SUCCESS_CODE, resolveProjectBaseline } from "./baseline";
 
 export const CONTRACTS_FILE = "CONTRACTS.md";
 
@@ -21,12 +21,12 @@ export const CONTRACT_LAWS = [
     "2. router 的 component 指向必须来自页面清单真实文件；未登记文件不得进入路由。",
     "3. 共享模块由唯一任务创建，其余任务只 import，禁止另起炉灶或覆盖已有文件。",
     "4. 颜色/圆角/间距只使用项目视觉 token，硬编码色值不得超过 5 处。",
-    "5. 后端使用 Spring Boot 3，Java 文件一律位于 backend/src/，禁止多根目录摇摆。",
+    "5. 后端文件必须遵循最终技术栈的目录约定；不得混用不同后端框架的入口或目录，禁止多根目录摇摆。",
 ].join("\n");
 
 export const CONTRACT_API_BASE = [
     "## 接口基约",
-    `- API 前缀统一为 /api；前端请求封装唯一使用 ${REQUEST_WRAPPER_PATH}（axios，baseURL=/api）。`,
+    `- 默认 API 前缀为 /api；前端请求封装唯一使用 ${REQUEST_WRAPPER_PATH}，具体 HTTP 客户端必须与最终技术栈一致。`,
     `- 响应形态统一为 { code, msg, data }；成功 code=${API_SUCCESS_CODE}，失败 code=${API_ERROR_CODE}。`,
     "- 认证统一使用 JWT；前端通过 Authorization: Bearer <token> 请求头发送，不使用 session 作为业务认证协议。",
     "- method、path、参数名、返回字段必须在前后端契约中逐字一致。",
@@ -56,8 +56,8 @@ ${baselinePromptBlock()}
 
 export const CONTRACT_STYLE_SECTION = [
     "## 视觉 token（单一来源，全站唯一）",
-    "- 前端使用 Element Plus；主题覆盖和业务样式以 frontend/src/style.css 中的项目 token 为准，组件不得引入 TDesign。",
-    "- 页面和组件禁止凭记忆引入 el-* 之外的第三方组件库标签；不使用 TDesign、Ant Design、Vant 等未声明依赖。",
+    "- 组件库、主题入口和视觉 token 以架构师最终技术选型为准；页面不得混用未声明的组件库。",
+    "- 页面和组件不得凭记忆引入未在 package.json 与技术选型中声明的 UI 依赖。",
 ].join("\n");
 
 function renderPages(pages: { path: string; file: string; task: string }[]): string {
@@ -109,7 +109,7 @@ export function assembleContracts(
     const banned = bannedDependencyList(stack);
     const baseline = [
         "## 技术基线（机械闸，写盘时 import 禁用包直接打回）",
-        baselinePromptBlock(),
+        baselinePromptBlock(resolveProjectBaseline(stack)),
         `- banned-imports: ${banned.join(", ") || "（无）"}`,
     ].join("\n");
     return [

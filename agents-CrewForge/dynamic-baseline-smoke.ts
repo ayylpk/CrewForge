@@ -37,5 +37,14 @@ ok(baselinePromptBlock(selected).includes("FastAPI"), "动态 prompt 注入最�
 ok(baselinePromptBlock(selected).includes("PostgreSQL 16"), "动态 prompt 注入最终数据库");
 ok(PROJECT_BASELINE.frontend.framework === "Vue 3", "默认基线仍可供兼容调用方使用");
 
+const legacy = resolveProjectBaseline({
+    techniques: { database: { type: "PostgreSQL 16", why: "legacy" } },
+    moduleTech: [{ module: "订单", backend: "FastAPI + Python 3.12 + SQLAlchemy", frontend: "React 19 + Ant Design + Vite" }],
+});
+ok(legacy.frontend.framework === "React 19", "旧 moduleTech 可解析前端框架");
+ok(legacy.frontend.ui === "Ant Design", "旧 moduleTech 可解析组件库");
+ok(legacy.backend.framework === "FastAPI", "旧 moduleTech 可解析后端框架");
+ok(legacy.database === "PostgreSQL 16", "旧 stack 仍读取数据库选型");
+
 console.log(`\n=== 汇总：${pass} 绿 / ${fail} 红 ===`);
 process.exit(fail > 0 ? 1 : 0);

@@ -23,10 +23,11 @@ import { currentProjectId, projectDir } from "./runEnv";
 import { updateStatusByExt } from "./task";
 import { nodePrompt, type Node } from "./Node";
 import { buildKnown, checkFile, gateFeedback, fileTreePrompt } from "./checkers";
-import { contractPromptBlock, loadContracts } from "./contracts";
+import { contractPromptBlock, loadContracts, parseBannedImports } from "./contracts";
 import { gate } from "./concurrency";
 import { FILE_TOOLS, TOOL_PROTOCOL, runToolFileJob, type ToolExecCtx } from "./fileTools";
 import { runtimeSettings } from "./settings";
+import { baselinePromptBlock, resolveProjectBaseline } from "./baseline";
 
 const BACKEND_MODEL_JSON = JSON.stringify({
     provider: "deepseek",
@@ -161,6 +162,7 @@ export class BackendEngineer extends BaseAgent {
 
     private async generatePseudo(task: ExecTask): Promise<string | null> {
         const model = initModels(BACKEND_MODEL_JSON, "pseudo");   // T3：A 工位（伪代码）归 pseudo 档
+        const dynamicBaseline = `\n\n${baselinePromptBlock(resolveProjectBaseline(task.stack))}`;
         const contract = contractPromptBlock(await loadContracts());   // T2：契约头部注入（无契约=空串，旁路）
         let feedback = "";
         for (let attempt = 1; attempt <= 3; attempt++) {
@@ -168,7 +170,7 @@ export class BackendEngineer extends BaseAgent {
             try {
                 // 工位超时 9/3 拍板：与主链同级 300s（旧 180s 两档制被击穿——run10 代码步实测 178~256s 尾延迟，3 发全误杀致整阶段 0 通过）
                 const res = await invokeWithTimeout<any>(`${task.id} 伪代码`, DEFAULT_TIMEOUT_MS, sig => model.invoke([
-                    new SystemMessage(this.skeletonPrompt + contract + `\n\n## 当前任务\n${JSON.stringify(task, null, 2)}` + feedback),
+                    new SystemMessage(this.skeletonPrompt + dynamicBaseline + contract + `\n\n## 当前任务\n${JSON.stringify(task, null, 2)}` + feedback),
                 ], { signal: sig }));
                 console.log(`[${this.name}] ${task.id} 伪代码 ${Date.now() - ts}ms`);
                 const pseudo = extractGeneratedCode(res.content);
@@ -237,6 +239,7 @@ export class BackendEngineer extends BaseAgent {
         writtenFiles: Map<string, string>,
     ): Promise<string | null> {
         const model = initModels(BACKEND_MODEL_JSON, "backend");   // T3：B 工位（代码实现）归 backend 档
+        const dynamicBaseline = `\n\n${baselinePromptBlock(resolveProjectBaseline(task.stack))}`;
         // 本任务内先写的文件注入，供跨文件衔接（避免重复实现或引用不存在的函数）
         const taskExisting = [...writtenFiles.entries()]
             .filter(([knownPath]) => task.files.includes(knownPath))
@@ -263,7 +266,9 @@ export class BackendEngineer extends BaseAgent {
         // p2 复盘修②（9/9）：磁盘文件树注入实现 prompt（frontendEngineer 同注释）——
         // 后端侧治的是 prisma/client、middlewares 单复数那 11 次杂散打回
         const treeBlock = fileTreePrompt(known);
-        const contract = contractPromptBlock(await loadContracts());   // T2：契约头部注入（旁路同伪代码工位）
+        const contractsMd = await loadContracts();               // p3 修④：留原文解析禁用包清单
+        const contract = contractPromptBlock(contractsMd);       // T2：契约头部注入（旁路同伪代码工位）
+        const banned = parseBannedImports(contractsMd);
         const guard = sliceGuard(task.files.length);                   // T4：竖切大任务收敛为 2 次×600s
         // ---- T7b 工具模式（sys_settings.tool_mode 默认关）：runToolFileJob 走 read/write/edit 交付——
         // 工具内 write/edit 自带过闸+落盘+文件锁，落地即返回；轮次耗尽=文件失败走返工；
@@ -271,15 +276,15 @@ export class BackendEngineer extends BaseAgent {
         if (runtimeSettings()?.toolMode && !this.toolModeDead) {
             try {
                 const toolModel = initModels(JSON.stringify({ ...JSON.parse(BACKEND_MODEL_JSON), tools: FILE_TOOLS }), "backend");
-                const ctx: ToolExecCtx = { pid, written: writtenFiles, planned: task.files, landed: null };
+                const ctx: ToolExecCtx = { pid, written: writtenFiles, planned: task.files, landed: null, banned };
                 const landed = await runToolFileJob({
-                    system: this.codePrompt + contract + treeBlock
+                    system: this.codePrompt + dynamicBaseline + contract + treeBlock
                         + `\n\n## 当前任务\n${JSON.stringify(fileTask, null, 2)}`
                         + `\n\n## 当前目标文件\n${filePath}`
                         + `\n\n## 项目路径\nworkspace`
                         + taskExistingPrompt + existingPrompt + pseudoHint + TOOL_PROTOCOL,
                     targetFile: filePath, ctx,
-                    maxRounds: task.files.length >= 3 ? 6 : 4,   // 竖切多文件任务给足修补轮次（单发老路是 2~3 attempt）
+                    maxRounds: task.files.length >= 3 ? 12 : 8,   // p3 loop 化（9/9）：五件工具+查证开销翻倍（老路 attempt 仍是 2~3）
                     timeoutMs: guard.timeoutMs,
                     label: `${task.id} ${filePath}`,
                     invoke: (msgs, sig) => toolModel.invoke(msgs, { signal: sig }),
@@ -297,7 +302,7 @@ export class BackendEngineer extends BaseAgent {
             try {
                 const res = await invokeWithTimeout<any>(`${task.id} 代码`, guard.timeoutMs, sig => model.invoke([
                     new SystemMessage(
-                        this.codePrompt +
+                        this.codePrompt + dynamicBaseline +
                         contract +
                         treeBlock +
                         `\n\n## 当前任务\n${JSON.stringify(fileTask, null, 2)}` +
@@ -316,7 +321,7 @@ export class BackendEngineer extends BaseAgent {
                     continue;
                 }
                 // ---- 编译闸门打回：吃本轮工位 attempt 名额（同前端幻觉闸姿势），耗尽=文件失败走返工，宁失败不交坏码 ----
-                const problems = await checkFile(filePath, code, known);
+                const problems = await checkFile(filePath, code, known, banned);
                 if (problems.length > 0) {
                     if (attempt < guard.maxAttempt) {
                         feedback = gateFeedback(attempt, problems);

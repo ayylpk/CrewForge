@@ -31,9 +31,10 @@ import { writeWorkspace, type Pair, type ExecTask, type Plan, type planItem, REQ
 import { currentProjectId, projectDir } from "./runEnv";
 import { ensureTasksForPhase, getTasksByStatus, updateStatusByExt } from "./task";
 import { pickQuestioner } from "./confirm";
-import { TDESIGN_THEME_CSS } from "./tdesignMcp";
 import { buildKnown, checkBatch } from "./checkers";
 import { publishContracts } from "./contracts";
+import { enforceEngineFoundation, tidyExecTasks, bannedDependencyList } from "./foundation";
+import { baselinePromptBlock, resolveProjectBaseline } from "./baseline";
 
 // ---------- 模型 ----------
 
@@ -44,11 +45,15 @@ const ARCHITECT_MODEL_JSON = JSON.stringify({
     thinking: false,
 });
 
+const ARCHITECT_BASELINE = baselinePromptBlock();
+
 // ---------- 提示词（移植自 _legacy-agents/architect.ts） ----------
 
 export const plan_prompt: string = `
 # 角色
 你是 CrewForge 项目的架构师-业务规划 Agent。你的输出是当前阶段的业务模块蓝图，供技术栈设计和接口拆分继续使用。
+
+${ARCHITECT_BASELINE}
 
 ## 任务
 1. 将本阶段的每个功能拆成一个业务模块，business 必须填写输入中的原始功能名。
@@ -84,6 +89,8 @@ export const stack_prompt: string = `
 # 角色
 你是 CrewForge 项目的架构师-技术落地 Agent。你的输出是当前阶段唯一的技术基线，供基础架构和开发 Agent 使用。
 
+${ARCHITECT_BASELINE}
+
 ## 任务
 1. 只选择当前阶段实际需要的中间件，并说明每项用途；不要为了完整而堆叠技术。
 2. 将 dataNeeds 落成可实现的表和字段，字段类型、必填性和业务含义必须明确，避免重复存储和无法验证的字段。
@@ -94,7 +101,10 @@ export const stack_prompt: string = `
 - 技术选择必须服务于输入中的业务模块和数据需求，不新增业务功能。
 - moduleTech 必须覆盖每个输入模块，module 名必须原样复制。
 - 表字段应能支撑输入中的功能和验收，不设计与当前阶段无关的表。
-- 前端技术栈固定为 Vue 3 + TDesign Vue Next（9/5 拍板 [[frontend-uilib-trial-0903]]）：只在此范围内细化（主题走 --td-* 变量覆盖、按需引入），不得改用其他组件库。
+- 前端、后端、数据库和中间件由你根据业务模块、部署约束和数据需求选择；不要把默认兼容栈当成固定限制。
+- 默认兼容组合是 Vue 3 + Element Plus + Vite、Spring Boot 3 + Java 17 + MyBatis-Plus、MySQL 8；只有在没有更合适方案时才使用它。
+- 选型必须在 techniques、moduleTech 和 why 中保持一致；后续所有任务必须读取本次最终选型，不得回退到历史栈。
+- 平台默认使用 JWT + Authorization、/api 和 { code, msg, data }；若业务确实需要其他协议，必须在技术选型和契约中明确记录。
 - 不输出接口路径、文件清单或代码；这些由后续 Agent 负责。
 
 ## 输出
@@ -116,6 +126,8 @@ export const base_prompt: string = `
 # 角色
 你是 CrewForge 项目的架构师-基础架构 Agent，负责把当前阶段需要的工程基础动作整理成可执行清单。
 
+${ARCHITECT_BASELINE}
+
 ## 任务
 根据技术栈、表结构和交付物清单：
 1. actions 列出需要新建或补齐的脚手架、配置、目录和依赖。已有基础只列缺失项。
@@ -135,6 +147,8 @@ export const bootstrap_prompt: string = `
 # 角色
 你是 CrewForge 项目的架构师-工程地基落地 Agent。输入是基础架构清单（actions + ddl），输出是可直接写盘的项目地基文件。
 
+${ARCHITECT_BASELINE}
+
 ## 输入
 1. actions：需要新建或补齐的脚手架、配置、目录和依赖动作（字符串列表，可能较长）
 2. ddl：与目标数据库匹配的建表 SQL
@@ -150,8 +164,10 @@ export const bootstrap_prompt: string = `
 
 ## 约束
 - 只写项目地基文件（脚手架/配置/DDL/占位），绝不写业务代码（Controller/Service/页面组件由开发 Agent 负责）
-- 前端脚手架的 package.json 必须包含 vue、vite、@vitejs/plugin-vue，以及 UI 库 tdesign-vue-next 与按需引入插件 unplugin-vue-components（前端栈固定 Vue3 + TDesign，见 9/5 拍板 [[frontend-uilib-trial-0903]]）
-- 前端脚手架必须产出请求封装 frontend/src/utils/request.ts：创建 axios 实例（baseURL='/api'，timeout=10000）并 default 导出；业务页面统一从该路径 import，不得另起 services/api.js 之类的别名（p2 复盘修①，9/9：契约基约与前端工位 prompt 都钉死这个路径，地基必须供得上）
+- 依赖、配置、目录和入口必须与最终技术选型匹配；不要无条件加入 Vue、Spring、MySQL 或其他未选中的依赖。
+- 若有 Web 前端，请统一使用 frontend/src/utils/request.ts 作为业务请求封装；其内容应随选定 HTTP 客户端生成，业务文件不得另起 wrapper。
+- 引擎只维护最终栈对应的入口、根组件和路由登记文件；你不要把这些引擎拥有件列入任务 files。
+- HTML 入口脚本必须指向最终前端框架的引擎入口；不要假设一定是 /src/main.ts。
 - path 使用相对路径（如 pom.xml、src/main/resources/application.yml），不含 ../
 - content 必须是完整可用的文件内容；占位文件 content 用空字符串
 - 文件数量控制在合理范围（5-15 个），不要重复造轮子
@@ -164,6 +180,8 @@ export const bootstrap_prompt: string = `
 export const api_prompt: string = `
 # 角色
 你是 CrewForge 项目的架构师-功能拆分 Agent。你的输出是"功能竖切"任务对：一个功能 = 一个后端任务 + 一个前端任务，供开发 Agent 整块实现和验收。
+
+${ARCHITECT_BASELINE}
 
 ## 任务
 1. 按业务闭环把模块圈成功能竖切（通常一个输入模块=一个功能）；每个功能产出一对任务，顺序固定为后端在前、前端在后。
@@ -180,7 +198,8 @@ export const api_prompt: string = `
 - 参数 type 只能使用 string、number、boolean、array、object；required 必须反映业务必填性。
 - 前端页面调用的 path 必须出自同一任务对后端 apis 的 method+path，字段名一致。
 - files 是开发 Agent 唯一允许产出的文件清单：按技术栈列全，不遗漏、不填无关文件。
-- router/index.ts、main.ts 这类全局登记文件只允许归一个 feature 任务（通常第一个前端功能），其余功能不许列它（追加登记由契约铁律约束）。
+- 竖切前提（p3 翻车修，9/9）：每一对任务必须后端有接口、前端有页面——"只有前端没有接口"的横切能力（路由守卫、请求拦截器、鉴权工具）**不得自立成功能对**，把它的文件并进使用它的那个功能的前端任务里。schema 会拒收空 apis/空 pages，被拒=白烧三轮重试。
+- 引擎拥有件：frontend/src/main.ts、App.vue、router/index.ts、style.css、backend/src/app.js 禁止列入任何任务的 files；路由由引擎按契约页面清单在任务收口后自动登记，入口由模板直出；后端文件一律 backend/src/ 前缀。
 - 每个任务的验收标准继承对应模块的业务要求，不新增无法追溯的验收条件。
 
 ## 输出
@@ -254,7 +273,9 @@ export const resolutionSchema = z.object({
                 method: z.string(),
                 path: z.string(),
                 purpose: z.string(),
-                files: z.array(z.string()),
+                // p4 阶段 3 血案（9/9）：jsonMode 偶发漏 files 键，strict 拒整包=3 连败进程死。
+                // 改判：形状宽容（optional）+ 解析成功后机械回填 backfillSliceFiles——漏键不该是死刑
+                files: z.array(z.string()).optional(),
                 parameters: z.array(z.object({
                     name: z.string(),
                     type: z.string(),
@@ -269,7 +290,7 @@ export const resolutionSchema = z.object({
             pages: z.array(z.object({            // 该功能的全部页面（整页归一任务，不再按接口切散）
                 page: z.string(),
                 interactions: z.string(),
-                files: z.array(z.string()),
+                files: z.array(z.string()).optional(),   // 同 apis.files：宽容+回填，理由见上
             })).min(1),
         }),
     ])),
@@ -278,6 +299,36 @@ export const resolutionSchema = z.object({
 type ResolutionApi = z.infer<typeof resolutionSchema>["tasks"][number][0]["apis"][number];
 type ResolutionBack = z.infer<typeof resolutionSchema>["tasks"][number][0];
 type ResolutionFront = z.infer<typeof resolutionSchema>["tasks"][number][1];
+
+/**
+ * 拆分漏键机械回填（p4 阶段 3 血案，9/9）：模型在 jsonMode 下偶发整键漏掉 files（其余字段全对），
+ * strict schema 时代=整包拒收 3 连败炸进程。现改宽容收+此处补产：
+ * 后端按接口路径首段推 routes/<seg>.js，前端按首接口推 views/<Seg>Page{n}.vue。
+ * 大字 warn 留痕——这是修复不是掩盖，跑完账本要数它出现几次。
+ */
+export function backfillSliceFiles(parsed: { tasks: [ResolutionBack, ResolutionFront][] }): string[] {
+    const repairs: string[] = [];
+    const routeSeg = (path: string) =>
+        (path ?? "").replace(/^\/api\/?/, "").split("/").find(s => s && !/^[{:$]/.test(s))?.replace(/[^a-z0-9-]/gi, "-").toLowerCase() ?? "";
+    parsed.tasks.forEach(([back, front], ti) => {
+        for (const api of back.apis ?? []) {
+            if (!api.files?.length) {
+                api.files = [`backend/src/routes/${routeSeg(api.path) || "misc"}.js`];
+                repairs.push(`接口 ${api.method} ${api.path} 缺 files → ${api.files[0]}`);
+            }
+        }
+        (front.pages ?? []).forEach((pg, pi) => {
+            if (!pg.files?.length) {
+                const seg = routeSeg(back.apis?.[0]?.path ?? "");
+                const base = seg ? seg[0]!.toUpperCase() + seg.slice(1) : `T${ti + 1}`;
+                pg.files = [`frontend/src/views/${base}Page${pi + 1}.vue`];
+                repairs.push(`页面「${pg.page}」缺 files → ${pg.files[0]}`);
+            }
+        });
+    });
+    if (repairs.length) console.warn(`[architect] ⚠️ 拆分漏键回填 ${repairs.length} 处：\n  ${repairs.join("\n  ")}`);
+    return repairs;
+}
 
 // ---------- 机械构建（T4 竖切核心：纯函数，dispatch/redesignTask 共用，t4-smoke 狗考入口） ----------
 
@@ -294,6 +345,15 @@ function apiContractBlock(apis: ResolutionApi[]): string {
  * 验收标准从 Plan.features 按模块 business 机械抄（验收契约不发明）。
  */
 export function buildExecTasks(
+    parsed: { tasks: [ResolutionBack, ResolutionFront][] },
+    detailed: any, stack: any, plan: Plan,
+): ExecTask[] {
+    // p3 修②③④（9/9）：拆完过 foundation.tidyExecTasks 机械整风——
+    // 引擎件剔除/backend 路径归一/跨任务文件去重让渡/【技术基线】硬约束注入 description
+    return tidyExecTasks(buildExecTasksRaw(parsed, detailed, stack, plan), stack);
+}
+
+function buildExecTasksRaw(
     parsed: { tasks: [ResolutionBack, ResolutionFront][] },
     detailed: any, stack: any, plan: Plan,
 ): ExecTask[] {
@@ -317,11 +377,12 @@ export function buildExecTasks(
             layer: "backend",
             method: primary.method,
             path: primary.path,
-            files: [...new Set(back.apis.flatMap(a => a.files))],
+            files: [...new Set(back.apis.flatMap(a => a.files ?? []))],
             title: `功能 ${back.feature}${back.apis.length > 1 ? `（${back.apis.length} 个接口）` : ""}`,
             description: `模块/功能：${back.feature}\n业务：${mod?.business ?? ""}\n技术：${backendTech}\n中间件：${middlewareContent}\n数据库：${dbContent}\n包含接口（${back.apis.length} 个，全部必须实现）：\n${apiBlock}`,
             parameters: primary.parameters,
             acceptance,
+            stack,
         };
 
         // 自包含铁律（保持）：整组接口契约机械抄进前端描述——竖切后一任务多页面，契约仍是一套
@@ -331,12 +392,13 @@ export function buildExecTasks(
             layer: "frontend",
             method: primary.method,
             path: primary.path,
-            files: [...new Set(front.pages.flatMap(p => p.files))],
+            files: [...new Set(front.pages.flatMap(p => p.files ?? []))],
             title: `功能 ${front.feature}：${front.pages.map(p => p.page).join("、")}`,
             description: `模块/功能：${front.feature}\n业务：${mod?.business ?? ""}\n技术：${frontendTech}\n` +
                 front.pages.map(p => `页面：${p.page}\n交互：${p.interactions}`).join("\n") + contract,
             parameters: [],
             acceptance,
+            stack,
         };
         return [backendTask, frontendTask];
     });
@@ -352,26 +414,28 @@ export function buildExecTasks(
  * 背景：stack/bootstrap 提示词会被 DB 旧行覆盖（sys_agent_node 早先入库），代码侧才钉得住。
  * 导出供 smoke 测试。
  */
-export function enforceTdesignFoundation(files: { path: string; content: string }[]): void {
+export function enforceElementPlusFoundation(files: { path: string; content: string }[]): void {
     for (const f of files) {
         if (!/package\.json$/i.test(f.path) || !f.content) continue;
         let pkg: any;
         try { pkg = JSON.parse(f.content); } catch { continue; }   // 非 JSON：留给测试工位，这里不硬来
         const allDeps = { ...(pkg.dependencies ?? {}), ...(pkg.devDependencies ?? {}) };
         const isFrontend = /^(frontend|web|client|ui)[\\/]/i.test(f.path)
-            || Object.keys(allDeps).some(d => /^vue$|^vite$|tdesign/i.test(d));
+            || Object.keys(allDeps).some(d => /^vue$|^vite$|element-plus/i.test(d));
         if (!isFrontend) continue;
-        pkg.dependencies = { "tdesign-vue-next": "^1.20.7", ...(pkg.dependencies ?? {}) };
-        pkg.devDependencies = { "unplugin-vue-components": "latest", ...(pkg.devDependencies ?? {}) };
+        pkg.dependencies = {
+            axios: "^1.7.0",
+            "vue-router": "^4",
+            "element-plus": "^2",
+            ...(pkg.dependencies ?? {}),
+        };
         f.content = JSON.stringify(pkg, null, 2);
-        console.log(`[architect] TDesign 地基：${f.path} 已合并组件库依赖`);
-    }
-    const hasTheme = files.some(f => /\.css$/i.test(f.path) && (f.content ?? "").includes("--td-"));
-    if (!hasTheme && files.length > 0) {
-        files.push({ path: "frontend/src/styles/td-theme.css", content: TDESIGN_THEME_CSS });
-        console.log("[architect] TDesign 地基：补写 frontend/src/styles/td-theme.css（--td-* 主题兜底）");
+        console.log(`[architect] Element Plus 地基：${f.path} 已合并前端运行依赖`);
     }
 }
+
+/** @deprecated 历史调用方兼容名；实现已切换为 Element Plus 基线。 */
+export const enforceTdesignFoundation = enforceElementPlusFoundation;
 
 /**
  * p2 复盘修①（9/9）：前端请求封装代码强制保底——34 次编译打回里 20 次死在幽灵 import "../utils/request"。
@@ -462,11 +526,11 @@ const bootstrapNode: StateNodeFn = async (state, node) => {
                 // T1 编译闸门（9/8）：地基一次吐几十个完整文件，同样过检——代码强制（enforce 挪进回调）
                 // 之后整批校验，任一台红就 throw：retryStructured 把报错原文截 400 字喂回下一轮
                 // （卡面"编译器报错原文喂回、话术同 retryStructured"零新增机关，现成反馈环直接复用）
-                enforceTdesignFoundation(out.files);
                 ensureRequestFoundation(out.files);   // p2 修①（9/9）：契约基约/前端 prompt 都钉 utils/request.ts，地基代码保证供得上
+                enforceEngineFoundation(out.files, stack);   // 按最终技术选型维护入口与依赖
                 const pid = currentProjectId();
                 const known = buildKnown(pid != null ? projectDir(pid) : null, undefined, out.files.map(f => f.path));
-                const reds = await checkBatch(out.files, known);
+                const reds = await checkBatch(out.files, known, bannedDependencyList(stack));   // p3 修④：地基也过违禁依赖闸
                 if (reds.size > 0) {
                     throw new Error(`地基文件未过编译闸门：${[...reds.entries()].map(([p, ps]) => `${p} → ${ps.join("；")}`).join(" ｜ ")}`);
                 }
@@ -553,6 +617,7 @@ function makeDispatchNode(station: TransferStation): StateNodeFn {
             },
         );
         if (!parsed || parsed.tasks.length === 0) throw new Error("接口拆分返回空任务（tasks 为空数组）");
+        backfillSliceFiles(parsed);   // p4 血案补丁：漏 files 键=回填不死
 
         // 2. 机械构建 ExecTasks（T4 竖切版：抽成纯函数 buildExecTasks，redesignTask 共用、t4-smoke 直测）
         const tasks: ExecTask[] = buildExecTasks(parsed, detailed, stack, plan);
@@ -560,7 +625,7 @@ function makeDispatchNode(station: TransferStation): StateNodeFn {
         // 2.5 T2 全局契约（9/8）：拆完任务、下发之前发布 CONTRACTS.md——
         // 三工位+测试每次调用头部注入（contracts.ts 读同一份），路由登记/文件归属从此有据可依。
         // 发布失败只 warn 不拦下发（旁路）；契约本身也随 writeWorkspace 落库进 sys_project_file
-        try { await publishContracts(phaseNo, plan, tasks); }
+        try { await publishContracts(phaseNo, plan, tasks, stack); }
         catch (e) { console.warn("[architect] 契约发布异常（旁路，工位按无契约运行）:", (e as Error).message); }
 
         // 3. 副作用：按层分流下发开发 + 声明给维护（final）+ 通知合并器清配对缓存
@@ -849,6 +914,7 @@ export class Architect extends BaseAgent {
             );
             const p0 = parsed?.tasks?.[0];
             if (!p0) throw new Error("重设计返回空任务");
+            backfillSliceFiles(parsed!);   // 同上：重设计也吃这条铁律
             const [nb, nf] = p0;
             const id = back.id;   // ★ 沿用原 pairId，保证测试计数（阶段:pairId）连续到第 6 次
             const apiBlock = apiContractBlock(nb.apis);
@@ -859,7 +925,7 @@ export class Architect extends BaseAgent {
                 ...back,
                 method: primary.method,
                 path: primary.path,
-                files: [...new Set(nb.apis.flatMap(a => a.files))],
+                files: [...new Set(nb.apis.flatMap(a => a.files ?? []))],
                 title: `功能 ${nb.feature}（重设计）${nb.apis.length > 1 ? `·${nb.apis.length} 个接口` : ""}`,
                 description: `【架构师重设计·第 2 版，接口契约以本段为准】\n模块/功能：${nb.feature}\n包含接口（${nb.apis.length} 个，全部必须实现）：\n${apiBlock}\n必须修正的测试问题：\n${issues.map((s, j) => `${j + 1}. ${s}`).join("\n")}`,
                 parameters: primary.parameters,
@@ -875,7 +941,7 @@ export class Architect extends BaseAgent {
                 const newFront: ExecTask = {
                     ...front,
                     id: `${id}-F`,
-                    files: [...new Set(nf.pages.flatMap(p => p.files))],
+                    files: [...new Set(nf.pages.flatMap(p => p.files ?? []))],
                     title: `功能 ${nf.feature}：${nf.pages.map(p => p.page).join("、")}（重设计）`,
                     description: `【架构师重设计·第 2 版，契约以本段为准】\n模块/功能：${nf.feature}\n` +
                         nf.pages.map(p => `页面：${p.page}\n交互：${p.interactions}`).join("\n") + contract,

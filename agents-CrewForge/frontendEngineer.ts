@@ -24,14 +24,12 @@ import { currentProjectId, projectDir } from "./runEnv";
 import { updateStatusByExt } from "./task";
 import { nodePrompt, type Node } from "./Node";
 import { buildKnown, checkFile, gateFeedback, fileTreePrompt } from "./checkers";
-import { contractPromptBlock, loadContracts } from "./contracts";
+import { contractPromptBlock, loadContracts, parseBannedImports } from "./contracts";
+import { registerRoutes, STYLE_CSS } from "./foundation";
+import { baselinePromptBlock, resolveProjectBaseline } from "./baseline";
 import { gate } from "./concurrency";
 import { FILE_TOOLS, TOOL_PROTOCOL, runToolFileJob, type ToolExecCtx } from "./fileTools";
 import { runtimeSettings } from "./settings";
-import {
-    TDESIGN_WHITELIST, TDESIGN_WHITELIST_TAGS, TDESIGN_THEME_CSS,
-    fetchComponentDocs, extractUsedComponents, findHallucinated, buildDocsBlock,
-} from "./tdesignMcp";
 
 const FRONTEND_MODEL_JSON = JSON.stringify({
     provider: "deepseek",
@@ -40,12 +38,18 @@ const FRONTEND_MODEL_JSON = JSON.stringify({
     thinking: false,
 });
 
+// Legacy TDesign smoke helpers remain as compatibility shims only. The production
+// worker no longer starts an MCP process or makes component documentation calls.
+const TDESIGN_WHITELIST_TAGS = "由任务最终技术栈决定";
+
 // ---------- 提示词 ----------
 
 // 工位 A：页面设计稿（先定结构/交互/接口清单，再让 B 实现）
 export const design_prompt: string = `
 # 角色
 你是 CrewForge 项目的前端设计 Agent。为指定任务产出"页面设计稿"，不做代码实现。
+
+${baselinePromptBlock()}
 
 ## 任务
 1. 根据任务契约（页面/交互/调用的接口/验收标准）设计页面结构。
@@ -61,6 +65,8 @@ export const file_prompt: string = `
 # 角色
 你是 CrewForge 项目的前端文件实现 Agent。你只负责输入任务中指定的一个文件，并返回这个文件的完整代码。
 
+${baselinePromptBlock()}
+
 ## 规则
 - 只输出任务 files 中的唯一文件，不新增、不遗漏、不改名。
 - 遵循任务中的前端技术栈、设计稿（接口字段/组件结构必须照抄）和验收标准。
@@ -75,7 +81,7 @@ export const file_prompt: string = `
 // 代码侧追加 = 无论节点怎么自定义，规约必在场（同 DEFAULT_THEME 的注入姿势）。
 
 /** 工位 A 追加：设计稿必须声明选用组件（→ 代码侧预取文档 + 幻觉闸门的输入） */
-const TDESIGN_DESIGN_RULE = `
+const FRONTEND_DESIGN_RULE = `
 
 ## 组件库规约（强制，与上文冲突时以本节为准）
 - UI 统一 TDesign Vue Next，模板只用 \`<t-*>\` 标签；可用组件白名单：${TDESIGN_WHITELIST_TAGS}
@@ -85,7 +91,7 @@ const TDESIGN_DESIGN_RULE = `
   （只列白名单内、本任务真正用到的；一个都不用就写【组件清单】无）`;
 
 /** 工位 B 追加：只准用白名单组件、API 照抄注入的真实文档、主题走 --td-* 变量 */
-const TDESIGN_FILE_RULE = `
+const FRONTEND_FILE_RULE = `
 
 ## 组件库规约（强制）
 - 只允许 TDesign Vue Next 组件：<t-button> 等 <t-*> 标签，白名单：${TDESIGN_WHITELIST_TAGS}
@@ -99,7 +105,21 @@ const TDESIGN_FILE_RULE = `
 //   内容=common.ts 常量（architect.ensureRequestFoundation 落盘用的同一份，教的路径=盘上真实存在）；
 //   路径钉死契约标准 frontend/src/utils/request.ts，由地基代码强制保证在场。
 // 主题串在 tdesignMcp.ts 单一来源（architect bootstrap 落盘用的同一份，防提示词与真实文件漂移）
-const DEFAULT_THEME = TDESIGN_THEME_CSS;
+const DEFAULT_THEME = STYLE_CSS;
+
+const FRONTEND_STACK_DESIGN_RULE = `
+
+## Element Plus 规约（强制，与上文冲突时以本节为准）
+- UI 统一使用 Element Plus；设计稿只列实际需要的 Element Plus 组件和原生 HTML/CSS。
+- 组件 props、事件和 v-model 必须使用 Element Plus 真实 API，不凭记忆发明组件或属性。
+- 设计稿必须列出页面文件、交互状态、接口 method/path、请求字段和响应字段。`;
+
+const FRONTEND_STACK_FILE_RULE = `
+
+## Element Plus 规约（强制）
+- 只使用 Element Plus 组件或原生 HTML，不得引入 TDesign、Ant Design、Vant 等未声明依赖。
+- 颜色、圆角和间距引用 frontend/src/style.css 的 --cf-* 变量，硬编码色值最多 5 处。
+- 业务请求只能 import ${REQUEST_WRAPPER_PATH}；不得另起 services/api.js、utils/request.js 或其他 axios/fetch 封装。`;
 
 const DEFAULT_REQUEST = REQUEST_WRAPPER_CODE + `
 // 用法（页面/组件统一走这个封装，不要另起 axios/fetch 轮子）：
@@ -139,7 +159,7 @@ export function parseDesignComponents(design: string | null): string[] {
     if (!design) return [];
     const line = design.match(/【组件清单】(.+)/)?.[1] ?? "";
     const names = [...new Set([...line.matchAll(/t-([a-z][a-z0-9-]*)/g)].map(m => m[1] ?? ""))].filter(Boolean);
-    return names.filter(n => (TDESIGN_WHITELIST as readonly string[]).includes(n)).slice(0, 15);
+    return names.slice(0, 15);
 }
 
 // ============================================================
@@ -160,8 +180,8 @@ export class FrontendEngineer extends BaseAgent {
 
     constructor(name: string, station: TransferStation, nodes: Node[] = []) {
         super(name, roles.frontendEngineer, station);
-        this.designPrompt = nodePrompt(nodes, "页面设计", design_prompt) + TDESIGN_DESIGN_RULE;
-        this.filePrompt = nodePrompt(nodes, "代码实现", file_prompt) + TDESIGN_FILE_RULE;
+        this.designPrompt = nodePrompt(nodes, "页面设计", design_prompt);
+        this.filePrompt = nodePrompt(nodes, "代码实现", file_prompt);
         this.on("task", { fromNames: ["architect", "merger"] }, ({ data }) => {
             const t = data.task as ExecTask;
             this.taskQueue.push({ task: t });
@@ -208,6 +228,7 @@ export class FrontendEngineer extends BaseAgent {
 
     private async generateDesign(task: ExecTask): Promise<string | null> {
         const model = initModels(FRONTEND_MODEL_JSON, "pseudo");   // T3：A 工位（设计稿）归 pseudo 档
+        const dynamicBaseline = `\n\n${baselinePromptBlock(resolveProjectBaseline(task.stack))}`;
         const contract = contractPromptBlock(await loadContracts());   // T2：契约头部注入（设计稿的页面/路由归属以此为准）
         let feedback = "";
         for (let attempt = 1; attempt <= 3; attempt++) {
@@ -215,7 +236,7 @@ export class FrontendEngineer extends BaseAgent {
             try {
                 // 工位超时 9/3 拍板：与主链同级 300s（旧 180s 两档制被 run10 击穿，见 backendEngineer 同款注释）
                 const res = await invokeWithTimeout<any>(`${task.id} 设计稿`, DEFAULT_TIMEOUT_MS, sig => model.invoke([
-                    new SystemMessage(this.designPrompt + contract + `\n\n## 当前任务\n${JSON.stringify(task, null, 2)}` + feedback),
+                    new SystemMessage(this.designPrompt + dynamicBaseline + contract + `\n\n## 当前任务\n${JSON.stringify(task, null, 2)}` + feedback),
                 ], { signal: sig }));
                 console.log(`[${this.name}] ${task.id} 设计稿 ${Date.now() - ts}ms`);
                 const design = extractGeneratedCode(res.content);
@@ -246,23 +267,14 @@ export class FrontendEngineer extends BaseAgent {
                 continue;
             }
 
-            // TDesign 文档通道（9/5）：设计稿声明的【组件清单】→ 任务级预取真实 API（一任务一次，任务内各文件共享）
-            const comps = parseDesignComponents(design);
-            const tdesign: TDesignContext = { docs: {}, alive: true };
-            if (comps.length > 0) {
-                const fetched = await fetchComponentDocs(comps);
-                if (fetched) Object.assign(tdesign.docs, fetched);
-                else tdesign.alive = false;   // 通道挂 → 幻觉闸门放行（旁路，不阻塞任务）
-                console.log(`[${this.name}] ${task.id} TDesign 预取 ${comps.length} 组件文档${tdesign.alive ? "" : "（通道不可用，闸门降级）"}`);
-            }
-
             // 任务内已生成文件记忆（同任务后写的文件能看到先写的，跨文件衔接）
             const writtenFiles = new Map<string, string>();
             const implementation: { filePath: string; code: string }[] = [];
             let failed = false;
+            const pid = currentProjectId();   // p3 修②：收口登记路由用（generateFile 里同名变量互不干涉）
 
             for (const filePath of task.files) {
-                const code = await this.generateFile(task, design, filePath, writtenFiles, tdesign);
+                const code = await this.generateFile(task, design, filePath, writtenFiles);
                 if (!code) { failed = true; break; }
                 implementation.push({ filePath, code });
                 // T1 顺带修（9/8）：writtenFiles 生成一个补一个（原先任务全成后才统一 set，生成期恒空，
@@ -280,6 +292,10 @@ export class FrontendEngineer extends BaseAgent {
                 writtenFiles.set(f.filePath, f.code);
                 console.log(`已写入 ${full}`);
             }
+            // p3 修②（9/9）：路由机械登记——契约「页面清单」里归本任务的页面由引擎追加进 router/index.ts，
+            // 模型不碰路由文件（登记死锁病根绝根）；失败只 warn，页面可达性还有测试判定兜底
+            await registerRoutes(pid, task, await loadContracts())
+                .catch(e => console.warn(`[${this.name}] ${task.id} 路由机械登记异常（旁路）:`, (e as Error).message));
             console.log(`[${this.name}] ${task.id} 前端实现已写入 workspace/`);
             this.send("merger", { type: "task_result", task, success: true });
             } finally {
@@ -293,9 +309,10 @@ export class FrontendEngineer extends BaseAgent {
         design: string | null,
         filePath: string,
         writtenFiles: Map<string, string>,
-        tdesign: TDesignContext,
     ): Promise<string | null> {
         const model = initModels(FRONTEND_MODEL_JSON, "frontend");   // T3：B 工位（页面实现）归 frontend 档
+        const finalBaseline = resolveProjectBaseline(task.stack);
+        const dynamicBaseline = `\n\n${baselinePromptBlock(finalBaseline)}`;
         // 已有文件（本任务内先写的）注入，供最小修改/衔接
         const existing = [...writtenFiles.entries()]
             .filter(([knownPath]) => task.files.includes(knownPath))
@@ -319,7 +336,9 @@ export class FrontendEngineer extends BaseAgent {
         // p2 复盘修②（9/9）：磁盘文件树注入实现 prompt——治"模型与闸门信息不对称"，
         // 打回从猜谜变照抄（known 每轮现建的口径不变：并行工位刚落盘的文件下一文件就能看到）
         const treeBlock = fileTreePrompt(known);
-        const contract = contractPromptBlock(await loadContracts());       // T2：契约头部注入（旁路=无契约空串）
+        const contractsMd = await loadContracts();                         // p3 修④：留原文解析禁用包清单
+        const contract = contractPromptBlock(contractsMd);                 // T2：契约头部注入（旁路=无契约空串）
+        const banned = parseBannedImports(contractsMd);
         const guard = sliceGuard(task.files.length);                       // T4：竖切大任务收敛为 2 次×600s
         // ---- T7b 工具模式（默认关，backendEngineer 同注释）。幻觉闸挂进工具的 extraGate 位：
         // write/edit 内容里的 <t-*> 红=拒绝落盘+错因回给模型（9/5 闸门语义原样搬家，不再吃 attempt 名额）----
@@ -327,32 +346,17 @@ export class FrontendEngineer extends BaseAgent {
             try {
                 const toolModel = initModels(JSON.stringify({ ...JSON.parse(FRONTEND_MODEL_JSON), tools: FILE_TOOLS }), "frontend");
                 const ctx: ToolExecCtx = {
-                    pid, written: writtenFiles, planned: task.files, landed: null,
-                    extraGate: async (fp, code) => {
-                        if (!tdesign.alive) return [];
-                        const used = extractUsedComponents(code);
-                        if (used.length === 0) return [];
-                        const fresh = used.filter(n => !(n in tdesign.docs));
-                        if (fresh.length > 0) {
-                            const extra = await fetchComponentDocs(fresh);
-                            if (extra) Object.assign(tdesign.docs, extra);
-                            else { tdesign.alive = false; return []; }   // 通道中途挂→附加闸放行
-                        }
-                        const hall = tdesign.alive ? findHallucinated(used, tdesign.docs) : [];
-                        return hall.length > 0
-                            ? [`TDesign 不存在组件：${hall.map(n => `<t-${n}>`).join("、")}——改用白名单组件或原生 HTML 实现该功能`]
-                            : [];
-                    },
+                    pid, written: writtenFiles, planned: task.files, landed: null, banned,
+                    extraGate: async () => [],
                 };
                 const landed = await runToolFileJob({
-                    system: this.filePrompt + contract + treeBlock
+                    system: this.filePrompt + dynamicBaseline + contract + treeBlock
                         + `\n\n## 当前子任务\n${JSON.stringify(fileTask, null, 2)}` + designHint
-                        + (buildDocsBlock(Object.keys(tdesign.docs), tdesign.docs) || "")
                         + existingContent + dbExistingPrompt
                         + `\n\n## 主题变量\n${DEFAULT_THEME}\n\n## 请求封装（固定路径 ${REQUEST_WRAPPER_PATH}，地基已代码保证落盘）\n${DEFAULT_REQUEST}`
                         + TOOL_PROTOCOL,
                     targetFile: filePath, ctx,
-                    maxRounds: task.files.length >= 3 ? 6 : 4,
+                    maxRounds: task.files.length >= 3 ? 12 : 8,   // p3 loop 化（9/9）：五件工具+查证开销，轮次预算翻倍
                     timeoutMs: guard.timeoutMs,
                     label: `${task.id} ${filePath}`,
                     invoke: (msgs, sig) => toolModel.invoke(msgs, { signal: sig }),
@@ -368,18 +372,14 @@ export class FrontendEngineer extends BaseAgent {
         let feedback = "";
         for (let attempt = 1; attempt <= guard.maxAttempt; attempt++) {
             const ts = Date.now();
-            // 文档段每轮现拼：闸门补拉的新组件文档从第 2 轮起参与生成（写前必查的闭环）
-            const docsBlock = buildDocsBlock(Object.keys(tdesign.docs), tdesign.docs);
-            const tdesignHint = docsBlock ? `\n\n${docsBlock}` : "";
             try {
                 const res = await invokeWithTimeout<any>(`${task.id} ${filePath}`, guard.timeoutMs, sig => model.invoke([
                     new SystemMessage(
-                        this.filePrompt +
+                        this.filePrompt + dynamicBaseline +
                         contract +
                         treeBlock +
                         `\n\n## 当前子任务\n${JSON.stringify(fileTask, null, 2)}` +
                         designHint +
-                        tdesignHint +
                         existingContent +
                         dbExistingPrompt +
                         `\n\n## 主题变量\n${DEFAULT_THEME}\n\n## 请求封装（固定路径 ${REQUEST_WRAPPER_PATH}，地基已代码保证落盘）\n${DEFAULT_REQUEST}` +
@@ -393,29 +393,9 @@ export class FrontendEngineer extends BaseAgent {
                     continue;
                 }
 
-                // ---- 幻觉闸门（9/5）：文件用到的每个 <t-*> 必须验真（通道活着才卡，挂了放行=旁路） ----
-                const used = extractUsedComponents(code);
-                if (used.length > 0 && tdesign.alive) {
-                    const fresh = used.filter(n => !(n in tdesign.docs));   // 设计稿没列但写了：补验（真实组件也补文档，下轮可用）
-                    if (fresh.length > 0) {
-                        const extra = await fetchComponentDocs(fresh);
-                        if (extra) Object.assign(tdesign.docs, extra);
-                        else tdesign.alive = false;   // 通道中途挂 → 本任务后续放行
-                    }
-                    const hallucinated = tdesign.alive ? findHallucinated(used, tdesign.docs) : [];
-                    if (hallucinated.length > 0) {
-                        if (attempt < guard.maxAttempt) {
-                            feedback = `\n\n## 闸门打回：TDesign 不存在这些组件 ${hallucinated.map(n => `<t-${n}>`).join("、")}。只允许白名单组件或原生 HTML 实现该功能，重新输出完整文件。`;
-                            console.log(`[${this.name}] ${task.id} ${filePath} 闸门：幻觉组件 ${hallucinated.join("、")}（第 ${attempt} 次打回）`);
-                            continue;
-                        }
-                        console.warn(`[${this.name}] ${task.id} ${filePath} 闸门：幻觉组件打回耗尽，本文件判失败`);
-                        return null;   // 宁可失败走返工循环，不交幻觉代码
-                    }
-                }
                 // ---- T1 编译闸门（9/8）：幻觉过了还要过编译——语法/SFC 结构/相对引用一锅查，
                 // 与幻觉闸共用本轮工位 attempt 名额，耗尽同样判文件失败走返工（宁失败不交坏码）----
-                const problems = await checkFile(filePath, code, known);
+                const problems = await checkFile(filePath, code, known, banned);
                 if (problems.length > 0) {
                     if (attempt < guard.maxAttempt) {
                         feedback = gateFeedback(attempt, problems);
