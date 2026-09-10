@@ -156,23 +156,21 @@ export async function getTaskByExt(projectId: number, extId: string, phaseId?: n
 export async function ensureTasksForPhase(tasks: ExecTask[], projectId: number, phaseId: number): Promise<void> {
     for (let i = 0; i < tasks.length; i++) {
         const t = tasks[i]!;
-        if (await getTaskByExt(projectId, t.id, phaseId)) continue;   // ★ 幂等键含 phase
-        await createTask({
-            project_id: projectId,
-            phase_id: phaseId,
-            title: t.title.slice(0, 199),                     // 列 varchar(200)
-            description: t.description ?? null,
-            status: "todo",
-            assignee: t.layer === "frontend" ? "前端开发" : "后端开发",
-            layer: t.layer,
-            acceptance: t.acceptance ?? null,
-            result: null,
-            error_msg: null,
-            retry_count: 0,
-            task_id_ext: t.id,
-            depends_on: t.layer === "frontend" ? JSON.stringify([t.id.replace(/-F$/, "")]) : null,
-            sort_order: phaseId * 1000 + i,
-        });
+        await pool.query(
+            `INSERT INTO sys_task
+             (project_id, phase_id, title, description, status, assignee, layer, acceptance,
+              result, error_msg, retry_count, task_id_ext, depends_on, sort_order, deleted)
+             VALUES (?, ?, ?, ?, 'todo', ?, ?, ?, NULL, NULL, 0, ?, ?, ?, 0)
+             ON DUPLICATE KEY UPDATE title = VALUES(title), description = VALUES(description),
+               assignee = VALUES(assignee), layer = VALUES(layer), acceptance = VALUES(acceptance),
+               depends_on = VALUES(depends_on), sort_order = VALUES(sort_order), deleted = 0, update_time = NOW()`,
+            [
+                projectId, phaseId, t.title.slice(0, 199), t.description ?? null,
+                t.layer === "frontend" ? "前端开发" : "后端开发", t.layer, t.acceptance ?? null,
+                t.id, t.layer === "frontend" ? JSON.stringify([t.id.replace(/-F$/, "")]) : null,
+                phaseId * 1000 + i,
+            ],
+        );
     }
 }
 

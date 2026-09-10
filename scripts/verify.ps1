@@ -20,7 +20,8 @@ try {
         "compile-gate-smoke.ts", "contracts-smoke.ts", "pm-ui-smoke.ts", "role-tier-smoke.ts",
         "render-smoke.ts", "t4-smoke.ts", "t7-smoke.ts", "t7b-smoke.ts",
         "dynamic-baseline-smoke.ts", "role-prompt-smoke.ts", "message-protocol-smoke.ts",
-        "artifact-validation-smoke.ts", "core-team-smoke.ts"
+        "artifact-validation-smoke.ts", "core-team-smoke.ts",
+        "db-idempotency-smoke.ts"
     )
     foreach ($smoke in $smokes) { Run-Step $smoke { & $bun run $smoke } }
 } finally { Pop-Location }

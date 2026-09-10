@@ -210,25 +210,16 @@ export function inferFileType(filePath: string): string {
     return map[ext] ?? "other";
 }
 
-/** upsert 项目文件：同 project_id+file_path 已存在则更新内容，否则插入（不依赖唯一索引，先查后写） */
+/** 原子 upsert：依赖 uk_project_file，避免并发“先查后插”竞态。 */
 export async function upsertProjectFile(projectId: number, filePath: string, content: string): Promise<void> {
     if (!projectId || !filePath) return;
-    const [rows] = await pool.query<RowDataPacket[]>(
-        "SELECT id FROM sys_project_file WHERE project_id = ? AND file_path = ? AND deleted = 0 LIMIT 1",
-        [projectId, filePath],
+    await pool.query(
+        `INSERT INTO sys_project_file (project_id, file_path, file_content, file_type, user_modified, deleted, create_time, update_time)
+         VALUES (?, ?, ?, ?, 0, 0, NOW(), NOW())
+         ON DUPLICATE KEY UPDATE file_content = VALUES(file_content), file_type = VALUES(file_type),
+           user_modified = 0, deleted = 0, update_time = NOW()`,
+        [projectId, filePath, content, inferFileType(filePath)],
     );
-    if (rows.length > 0 && rows[0]) {
-        await pool.query(
-            "UPDATE sys_project_file SET file_content = ?, file_type = ?, user_modified = 0, update_time = NOW() WHERE id = ?",
-            [content, inferFileType(filePath), rows[0].id],
-        );
-    } else {
-        await pool.query(
-            `INSERT INTO sys_project_file (project_id, file_path, file_content, file_type, user_modified, create_time, update_time)
-             VALUES (?, ?, ?, ?, 0, NOW(), NOW())`,
-            [projectId, filePath, content, inferFileType(filePath)],
-        );
-    }
     // agent 修改 → 通知 Java 清缓存（查询侧每次写缓存，仅修改侧清；失败不阻塞）
     // A7 根治：基址走 sys_settings.java_base_url（读不到时 settings.ts 内藏 localhost 兜底）
     fetch(`${javaBaseUrl()}/api/projectfile/cache/clear/${projectId}`, { method: "POST" })
