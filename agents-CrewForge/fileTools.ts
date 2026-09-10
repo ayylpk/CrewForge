@@ -28,10 +28,13 @@ export interface ToolExecCtx {
     planned: string[];               // 任务文件清单（import 存在性核验用）
     /** 前端注入的额外闸门（TDesign 幻觉核验）；返回错误短句列表 */
     extraGate?: (filePath: string, content: string) => Promise<string[]>;
+    /** p3 修④（9/9）：技术基线禁用包清单（从契约解析），随 write/edit 过闸 */
+    banned?: string[];
     landed: string | null;           // 目标文件成功落盘后的最终内容（机械终止信号）
 }
 
-/** 给模型看的三件套声明（JSON Schema 手拼——OpenAI function-calling 通用形状，deepseek/openai 两路都吃） */
+/** 给模型看的五件套声明（JSON Schema 手拼——OpenAI function-calling 通用形状，deepseek/openai 两路都吃）
+ *  p3 复盘扩具（9/9）：三件套的短板=没眼睛——模型只能按精确路径猜世界。加 ls（目录树）+ grep（全树搜） */
 export const FILE_TOOLS = [
     {
         name: "read", code: "",
@@ -40,6 +43,24 @@ export const FILE_TOOLS = [
             type: "object",
             properties: { path: { type: "string", description: "项目相对路径，如 frontend/src/utils/request.ts" } },
             required: ["path"],
+        },
+    },
+    {
+        name: "ls", code: "",
+        description: "列出项目文件树（可按目录前缀过滤，如 \"backend/src\"）。写代码前先看清楚盘上有什么，不要发明路径。",
+        parameters: {
+            type: "object",
+            properties: { prefix: { type: "string", description: "可选：目录/路径前缀过滤，空则列全树（上限 200 条）" } },
+            required: [],
+        },
+    },
+    {
+        name: "grep", code: "",
+        description: "在全树源码里搜一段文本（不区分大小写，子串匹配），返回 路径:行号:内容 列表（≤30 条，每行截 120 字符）。查\"这个函数/接口/字段哪里定义的、别人怎么调的\"用它。",
+        parameters: {
+            type: "object",
+            properties: { pattern: { type: "string", description: "要搜的字面文本" } },
+            required: ["pattern"],
         },
     },
     {
@@ -73,10 +94,11 @@ export const FILE_TOOLS = [
 /** 工具循环的 system 尾协议（追加在工位既有提示词之后） */
 export const TOOL_PROTOCOL = `
 ## 文件工具协议（本轮交付唯一通道）
-- 你只负责目标文件这一件活，三个工具：read（查证）/ write（整文件交付）/ edit（小补丁）。
+- 五个工具：ls / grep / read（查证，全树只读）+ write（整文件交付）/ edit（小补丁，只限目标文件）。
+- 动笔前先查证：拿不准盘上有什么就 ls；要引用别人的文件先 grep/read 看清真实路径与导出，禁止凭想象 import。
 - write/edit 成功返回 = 文件已编译校验通过并落盘，这就是完成；不要再输出解释文本。
 - 收到「闸门拒绝」的工具结果：优先 edit 只改报错处；结构性问题才 write 重写。
-- 除目标文件外禁止 write/edit 任何其他文件；契约里登记给别人的文件连 read 也只读不改。`;
+- 除目标文件外禁止 write/edit 任何其他文件（引擎件 router/main/app.js 连 read 也只读不改）。`;
 
 // ---------- 文件级互斥锁（同路径串行，不同路径并行） ----------
 
@@ -113,21 +135,53 @@ function readViaCtx(ctx: ToolExecCtx, path: string): string | null {
     } catch { return null; }
 }
 
-/** 过闸门（T1 编译 + 调用方附加闸）；返回错误列表，空=绿 */
+/** 过闸门（T1 编译 + p3 修④技术基线禁用包 + 调用方附加闸）；返回错误列表，空=绿 */
 async function gateContent(ctx: ToolExecCtx, path: string, content: string): Promise<string[]> {
-    const problems = await checkFile(path, content, fileKnownView(ctx));
+    const problems = await checkFile(path, content, fileKnownView(ctx), ctx.banned);
     if (ctx.extraGate) problems.push(...await ctx.extraGate(path, content));
     return problems;
 }
 
 export async function executeFileTool(ctx: ToolExecCtx, targetFile: string, name: string, args: Record<string, unknown>): Promise<ToolOutcome> {
     const path = String(args.path ?? "").trim().replace(/\\/g, "/");
-    if (!path) return { ok: false, result: "path 不能为空" };
+    // ls/grep 的 schema 里没有 path 参数（一个吃 prefix 一个吃 pattern），统一闸不许罩它们——
+    // p4 实战血案（9/9）：185 次"空 path 拒"全是误伤，模型按 schema 正确调用却被反复打回，烧光轮次击毙 6 个文件
+    if (!path && name !== "ls" && name !== "grep") return { ok: false, result: "path 不能为空" };
 
     if (name === "read") {
         const content = readViaCtx(ctx, path);
-        if (content == null) return { ok: false, result: `文件不存在：${path}（先查契约页面清单，别引用没登记的文件）` };
+        if (content == null) return { ok: false, result: `文件不存在：${path}（先 ls/grep 查证盘上有什么，别引用没登记的文件）` };
         return { ok: true, result: content.length > 20_000 ? content.slice(0, 20_000) + "\n…（截断）" : content };
+    }
+
+    if (name === "ls") {
+        // prefix 缺省时认 path（模型常把目录填进 path——顺着它，别打回）
+        const prefix = String(args.prefix ?? path ?? "").trim().replace(/\\/g, "/").toLowerCase();
+        const all = fileKnownView(ctx).list();
+        const hit = (prefix ? all.filter(p => p.toLowerCase().startsWith(prefix)) : all).slice(0, 200);
+        return { ok: hit.length > 0, result: hit.length ? hit.join("\n") : "（没有匹配的文件）" };
+    }
+
+    if (name === "grep") {
+        const pattern = String(args.pattern ?? "").trim();
+        if (!pattern) return { ok: false, result: "pattern 不能为空" };
+        const known = fileKnownView(ctx);
+        const needle = pattern.toLowerCase();
+        const pool = known.list().filter(p => /\.(ts|tsx|js|jsx|mjs|vue|json|md|sql|html|yml|yaml|css|prisma)$/i.test(p));
+        const hits: string[] = [];
+        let scanned = 0;
+        for (const p of pool) {
+            if (hits.length >= 30 || scanned >= 400) break;            // 双上限：命中 30 行或扫 400 文件即收
+            const src = known.read(p);
+            if (!src) continue;
+            scanned++;
+            if (!src.toLowerCase().includes(needle)) continue;
+            const rows = src.split(/\r?\n/);
+            for (let i = 0; i < rows.length && hits.length < 30; i++) {
+                if (rows[i]!.toLowerCase().includes(needle)) hits.push(`${p}:${i + 1}: ${rows[i]!.trim().slice(0, 120)}`);
+            }
+        }
+        return { ok: hits.length > 0, result: hits.length ? hits.join("\n") : `没搜到「${pattern}」（换个关键词，或先 ls 看树）` };
     }
 
     if (name === "write") {
@@ -167,7 +221,7 @@ export async function executeFileTool(ctx: ToolExecCtx, targetFile: string, name
         });
     }
 
-    return { ok: false, result: `未知工具 ${name}（只有 read/write/edit）` };
+    return { ok: false, result: `未知工具 ${name}（只有 read/ls/grep/write/edit）` };
 }
 
 // ---------- 工具循环骨架（终止=机械判定） ----------

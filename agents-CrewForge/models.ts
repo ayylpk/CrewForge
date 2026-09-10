@@ -45,19 +45,21 @@ function initDeepSeek(mode: MODE, data: any): ChatDeepSeek {
         maxTokens: data.maxTokens,
         timeout: data.timeout,
         topP: data.top_p,
-        tools: toDeclarations(tools),
         thinking: { type: "disabled" },
         ...key,
     } as any)
 
-    return res;
+    // p3 loop 实战揪出的真 bug（9/9）：ChatDeepSeek/ChatOpenAI 构造器【不认 tools 字段】，
+    // 传进去被静默吞 → 模型永远收不到工具声明，工具循环全员白卷判负（t7b-smoke 假 round 测不出这层）。
+    // 正解=bindTools：吃 {type:"function",function:{...}} 形状，与 toDeclarations 产出同构
+    return tools.length ? (res.bindTools(toDeclarations(tools)) as any) : res;
 }
 
 // OpenAI 兼容通用初始化：baseURL 指本地 Ollama 或任意中转即生效（阶段 2 验收"换 Ollama url 即指本地"）。
 // apiKey：设置页有值用设置页，否则退回 .env DEEPSEEK_API_KEY（Ollama 本地可给个占位）。
 function initOpenAI(mode: MODE, data: any): ChatOpenAI {
     const tools = parseTools(data.tools);
-    return new ChatOpenAI({
+    const res = new ChatOpenAI({
         model: data.model,
         apiKey: data.apiKey || process.env.OPENAI_API_KEY || process.env.DEEPSEEK_API_KEY || "not-needed",
         ...(data.baseURL ? { configuration: { baseURL: data.baseURL } } : {}),
@@ -66,8 +68,8 @@ function initOpenAI(mode: MODE, data: any): ChatOpenAI {
         timeout: data.timeout,
         // OpenAI SDK 的 topP 键名与 deepseek 不同（用 topP 非 top_p），这里显式映射
         ...(data.top_p != null ? { topP: data.top_p } : {}),
-        tools: toDeclarations(tools),
     } as any);
+    return tools.length ? (res.bindTools(toDeclarations(tools)) as any) : res;   // tools 走 bindTools，理由同 initDeepSeek
 }
 
 /**

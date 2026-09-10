@@ -51,6 +51,9 @@ async function main() {
     const fePkg = JSON.parse(batch.find(f => f.path === "frontend/package.json")!.content);
     ok(!!fePkg.dependencies["vue-router"], "前端包合并 vue-router");
     ok(!!fePkg.dependencies["element-plus"], "前端包合并 Element Plus");
+    ok(!!fePkg.dependencies["axios"], "前端包合并 axios（唯一 request 封装的运行时依赖）");
+    ok(!!batch.find(f => f.path === "frontend/src/style.css"), "引擎补齐 Element Plus 项目视觉 token 文件");
+    ok(!!batch.find(f => f.path === "frontend/src/main.ts" && f.content.includes("./style.css")), "main.ts 引入唯一视觉 token 文件");
     // Node 后端文件不再被当成 CrewForge 的默认地基
     const fas = [
         { path: "backend/package.json", content: JSON.stringify({ dependencies: { fastify: "^4" } }) },
@@ -61,7 +64,7 @@ async function main() {
     ok(isEngineOwned("frontend/src/router/index.ts") && !isEngineOwned("backend/src/app.js") && !isEngineOwned("frontend/src/views/A.vue"), "引擎件名单判定");
     ok(!isEngineOwned("backend/src/app.ts") && !isEngineOwned("backend/src/server.ts"), "Spring Boot 不误判 Node 入口");
     ok(rebaseBackendPath("backend/models/A.js") === "backend/src/models/A.js" && rebaseBackendPath("backend/src/x.js") === "backend/src/x.js", "rebase 幂等");
-    ok(ENGINE_OWNED.length === 4, "引擎拥有件 = 4");
+    ok(ENGINE_OWNED.length === 5, "引擎拥有件 = 5");
     // 根 src/ 歪树（p3 二轮实锤：模型把后端写在工程根 src/，backend/ 规则罩不住）
     const skew = [
         { path: "frontend/package.json", content: JSON.stringify({ dependencies: { vue: "^3", vite: "^7" } }) },

@@ -208,10 +208,10 @@ function collectExports(src: string): Set<string> | null {
 
 /**
  * p2 复盘修③（9/9）：打回不只说"不存在"，附磁盘候选。
- * p2 的 smoking gun：模型被打回后只是给 import 加个 .ts 后缀继续猜（TagManager 同一错误复读 6 次）——
- * 报错不带出路，2 次名额就是白烧。候选两路（纯代码零 LLM）：
- *   ① 路径名相似：spec 末段与文件名互相包含（request↔requestHelper、middleware↔middlewares 这类漂移）
- *   ② 导出名命中：想 import 的 { getUsers } 真实存在于别的文件（如 LLM 自创的 services/api.js）
+ * p3 复盘修（9/9 晚）：候选限同侧目录树——前端 main.ts 找 App.vue 时推一个 backend/src/app.js
+ * 是帮倒忙（"app" 撞名跨层）；相似判定从"互相包含"收紧为"前缀开头"（request→requestHelper ✓，
+ * package→app ✗），短名噪音立减。
+ * 候选两路（纯代码零 LLM）：①文件名前缀相似 ②导出的 named 真实存在。
  * 输出从当前文件算好的**正确相对 spec**——模型照抄即可，不用再自己算 ../ 深度。
  * 宁漏不误带：一个候选都没有就维持原报错，不硬凑。
  */
@@ -222,6 +222,9 @@ function candidateHint(known: GateKnown, fromFile: string, spec: string, named: 
     if (pool.length === 0) return "";
     const self = normRel(fromFile);
     const dir = path.posix.dirname(self);
+    // 同侧限定：frontend/ ↔ backend/ 互不推荐（root 下的杂件也不跨进去推荐）
+    const sideOf = (p: string) => /^(frontend|web|client|ui)\//.test(p) ? "front" : /^(backend|server)\//.test(p) ? "back" : "other";
+    const mySide = sideOf(self);
     // 候选路径换算成"从当前文件出发的正确写法"，相对路径补 ./ 前缀防歧义。
     // ../ 深度一律用归一化（小写）路径算——大小写混排的目录名会让 relative() 从分歧段多吐 ../；
     // 文件名段最后还以原始大小写（Linux build 认文件名大小写）
@@ -234,12 +237,13 @@ function candidateHint(known: GateKnown, fromFile: string, spec: string, named: 
     };
     const cands: { spec: string; why: string }[] = [];
     const seen = new Set<string>();
-    // ① 路径名相似（cap 3，短名互含噪音大，≥3 字符才配）
+    // ① 文件名前缀相似（cap 3，≥3 字符才配；p3 复盘收紧：互相包含会让 package 撞上 app 这类跨词误推）
     for (const p of pool) {
         if (cands.length >= 3) break;
-        if (normRel(p) === self) continue;
-        const name = (p.split("/").pop() ?? "").replace(/\.[^.]+$/, "").toLowerCase();
-        if (name.length >= 3 && (name.includes(base) || base.includes(name))) {
+        const n = normRel(p);
+        if (n === self || sideOf(n) !== mySide) continue;
+        const name = (n.split("/").pop() ?? "").replace(/\.[^.]+$/, "");
+        if (name.length >= 3 && (name.startsWith(base) || base.startsWith(name))) {
             seen.add(p);
             cands.push({ spec: toSpec(p), why: "文件名相似" });
         }
@@ -250,7 +254,7 @@ function candidateHint(known: GateKnown, fromFile: string, spec: string, named: 
         for (const p of pool) {
             if (cands.length >= 3) break;
             const n = normRel(p);
-            if (seen.has(p) || n === self || !/\.(ts|tsx|js|jsx|mjs|vue)$/i.test(n)) continue;
+            if (seen.has(p) || n === self || sideOf(n) !== mySide || !/\.(ts|tsx|js|jsx|mjs|vue)$/i.test(n)) continue;
             const src = known.read(p);
             if (!src) continue;                                  // 计划内未生成/读失败：内容未知，不算候选
             const exp = collectExports(src);
@@ -263,10 +267,19 @@ function candidateHint(known: GateKnown, fromFile: string, spec: string, named: 
     return `；磁盘上疑似候选：${cands.map(c => `${c.spec}（${c.why}）`).join("、")} —— 要么改引候选（路径照抄），要么在目标文件内自实现所需逻辑，不要再发明路径`;
 }
 
-async function checkImports(filePath: string, code: string, known: GateKnown): Promise<CheckProblems> {
+async function checkImports(filePath: string, code: string, known: GateKnown, banned?: string[]): Promise<CheckProblems> {
     const problems: CheckProblems = [];
+    const bannedSet = new Set((banned ?? []).map(s => s.toLowerCase()));
     for (const { spec, named } of extractImports(code)) {
-        if (!spec.startsWith("./") && !spec.startsWith("../")) continue;   // 裸包名/@别名/http：磁盘上没有 node_modules，一律放行（宁漏不误杀）
+        if (!spec.startsWith("./") && !spec.startsWith("../")) {
+            // 违禁依赖闸（p3 修④，9/9）：技术基线说了 SQLite，import mysql2 当场红——
+            // 不再等测试工位纸面审。裸包名取顶层（@scope/pkg 取两段），比对调用方传入的禁用清单
+            if (bannedSet.size > 0) {
+                const pkg = (spec.startsWith("@") ? spec.split("/").slice(0, 2).join("/") : spec.split("/")[0] ?? "").toLowerCase();
+                if (bannedSet.has(pkg)) problems.push(`import "${spec}" 使用禁用依赖 ${pkg}（本项目技术基线禁止，见任务【技术基线】段——换用基线内的实现）`);
+            }
+            continue;   // 裸包名/@别名/http 的存在性：磁盘上没有 node_modules，一律放行（宁漏不误杀）
+        }
         const resolved = resolveRel(known, filePath, spec);
         if (!resolved) {
             problems.push(`import "${spec}" 指向的文件不存在（相对 ${filePath} 解析不到，F5③ 引用到空）${candidateHint(known, filePath, spec, named)}`);
@@ -287,7 +300,7 @@ async function checkImports(filePath: string, code: string, known: GateKnown): P
 // ---------- 各语言校验 ----------
 
 /** ts/jsx 家族：esbuild 语法闸（transform 不解析模块，import 存在性由 checkImports 管） */
-export async function checkJsLike(filePath: string, code: string, known: GateKnown): Promise<CheckProblems> {
+export async function checkJsLike(filePath: string, code: string, known: GateKnown, banned?: string[]): Promise<CheckProblems> {
     const problems: CheckProblems = [];
     const loader: "ts" | "tsx" | "jsx" | "js" = /\.tsx$/i.test(filePath) ? "tsx"
         : /\.jsx$/i.test(filePath) ? "jsx"
@@ -299,12 +312,12 @@ export async function checkJsLike(filePath: string, code: string, known: GateKno
             `语法错误${x?.location ? ` 第 ${x.location.line} 行` : ""}：${x?.text ?? ""}`);
         problems.push(...(msgs.length ? msgs : [`esbuild 拒绝：${String(e?.message ?? e).slice(0, 160)}`]));
     }
-    problems.push(...await checkImports(filePath, code, known));
+    problems.push(...await checkImports(filePath, code, known, banned));
     return problems;
 }
 
 /** .vue 单文件组件：sfc parse 结构闸 + 模板编译闸 + script 段过 esbuild + import 扫描（F5①③ 的 vue 侧入口） */
-export async function checkVue(filePath: string, code: string, known: GateKnown): Promise<CheckProblems> {
+export async function checkVue(filePath: string, code: string, known: GateKnown, banned?: string[]): Promise<CheckProblems> {
     const problems: CheckProblems = [];
     let descriptor: SFCDescriptor;
     try {
@@ -316,8 +329,15 @@ export async function checkVue(filePath: string, code: string, known: GateKnown)
         return [`SFC 解析失败：${String(e?.message ?? e).slice(0, 160)}`];
     }
     if (descriptor.template) {
-        const r = compileTemplate({ source: descriptor.template.content, filename: filePath, id: "gate" });
-        for (const e of r.errors) problems.push(`模板编译错误：${String(typeof e === "string" ? e : (e as any)?.message ?? e).slice(0, 160)}`);
+        // p3 复盘小修（9/9）：compileTemplate 对个别 v-if/v-for 结构会【抛异常】而不是进 errors
+        // （Codegen node is missing…），原先异常逃出去被工位 catch 成"调用失败"白烧一轮 attempt——
+        // 闸门自己的炸必须变成材料（报错原文打回），不能伪装成网络错
+        try {
+            const r = compileTemplate({ source: descriptor.template.content, filename: filePath, id: "gate" });
+            for (const e of r.errors) problems.push(`模板编译错误：${String(typeof e === "string" ? e : (e as any)?.message ?? e).slice(0, 160)}`);
+        } catch (e: any) {
+            problems.push(`模板编译异常：${String(e?.message ?? e).slice(0, 160)}（多为 v-if/v-else 结构问题，检查指令配对）`);
+        }
     }
     // script 与 script setup 分别过 esbuild（.vue 相对路径解析仍按 .vue 自身目录）
     for (const blk of [descriptor.script, descriptor.scriptSetup]) {
@@ -329,7 +349,7 @@ export async function checkVue(filePath: string, code: string, known: GateKnown)
             const msgs = (e?.errors ?? []).map((x: any) => `script(${lang}) 语法错误：${x?.text ?? ""}（第 ${x?.location?.line ?? "?"} 行）`);
             problems.push(...(msgs.length ? msgs : [`script(${lang}) esbuild 拒绝：${String(e?.message ?? e).slice(0, 160)}`]));
         }
-        problems.push(...await checkImports(filePath, blk.content, known));
+        problems.push(...await checkImports(filePath, blk.content, known, banned));
     }
     return problems;
 }
@@ -413,7 +433,7 @@ export async function checkJson(filePath: string, code: string, _known: GateKnow
 
 // ---------- 总入口 ----------
 
-const DISPATCH: [RegExp, (f: string, c: string, k: GateKnown) => Promise<CheckProblems>][] = [
+const DISPATCH: [RegExp, (f: string, c: string, k: GateKnown, banned?: string[]) => Promise<CheckProblems>][] = [
     [/\.vue$/i, checkVue],
     [/\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$/i, checkJsLike],
     [/\.py$/i, checkPy],
@@ -422,18 +442,19 @@ const DISPATCH: [RegExp, (f: string, c: string, k: GateKnown) => Promise<CheckPr
 
 /**
  * 单文件闸门总入口：按扩展名分派；css/yml/md 等不认识的格式直接绿（放行原则）。
+ * banned=禁用包名清单（p3 修④，调用方从契约【技术基线】段解析），缺省=只跑语法/引用两查。
  * 返回错误短句列表（拼 feedback 用），空=可写盘。
  */
-export async function checkFile(filePath: string, code: string, known: GateKnown): Promise<CheckProblems> {
+export async function checkFile(filePath: string, code: string, known: GateKnown, banned?: string[]): Promise<CheckProblems> {
     if (!code) return [];
     for (const [re, fn] of DISPATCH) {
-        if (re.test(filePath)) return await fn(filePath, code, known);
+        if (re.test(filePath)) return await fn(filePath, code, known, banned);
     }
     return [];
 }
 
-/** 批校验（architect bootstrap 用）：批内互引先注入 known；返回 path→错误列表（只含红的文件） */
-export async function checkBatch(files: { path: string; content: string }[], known: GateKnown): Promise<Map<string, CheckProblems>> {
+/** 批校验（architect bootstrap 用）：批内互引先注入 known；返回 path→错误列表（只含红的文件）。banned=技术基线禁用包（S4） */
+export async function checkBatch(files: { path: string; content: string }[], known: GateKnown, banned?: string[]): Promise<Map<string, CheckProblems>> {
     const mem = new Map<string, string>();
     for (const f of files) if (f?.path) mem.set(normRel(f.path), f.content ?? "");
     // 批内视图：存在性 = 批内 ∪ 外层 known；内容 = 批内优先（还没落盘，磁盘读不到）
@@ -445,7 +466,7 @@ export async function checkBatch(files: { path: string; content: string }[], kno
     const out = new Map<string, CheckProblems>();
     for (const f of files) {
         if (!f?.path) continue;
-        const problems = await checkFile(f.path, f.content ?? "", batchKnown);
+        const problems = await checkFile(f.path, f.content ?? "", batchKnown, banned);
         if (problems.length) out.set(f.path, problems);
     }
     return out;

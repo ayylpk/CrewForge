@@ -10,7 +10,7 @@
 //   跑法：bun run t4-smoke.ts
 // ============================================================
 
-import { resolutionSchema, buildExecTasks } from "./architect";
+import { resolutionSchema, buildExecTasks, backfillSliceFiles } from "./architect";
 import { sliceGuard } from "./common";
 import type { Plan } from "./common";
 
@@ -66,7 +66,7 @@ function main() {
     const b1 = tasks[0]!, f1 = tasks[1]!, b2 = tasks[2]!, f2 = tasks[3]!;
     ok(b1.id === "T1" && f1.id === "T1-F" && b2.id === "T2" && f2.id === "T2-F", "配对 id 规矩不变（merger/maintainer 无感）");
     ok(b1.title === "功能 登录注册（2 个接口）", "多接口标题聚合", b1.title);
-    ok(b1.files.join(",") === "backend/app/routers/auth.py,backend/app/schemas/auth.py", "后端 files 跨接口并集去重", b1.files.join(","));
+    ok(b1.files.join(",") === "backend/src/app/routers/auth.py,backend/src/app/schemas/auth.py", "后端 files 跨接口并集去重（p3 修②：backend 子目录件归一到 src/ 下，根平铺件不动）", b1.files.join(","));
     ok(b1.method === "POST" && b1.path === "/api/login", "method/path 带主接口（看板列可读）");
     ok(b1.description.includes("包含接口（2 个，全部必须实现）") && b1.description.includes("/api/register"), "后端 description 两组接口全在");
     ok(f1.files.length === 2 && f1.title.includes("登录页、注册页"), "前端整页归一任务（页面对象聚合）", JSON.stringify(f1.files));
@@ -74,13 +74,36 @@ function main() {
     ok(b1.acceptance === "错误密码必须有明确提示" && f1.acceptance === b1.acceptance, "验收从 plan 机械继承（pair 两侧一致）");
     ok(b1.parameters.length === 1 && b1.parameters[0]?.name === "username", "parameters 带主接口（列形状不破坏）");
     ok(b2.acceptance === "功能可正常使用", "模块对不上时验收兜底不崩", b2.acceptance);
-    ok(f1.description.includes("FastAPI") === false && f1.description.includes("Vue3+TDesign"), "前端描述带前端技术、不混后端栈");
+    ok(/^技术：Vue3\+TDesign$/m.test(f1.description) && !/^技术：FastAPI$/m.test(f1.description), "前端任务技术字段使用前端选型，不被后端选型覆盖");
 
     console.log("=== ③ sliceGuard 护栏 ===");
+
     ok(sliceGuard(2).maxAttempt === 3 && sliceGuard(2).timeoutMs === 300_000, "接口对时代的小任务行为原样");
     ok(sliceGuard(3).maxAttempt === 2 && sliceGuard(3).timeoutMs === 600_000, "竖切≥3 文件：2 次×600s（T7a 复核后上调，卡面原值 420）");
     ok(sliceGuard(b1.files.length).maxAttempt === 3, "本例 T1 后端 2 文件<3 → 走老行为（护栏不误伤小任务）", `files=${b1.files.length}`);
     ok(sliceGuard(f1.files.length + 2).maxAttempt === 2, "≥3 文件即收敛（3 文件竖切任务）");
+
+    console.log("=== ④ 漏键回填（p4 阶段 3 血案补丁） ===");
+    const leaky = { tasks: [[
+        { feature: "文章管理", apis: [
+            { method: "POST", path: "/api/articles", purpose: "建文章", parameters: [], response: "{}" },           // 整个 files 键漏了
+            { method: "GET", path: "/api/articles/:id", purpose: "取文章", files: ["backend/src/routes/articles.js"], parameters: [], response: "{}" },
+        ] },
+        { feature: "文章管理", pages: [
+            { page: "详情页", interactions: "看文章" },                                                            // files 也漏
+            { page: "列表页", interactions: "看列表", files: ["frontend/src/views/AdminArticles.vue"] },
+        ] },
+    ]] };
+    ok(resolutionSchema.safeParse(leaky).success, "schema 宽容：漏 files 不再整包拒收", JSON.stringify(resolutionSchema.safeParse(leaky).success));
+    const data = resolutionSchema.parse(leaky);
+    const repairs = backfillSliceFiles(data);
+    ok(repairs.length === 2, "回填计数=2（一接口一页面）", JSON.stringify(repairs));
+    ok(data.tasks[0]![0].apis[0]!.files?.[0] === "backend/src/routes/articles.js", "漏键接口按路径首段推 routes/articles.js", data.tasks[0]![0].apis[0]!.files?.[0]);
+    ok(data.tasks[0]![1].pages[0]!.files?.[0] === "frontend/src/views/ArticlesPage1.vue", "漏键页面按首接口推 views/ArticlesPage1.vue", data.tasks[0]![1].pages[0]!.files?.[0]);
+    ok(data.tasks[0]![0].apis[1]!.files!.length === 1 && data.tasks[0]![1].pages[1]!.files![0] === "frontend/src/views/AdminArticles.vue", "已有 files 不动（不误伤）");
+    const built = buildExecTasks(data, detailed, stack, plan);
+    ok(built[0]!.files.includes("backend/src/routes/articles.js") && built[1]!.files.includes("frontend/src/views/ArticlesPage1.vue"),
+        "回填结果穿透 buildExecTasks（任务 files 齐全）", JSON.stringify(built.map(b => b.files)));
 
     console.log(`\n=== 汇总：${pass} 绿 / ${fail} 红 ===`);
     if (fail > 0) process.exit(1);
