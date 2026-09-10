@@ -7,15 +7,15 @@
     <svg class="flow-lines" viewBox="0 0 1440 420" preserveAspectRatio="none">
       <defs>
         <linearGradient id="flowGrad" x1="0" y1="0" x2="1" y2="0">
-          <stop offset="0%" stop-color="#45b8ff" stop-opacity="0" />
-          <stop offset="35%" stop-color="#45b8ff" stop-opacity="0.55" />
-          <stop offset="65%" stop-color="#a76bff" stop-opacity="0.4" />
-          <stop offset="100%" stop-color="#a76bff" stop-opacity="0" />
+          <stop offset="0%" stop-color="#53e0b7" stop-opacity="0" />
+          <stop offset="35%" stop-color="#53e0b7" stop-opacity="0.55" />
+          <stop offset="65%" stop-color="#6bc7f5" stop-opacity="0.4" />
+          <stop offset="100%" stop-color="#6bc7f5" stop-opacity="0" />
         </linearGradient>
         <linearGradient id="flowGrad2" x1="0" y1="0" x2="1" y2="0">
-          <stop offset="0%" stop-color="#45b8ff" stop-opacity="0" />
+          <stop offset="0%" stop-color="#53e0b7" stop-opacity="0" />
           <stop offset="50%" stop-color="#5ec8c0" stop-opacity="0.35" />
-          <stop offset="100%" stop-color="#45b8ff" stop-opacity="0" />
+          <stop offset="100%" stop-color="#53e0b7" stop-opacity="0" />
         </linearGradient>
       </defs>
 
@@ -31,10 +31,10 @@
 
       <!-- 沿光带的流动光点 -->
       <circle cx="180" cy="130" r="2" fill="#9fe8ff" opacity="0.8" />
-      <circle cx="430" cy="265" r="2.5" fill="#a76bff" opacity="0.8" />
+      <circle cx="430" cy="265" r="2.5" fill="#53e0b7" opacity="0.8" />
       <circle cx="600" cy="230" r="1.8" fill="#9fe8ff" opacity="0.7" />
-      <circle cx="820" cy="172" r="2" fill="#45b8ff" opacity="0.8" />
-      <circle cx="1010" cy="185" r="2.5" fill="#a76bff" opacity="0.7" />
+      <circle cx="820" cy="172" r="2" fill="#6bc7f5" opacity="0.8" />
+      <circle cx="1010" cy="185" r="2.5" fill="#53e0b7" opacity="0.7" />
       <circle cx="1180" cy="250" r="1.8" fill="#9fe8ff" opacity="0.7" />
 
       <!-- 第二道光带（底部，青蓝） -->
@@ -206,6 +206,6 @@
   right: -160px;
   width: 520px;
   height: 520px;
-  background: radial-gradient(circle, rgba(167, 107, 255, 0.1), transparent 65%);
+  background: radial-gradient(circle, rgba(83, 224, 183, 0.08), transparent 65%);
 }
 </style>

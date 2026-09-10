@@ -1,52 +1,64 @@
 /* ============================================================
-   CrewForge 全局样式 — 风格：现代科技极简 + 赛博朋克元素 + 扁平化
-   基准：src/views/LoginView.vue（用户已确认满意）
+   CrewForge 全局样式 — 工程控制室视觉系统
+   颜色服务于状态：青绿=运行/通过，琥珀=注意，珊瑚=失败。
    ============================================================ */
 
 :root {
-  /* ===== 色彩（深海科技蓝 Deep Ocean Tech Blue） ===== */
-  --bg: #06080f;            /* 主背景（深藏青/午夜蓝，偏深） */
-  --bg2: #0c1020;           /* 卡片背景 */
-  --bg3: #121829;           /* 次级卡片/输入框 */
-  --bg4: #181f36;           /* 悬浮/代码块 */
+  /* ===== 语义色板：墨蓝画布 / 石板面板 / 冷青运行轨道 ===== */
+  --canvas: #080d16;
+  --panel: #101927;
+  --panel-raised: #172337;
+  --panel-hover: #1d2c42;
+  --line: #26374d;
+  --line-strong: #38516d;
+  --ink: #e8f1fb;
+  --ink-muted: #9aadc1;
+  --ink-faint: #60758c;
+  --accent: #53e0b7;
+  --accent-blue: #6bc7f5;
+  --attention: #f5bd5c;
+  --danger: #f27678;
+  --info: #7fb9ff;
 
-  --border: #222a3e;        /* 默认边框 */
-  --border2: #2d3650;       /* hover 边框 */
-
-  --text: #c8d0e0;          /* 主文字 */
-  --text2: #8890a8;         /* 次级文字 */
-  --text3: #566072;         /* 弱文字/占位 */
-
-  --blue: #45b8ff;          /* 电光蓝 */
-  --purple: #a76bff;        /* 霓虹紫 */
-  --green: #5ecb8a;         /* 成功/执行中 */
-  --yellow: #f0c060;        /* 警告/澄清中 */
-  --red: #f26060;           /* 错误/失败 */
-  --cyan: #5ec8c0;          /* 信息 */
-  --orange: #f09050;        /* 次要状态 */
-  --pink: #f070a0;          /* 强调（光环） */
-
-  /* ===== 渐变（电光蓝 → 霓虹紫） ===== */
-  --grad1: linear-gradient(135deg, #45b8ff, #a76bff);  /* 主渐变（按钮/高亮） */
+  /* 兼容现有 scoped 页面变量 */
+  --bg: var(--canvas);
+  --bg2: var(--panel);
+  --bg3: #132033;
+  --bg4: var(--panel-raised);
+  --border: var(--line);
+  --border2: var(--line-strong);
+  --text: var(--ink);
+  --text1: var(--ink);
+  --text2: var(--ink-muted);
+  --text3: var(--ink-faint);
+  --blue: var(--accent-blue);
+  --purple: #9f8cff;
+  --green: var(--accent);
+  --yellow: var(--attention);
+  --red: var(--danger);
+  --cyan: #66d9d0;
+  --orange: #f59a67;
+  --pink: #ef8bb7;
+  --grad1: linear-gradient(135deg, #45d6b0 0%, #5eb8ef 100%);
 
   /* ===== 形状 ===== */
-  --radius-sm: 8px;
-  --radius: 12px;
-  --radius-lg: 16px;
+  --radius-sm: 6px;
+  --radius: 10px;
+  --radius-lg: 14px;
 
   /* ===== 毛玻璃 ===== */
-  --glass-bg: rgba(15, 19, 31, 0.6);
-  --glass-border: rgba(37, 43, 61, 0.45);
-  --glass-blur: 12px;
+  --glass-bg: rgba(16, 25, 39, 0.82);
+  --glass-border: rgba(91, 125, 158, 0.28);
+  --glass-blur: 16px;
 
   /* ===== 阴影 ===== */
-  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.25);
-  --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-  --shadow-lg: 0 20px 60px rgba(0, 0, 0, 0.45);
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.18);
+  --shadow: 0 10px 30px rgba(0, 0, 0, 0.24);
+  --shadow-lg: 0 24px 70px rgba(0, 0, 0, 0.42);
 
   /* ===== 动效 ===== */
   --ease: cubic-bezier(0.4, 0, 0.2, 1);
-  --dur: 0.2s;
+  --dur: 0.18s;
 }
 
 /* ===== 重置 ===== */
@@ -64,10 +76,31 @@ body,
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+  font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
   background: var(--bg);
   color: var(--text);
   -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+::selection {
+  color: var(--canvas);
+  background: var(--accent);
 }
 
 /* ===== 滚动条（暗色适配） ===== */
@@ -99,4 +132,17 @@ body {
   z-index: 1;
   width: 100%;
   padding: 32px 48px;
+}
+
+@media (max-width: 760px) {
+  .page { padding: 24px 18px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.001ms !important;
+  }
 }

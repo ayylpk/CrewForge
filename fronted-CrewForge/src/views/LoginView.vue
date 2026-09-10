@@ -99,8 +99,8 @@ async function handleLogin() {
               <circle cx="32" cy="32" r="3" fill="url(#haloGrad)" />
               <defs>
                 <linearGradient id="haloGrad" x1="0" y1="0" x2="64" y2="64">
-                  <stop offset="0%" stop-color="#45b8ff" />
-                  <stop offset="100%" stop-color="#a76bff" />
+                    <stop offset="0%" stop-color="#53e0b7" />
+                  <stop offset="100%" stop-color="#6bc7f5" />
                 </linearGradient>
               </defs>
             </svg>
@@ -228,7 +228,7 @@ async function handleLogin() {
     margin-top: 0;
 }
 .grad {
-  background: linear-gradient(135deg, #45b8ff, #a76bff);
+  background: linear-gradient(135deg, #53e0b7, #6bc7f5);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
 }

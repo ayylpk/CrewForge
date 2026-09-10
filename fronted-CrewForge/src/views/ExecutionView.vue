@@ -937,11 +937,11 @@ async function pollFiles() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 48px;
-  height: 52px;
+  padding: 0 clamp(14px, 3vw, 42px);
+  height: 58px;
   border-bottom: 1px solid var(--border);
-  background: rgba(15, 19, 31, 0.9);
-  backdrop-filter: blur(12px);
+  background: rgba(8, 13, 22, 0.92);
+  backdrop-filter: blur(16px);
   flex-shrink: 0;
 }
 .btn-back {
@@ -972,9 +972,9 @@ async function pollFiles() {
 .phase-badge {
   padding: 3px 10px;
   border-radius: 10px;
-  background: rgba(69, 184, 255, 0.1);
-  border: 1px solid rgba(69, 184, 255, 0.25);
-  color: var(--blue);
+  background: rgba(83, 224, 183, 0.1);
+  border: 1px solid rgba(83, 224, 183, 0.25);
+  color: var(--green);
   font-size: 11.5px;
   font-weight: 500;
 }
@@ -1074,9 +1074,9 @@ async function pollFiles() {
   color: var(--text);
 }
 .activity-item.active {
-  color: var(--blue);
-  border-left-color: var(--blue);
-  background: rgba(69, 184, 255, 0.06);
+  color: var(--green);
+  border-left-color: var(--green);
+  background: rgba(83, 224, 183, 0.08);
 }
 .activity-badge {
   position: absolute;
@@ -1125,7 +1125,7 @@ async function pollFiles() {
 }
 .resize-handle:hover::after,
 .resize-handle:active::after {
-  background: rgba(69, 184, 255, 0.6);
+  background: rgba(83, 224, 183, 0.65);
 }
 
 /* ===== 侧边栏 ===== */
@@ -1847,6 +1847,14 @@ async function pollFiles() {
 .confirm-opt:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+@media (max-width: 820px) {
+  .quality-strip { display: none; }
+  .topbar-title { max-width: 46vw; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .sidebar { position: absolute; inset: 0 auto 0 46px; z-index: 40; box-shadow: 18px 0 40px rgba(0, 0, 0, 0.28); }
+  .rightbar { position: absolute; inset: 0 0 0 auto; z-index: 40; box-shadow: -18px 0 40px rgba(0, 0, 0, 0.28); }
+  .quality-card { margin-top: 8px; }
 }
 
 </style>

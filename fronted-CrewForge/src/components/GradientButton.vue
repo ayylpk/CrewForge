@@ -12,7 +12,7 @@
 
 <script setup lang="ts">
 /**
- * 主渐变按钮（蓝紫渐变，全项目统一）
+ * 主操作按钮（青绿→冷蓝运行轨道，全项目统一）
  * @prop disabled — 禁用
  * @prop loading  — 加载态（转圈）
  * @event click — 显式 emit，不依赖属性透传
@@ -43,9 +43,11 @@ defineEmits<{
   font-weight: 600;
   cursor: pointer;
   transition: opacity var(--dur) var(--ease), transform 0.1s;
+  box-shadow: 0 6px 18px rgba(83, 224, 183, 0.16);
 }
 .gradient-btn:hover:not(:disabled) {
-  opacity: 0.9;
+  filter: brightness(1.08);
+  box-shadow: 0 8px 22px rgba(83, 224, 183, 0.24);
 }
 .gradient-btn:active:not(:disabled) {
   transform: translateY(1px);
