@@ -24,9 +24,10 @@ import { retryStructured } from "./llm";
 import { type Pair, type ExecTask } from "./common";
 import { nodePrompt, type Node } from "./Node";
 import { currentProjectId, safePath, safeExists, projectDir } from "./runEnv";
-import { contractPromptBlock, loadContracts } from "./contracts";
+import { contractPromptBlock, loadContracts, parseBannedImports } from "./contracts";
 import { buildKnown, checkFile } from "./checkers";
 import { renderCheckFrontend, type RenderOutcome } from "./renderGate";
+import { evidenceForTask } from "./artifactValidation";
 
 const TEST_MODEL_JSON = JSON.stringify({
     provider: "deepseek",
@@ -224,9 +225,11 @@ export class TestEngineer extends BaseAgent {
 
         const compileKnown = buildKnown(pid != null ? projectDir(pid) : null,
             new Map([...backFiles, ...frontFiles].map(f => [f.filePath, f.content])), []);
+        // p3 修④（9/9）：判定侧编译复核与写盘闸同执法口径——契约技术基线的禁用包这里也拦
+        const banned = parseBannedImports(await loadContracts());
         const redFiles: string[] = [];
         for (const f of [...backFiles, ...frontFiles]) {
-            const problems = await checkFile(f.filePath, f.content, compileKnown);
+            const problems = await checkFile(f.filePath, f.content, compileKnown, banned);
             if (problems.length > 0) {
                 redFiles.push(`${f.filePath}：${problems.join("；").slice(0, 200)}`);
                 (pair.back.files.includes(f.filePath) ? mechIssuesBack : mechIssuesFront).push(`编译未过 ${f.filePath}：${problems.join("；").slice(0, 200)}`);
@@ -305,6 +308,14 @@ export class TestEngineer extends BaseAgent {
                 fs.mkdirSync(dir, { recursive: true });
                 fs.writeFileSync(path.join(dir, `${phase}-${pairKey}.md`),
                     renderTestReport(label, phase, verdict, checks, mech), "utf-8");
+                const evidenceDir = path.join(projectDir(pid), "_task-evidence");
+                fs.mkdirSync(evidenceDir, { recursive: true });
+                const taskEvidence = evidenceForTask(pair.back,
+                    { passed: verdict.pass, issues: [...verdict.backendIssues, ...verdict.frontendIssues] },
+                    this.judgements.get(`${phase}:${pairKey}`) ?? 0);
+                taskEvidence.checks = [...mech, ...checks];
+                taskEvidence.outputSummary = `test verdict=${verdict.pass ? "pass" : "fail"}; pair=${label}`;
+                fs.writeFileSync(path.join(evidenceDir, `${phase}-${pairKey}.json`), JSON.stringify(taskEvidence, null, 2), "utf-8");
             } catch (e) { console.warn(`[${this.name}] 测试报告落盘失败（不拦判定）:`, (e as Error).message); }
         }
 
