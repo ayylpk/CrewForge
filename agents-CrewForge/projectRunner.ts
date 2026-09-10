@@ -41,24 +41,40 @@ export interface TeamBundle {
     managers: Manager[];
 }
 
+/** 固定核心团队；数据库成员只提供配置，不再决定核心角色是否存在或复制实例。 */
+export function createCoreTeam(
+    station: TransferStation = new TransferStation({}, {}),
+    configured?: { manager?: Manager; architect?: Architect; backend?: BackendEngineer; frontend?: FrontendEngineer; test?: TestEngineer },
+): TeamBundle {
+    const managers = [configured?.manager ?? new Manager()];
+    const messageAgents: BaseAgent[] = [
+        new Merger(station),
+        new Maintainer(station),
+        configured?.architect ?? new Architect(station),
+        configured?.backend ?? new BackendEngineer("backend-core", station),
+        configured?.frontend ?? new FrontendEngineer("frontend-core", station),
+        configured?.test ?? new TestEngineer("test-core", station),
+    ];
+    return { station, messageAgents, managers };
+}
+
 /** 读项目成员 → 按角色分派构造（Merger/Maintainer 系统内置无条件注册） */
 export async function buildTeam(
     projectId: number,
     station: TransferStation = new TransferStation({}, {}),
 ): Promise<TeamBundle> {
     const members = await getProjectAgents(projectId);
-    const messageAgents: BaseAgent[] = [];
-    const managers: Manager[] = [];
-
-    // 系统内置单例：合并配对 + 收敛完成（流水线必需，不依赖项目成员配置）
-    messageAgents.push(new Merger(station));
-    messageAgents.push(new Maintainer(station));
+    let manager: Manager | undefined;
+    let architect: Architect | undefined;
+    let backend: BackendEngineer | undefined;
+    let frontend: FrontendEngineer | undefined;
+    let test: TestEngineer | undefined;
 
     for (const m of members) {
         const nodes = await getProjectNodes(projectId, m.agentId);
         switch (m.role) {
             case "项目经理":
-                managers.push(await Manager.fromProject(projectId, m.agentId));
+                if (!manager) manager = await Manager.fromProject(projectId, m.agentId);
                 console.log(`[runner] 项目经理 ${m.name}：图版，节点 ${nodes.length} 个`);
                 break;
             case "架构师":
@@ -66,22 +82,22 @@ export async function buildTeam(
                 // 半套 DB 配置（有边无节点）会让 stitch 编译崩死（9/2 验收：软删遗留池边撞库实锤）
                 {
                     const edges = await getEdges(m.agentId);
-                    messageAgents.push(nodes.length > 0 && edges.length > 0
+                    if (!architect) architect = nodes.length > 0 && edges.length > 0
                         ? new Architect(station, nodes, edges)
-                        : new Architect(station));
+                        : new Architect(station);
                 }
                 console.log(`[runner] 架构师 ${m.name}：消息+拆分图，${nodes.length > 0 ? `DB 配置（节点 ${nodes.length} 个）` : "内置默认图"}`);
                 break;
             case "后端开发":
-                messageAgents.push(new BackendEngineer(`backend-${m.agentId}`, station, nodes));
+                if (!backend) backend = new BackendEngineer("backend-core", station, nodes);
                 console.log(`[runner] 后端开发 ${m.name}：流水线，节点 ${nodes.length} 个`);
                 break;
             case "前端开发":
-                messageAgents.push(new FrontendEngineer(`frontend-${m.agentId}`, station, nodes));
+                if (!frontend) frontend = new FrontendEngineer("frontend-core", station, nodes);
                 console.log(`[runner] 前端开发 ${m.name}：流水线，节点 ${nodes.length} 个`);
                 break;
             case "测试":
-                messageAgents.push(new TestEngineer(`test-${m.agentId}`, station, nodes));
+                if (!test) test = new TestEngineer("test-core", station, nodes);
                 console.log(`[runner] 测试 ${m.name}：判定，节点 ${nodes.length} 个`);
                 break;
             case "维护":
@@ -92,7 +108,7 @@ export async function buildTeam(
                 console.log(`[runner] 角色「${m.role}」无实现类，跳过：${m.name}`);
         }
     }
-    return { station, messageAgents, managers };
+    return createCoreTeam(station, { manager, architect, backend, frontend, test });
 }
 
 /** plan 形状校验（阶段 2 续跑用）：网页手填的 dev_plan 可能不对版，phases 非空且每阶段有数字 phase+name 才可用 */
