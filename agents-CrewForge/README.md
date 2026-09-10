@@ -40,10 +40,12 @@ settings.ts     sys_settings 30s 缓存（cc-switch 配置层引擎半边）
 | `pm-ui-smoke.ts` | T5 ui 机读核验/解析/契约标注 | 17 绿 |
 | `role-tier-smoke.ts` | T3 档位解析/旁路底线（不配=逐字节不变） | 20 绿 |
 | `render-smoke.ts` | T6 白屏判定/色扫/假通过改判/skip 旁路 | 16 绿 |
-| `t4-smoke.ts` | T4 竖切 schema/buildExecTasks 狗考/护栏 | 19 绿 |
+| `t4-smoke.ts` | T4 竖切 schema/buildExecTasks 狗考/护栏 | 25 绿 |
 | `t7-smoke.ts` | T7a 令牌闸：在制≤限额/异常归还/排队不吃超时/clamp | 9 绿 |
-| `t7b-smoke.ts` | T7b 文件工具：三工具语义/文件锁/循环机械终止 | 19 绿 |
-| `tdesign-smoke.ts` | 9/5 文档通道+地基（要网络） | 19 绿 |
+| `t7b-smoke.ts` | T7b 文件工具：五工具语义/文件锁/循环机械终止 | 21 绿 |
+| `message-protocol-smoke.ts` | Hub 消息 schema 与阶段边界拒绝 | 10 绿 |
+| `artifact-validation-smoke.ts` | 任务产物、工作区基线与证据结构 | 6 绿 |
+| `core-team-smoke.ts` | 固定核心角色与内置兜底 | 6 绿 |
 | `bridge-smoke.ts` | 阶段 1 任务桥（旁路设计，离线可跑） | 11 绿 |
 
 ```bash
@@ -56,5 +58,7 @@ for s in compile-gate-smoke contracts-smoke pm-ui-smoke role-tier-smoke render-s
 bun install            # 依赖 bun.lock
 bun x tsc --noEmit     # 类型检查（应保持零输出）
 ```
+
+仓库根目录执行 `powershell -ExecutionPolicy Bypass -File scripts/verify.ps1` 可一次完成全部零 LLM smoke、前端构建、后端测试和 Git diff 检查；快速回归可加 `-SkipBuilds`。
 
 `.env`（bun 自动加载）：`DB_PASSWORD`（库=crewforge，连接参数见 Node.ts/task.ts 池）、`DEEPSEEK_API_KEY`。
