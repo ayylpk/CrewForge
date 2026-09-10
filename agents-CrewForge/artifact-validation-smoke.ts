@@ -1,6 +1,6 @@
 import { resolveProjectBaseline } from "./baseline";
 import { buildKnown } from "./checkers";
-import { persistTaskArtifacts, validateTaskArtifact, validateWorkspace, type TaskEvidence } from "./artifactValidation";
+import { evidenceForTask, persistTaskArtifacts, validateTaskArtifact, validateWorkspace, type TaskEvidence } from "./artifactValidation";
 
 const task = {
   id: "T1", layer: "frontend" as const, method: "GET", path: "/api/items", files: ["frontend/src/views/Items.vue"],
@@ -28,6 +28,7 @@ const checks: [string, boolean][] = [
   ["workspace honors baseline", validateWorkspace(valid, resolveProjectBaseline(null)).passed],
   ["workspace reports missing request wrapper for enabled frontend", !validateWorkspace(missing, resolveProjectBaseline(null)).passed],
   ["task commit persists files before evidence", persisted.join(",") === "frontend/src/views/Items.vue,_task-evidence/1-T1.json"],
+  ["failure evidence has a category", evidenceForTask(task, missingArtifact, 1).failureCategory === "missing_artifact"],
 ];
 let failed = 0;
 for (const [name, ok] of checks) { console.log(`${ok ? "PASS" : "FAIL"} ${name}`); if (!ok) failed++; }

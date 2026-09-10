@@ -2,6 +2,7 @@
 import type { ExecTask } from "./common";
 import type { ProjectBaseline } from "./baseline";
 import { checkFile, type GateKnown } from "./checkers";
+import { classifyFailure, type FailureCategory } from "./qualityMetrics";
 
 export interface TaskEvidenceCheck {
   item: string;
@@ -17,6 +18,8 @@ export interface TaskEvidence {
   outputSummary: string;
   failureReason: string | null;
   retryCount: number;
+  /** 便于经理看板/回放集统计；旧证据没有此字段时按 unknown 兼容。 */
+  failureCategory?: FailureCategory | null;
 }
 
 export interface ValidationResult {
@@ -80,5 +83,6 @@ export function evidenceForTask(task: ExecTask, result: ValidationResult, retryC
     outputSummary: result.passed ? "task artifact validation passed" : "task artifact validation failed",
     failureReason: result.passed ? null : result.issues.join("；"),
     retryCount,
+    failureCategory: result.passed ? null : classifyFailure(result.issues.join("；")),
   };
 }
