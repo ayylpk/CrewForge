@@ -24,6 +24,24 @@ export interface ValidationResult {
   issues: string[];
 }
 
+export type ArtifactWriter = (filePath: string, content: string) => Promise<unknown> | unknown;
+
+/** 任务提交顺序：先全部代码文件，再证据文件；调用方可注入事务化/持久化 writer。 */
+export async function persistTaskArtifacts(
+  task: ExecTask,
+  files: { filePath: string; code: string }[],
+  evidence: TaskEvidence,
+  writer: ArtifactWriter,
+): Promise<void> {
+  const allowed = new Set(task.files.map((file) => file.replace(/\\/g, "/")));
+  for (const file of files) {
+    const normalized = file.filePath.replace(/\\/g, "/");
+    if (!allowed.has(normalized)) throw new Error(`任务 ${task.id} 无权写入 ${normalized}`);
+    await writer(normalized, file.code);
+  }
+  await writer(`_task-evidence/${task.phase ?? 0}-${task.id}.json`, JSON.stringify(evidence, null, 2));
+}
+
 export async function validateTaskArtifact(task: ExecTask, workspace: GateKnown): Promise<ValidationResult> {
   const issues: string[] = [];
   for (const file of task.files) {

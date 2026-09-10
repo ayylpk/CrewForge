@@ -842,8 +842,8 @@ export class Architect extends BaseAgent {
             }
         }
         const tasks: ExecTask[] = state?.exeTasks ?? [];
-        // ★ sys_task 桥（施工卡 1-2/1-3）：本阶段任务幂等落库 + 消费返工 todo；旁路 fire-and-forget 不阻塞
-        void this.bridgeTasks(tasks, phase.phase, projectId ?? pid ?? undefined);
+        // 任务登记和 doing 状态必须在阶段处理器结束前落库，避免进程边界丢写。
+        await this.bridgeTasks(tasks, phase.phase, projectId ?? pid ?? undefined);
         if (tasks.length > 0) {
             console.log(`[architect] 阶段 ${phase.phase} 拆出 ${tasks.length} 个任务并下发`);
         } else {
@@ -866,7 +866,7 @@ export class Architect extends BaseAgent {
             await ensureTasksForPhase(tasks, projectId, phaseId);
             // 补 doing：dispatch 节点的消息比桥落库先到，工位 on("task") 写 doing 时无行可写（9/2 实测）
             // 语义="已下发工位"；发送失败的任务（无空闲工位）会被略早标 doing——可接受的观测误差
-            for (const t of tasks) void updateStatusByExt(projectId, t.id, "doing", undefined, phaseId);
+            await Promise.all(tasks.map(t => updateStatusByExt(projectId, t.id, "doing", undefined, phaseId)));
             const dispatched = new Set(tasks.map(t => t.id));
             for (const row of await getTasksByStatus(projectId, "todo")) {
                 if (!row.retry_count || row.retry_count >= 3) continue;              // 只吃返工任务；≥3=放弃护栏

@@ -1,6 +1,6 @@
 import { resolveProjectBaseline } from "./baseline";
 import { buildKnown } from "./checkers";
-import { validateTaskArtifact, validateWorkspace, type TaskEvidence } from "./artifactValidation";
+import { persistTaskArtifacts, validateTaskArtifact, validateWorkspace, type TaskEvidence } from "./artifactValidation";
 
 const task = {
   id: "T1", layer: "frontend" as const, method: "GET", path: "/api/items", files: ["frontend/src/views/Items.vue"],
@@ -19,12 +19,15 @@ const evidence: TaskEvidence = {
 
 const artifact = await validateTaskArtifact(task, valid);
 const missingArtifact = await validateTaskArtifact(task, missing);
+const persisted: string[] = [];
+await persistTaskArtifacts(task, [{ filePath: task.files[0]!, code: "ok" }], evidence, async (file) => { persisted.push(file); });
 const checks: [string, boolean][] = [
   ["valid artifact passes", artifact.passed],
   ["missing artifact fails", !missingArtifact.passed],
   ["evidence is structurally serializable", JSON.parse(JSON.stringify(evidence)).taskId === "T1"],
   ["workspace honors baseline", validateWorkspace(valid, resolveProjectBaseline(null)).passed],
   ["workspace reports missing request wrapper for enabled frontend", !validateWorkspace(missing, resolveProjectBaseline(null)).passed],
+  ["task commit persists files before evidence", persisted.join(",") === "frontend/src/views/Items.vue,_task-evidence/1-T1.json"],
 ];
 let failed = 0;
 for (const [name, ok] of checks) { console.log(`${ok ? "PASS" : "FAIL"} ${name}`); if (!ok) failed++; }
