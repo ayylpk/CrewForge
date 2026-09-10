@@ -52,12 +52,12 @@ function main() {
     ok(p4.done === true && p4.ui === null, "只回 done 没带 ui → ui=null（触发代码补写轮）");
 
     console.log("=== ③ assembleContracts 消费 uiProfile ===");
-    const withUi = assembleContracts(1, basePlan({ web: true, pages: ["登录"], style: "深蓝科技感", defaulted: false }), null);
+    const withUi = assembleContracts(1, basePlan({ web: true, pages: ["登录"], style: "深蓝科技感", defaulted: false }), null, null);
     ok(withUi.includes("界面决策（PM 访谈）") && withUi.includes("深蓝科技感") && withUi.includes("用户亲答，不得违背"),
         "亲答值进契约头部");
-    const defaultedUi = assembleContracts(1, basePlan({ web: true, pages: [], style: "默认：跟随工程地基藏青主题（UI 三问未采集到用户偏好）", defaulted: true }), null);
+    const defaultedUi = assembleContracts(1, basePlan({ web: true, pages: [], style: "默认：跟随工程地基主题（UI 三问未采集到用户偏好）", defaulted: true }), null, null);
     ok(defaultedUi.includes("默认值，未经用户亲答"), "默认值在契约显著标注（有异议走确认门）");
-    const noUi = assembleContracts(1, basePlan(), null);
+    const noUi = assembleContracts(1, basePlan(), null, null);
     ok(!noUi.includes("界面决策"), "无 uiProfile 不加行（T5 前老 plan 兼容）");
 
     console.log(`\n=== 汇总：${pass} 绿 / ${fail} 红 ===`);

@@ -102,7 +102,7 @@ export function assembleContracts(
     const phase = plan?.phases.find(item => item.phase === phaseNo);
     const goal = phase?.goal ?? plan?.mvp_scope?.join("；") ?? "（见任务清单）";
     const ui = plan?.uiProfile
-        ? `界面决策：${plan.uiProfile.web ? `需要 Web，页面意向 ${plan.uiProfile.pages.join("、") || "按功能推断"}` : "不做前端，仅后端/API"}；风格：${plan.uiProfile.style}${plan.uiProfile.defaulted ? "（默认值，未经用户亲答）" : "（用户已确认）"}`
+        ? `界面决策（PM 访谈）：${plan.uiProfile.web ? `需要 Web，页面意向 ${plan.uiProfile.pages.join("、") || "按功能推断"}` : "不做前端，仅后端/API"}；风格：${plan.uiProfile.style}${plan.uiProfile.defaulted ? "（默认值，未经用户亲答）" : "（用户亲答，不得违背）"}`
         : "";
     const pages = llm?.pages?.length ? renderPages(llm.pages) : "- （契约登记降级：没有可靠页面清单，路由可达性由测试判定）";
     const shared = llm?.shared?.trim() || "- 无";
