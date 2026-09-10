@@ -9,6 +9,12 @@
         <span class="phase-badge">{{ currentPhase || '准备中' }}</span>
       </div>
       <div class="topbar-right">
+        <div class="quality-strip" title="基于当前已进入终态的任务统计">
+          <span class="quality-label">质量</span>
+          <strong>{{ qualitySummary.firstPassRate }}%</strong>
+          <span class="quality-muted">首次通过 · {{ qualitySummary.evaluated }} 个终态任务</span>
+          <span v-if="qualitySummary.totalRetries" class="quality-retry">↻ {{ qualitySummary.totalRetries }}</span>
+        </div>
         <!-- 暂停/继续随假引擎退役（施工卡 1-4）：真执行无剧本，引擎侧控制=确认门（阶段 3） -->
         <button v-if="done" class="btn-save" @click="viewOverview">查看项目</button>
       </div>
@@ -200,6 +206,13 @@
         <div class="side-head">
           <span>任务看板</span>
           <span class="side-count">{{ tasks.length }} 个任务</span>
+        </div>
+        <div class="quality-card">
+          <div class="quality-card-head"><span>产出质量</span><strong>{{ qualitySummary.firstPassRate }}%</strong></div>
+          <div class="quality-card-meta">通过 {{ qualitySummary.passed }} · 失败 {{ qualitySummary.failed }} · 重试 {{ qualitySummary.totalRetries }}</div>
+          <div v-if="qualitySummary.failureCategories.length" class="quality-failures">
+            <span v-for="item in qualitySummary.failureCategories.slice(0, 3)" :key="item.label">{{ item.label }} {{ item.count }}</span>
+          </div>
         </div>
         <div class="kanban">
           <div class="kanban-col">
@@ -399,7 +412,7 @@ import { AGENT_NAMES } from '../constants/agents'
 import { fetchProjectFiles, fetchProjectFileDetail } from '../api/projectFile'
 import type { FileNode, projectFileVO } from '../types/file'
 import { useExecutionStore } from '../stores/execution'
-import { fetchTasks, retryTask as apiRetryTask } from '../api/task'
+import { fetchTasks, retryTask as apiRetryTask, summarizeTaskQuality } from '../api/task'
 import type { TaskItem as ApiTaskItem, TaskStatus } from '../api/task'
 import { fetchProjectById, updateProject } from '../api/project'
 import { fetchPendingConfirms, answerConfirm, parseOptions, type ConfirmQuestion } from '../api/confirm'
@@ -517,6 +530,7 @@ function startDrag(e: MouseEvent, axis: 'x' | 'y', target: 'left' | 'right' | 'l
 
 // ===== 任务看板 =====
 const tasks = ref<ApiTaskItem[]>([])
+const qualitySummary = computed(() => summarizeTaskQuality(tasks.value))
 
 /** 收起的列（默认已完成收起来） */
 const collapsedCols = reactive(new Set<TaskStatus>(['done']))
@@ -969,6 +983,19 @@ async function pollFiles() {
   align-items: center;
   gap: 12px;
 }
+.quality-strip {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin-right: 14px;
+  color: var(--text2);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.quality-strip strong { color: var(--green); font-size: 16px; }
+.quality-label { color: var(--text); font-weight: 600; }
+.quality-muted { color: var(--text3); }
+.quality-retry { color: var(--yellow); }
 .btn-pause {
   display: flex;
   align-items: center;
@@ -1400,6 +1427,18 @@ async function pollFiles() {
   min-width: 0;
   animation: right-in 0.2s var(--ease);
 }
+.quality-card {
+  margin: 10px 10px 6px;
+  padding: 10px 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--panel) 84%, var(--blue));
+}
+.quality-card-head { display: flex; justify-content: space-between; align-items: center; color: var(--text2); font-size: 12px; }
+.quality-card-head strong { color: var(--green); font-size: 18px; }
+.quality-card-meta { margin-top: 5px; color: var(--text3); font-size: 11px; }
+.quality-failures { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
+.quality-failures span { padding: 2px 6px; border-radius: 10px; color: var(--red); background: color-mix(in srgb, var(--red) 12%, transparent); font-size: 10px; }
 @keyframes right-in {
   from { opacity: 0; }
   to { opacity: 1; }
