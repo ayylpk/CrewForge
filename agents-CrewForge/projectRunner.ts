@@ -33,6 +33,7 @@ import { closeTdesignMcp } from "./tdesignMcp";                            // �
 import { closeRenderGates } from "./renderGate";                           // T6 出口保险：整树杀渲染审的 vite 进程链
 import { archiveProjectDir } from "./runEnv";
 import { refreshSettings } from "./settings";
+import { PhaseRequestMessageSchema } from "./messageProtocol";
 
 
 export interface TeamBundle {
@@ -143,9 +144,26 @@ async function drivePhases(
         station.sendMessage("manager", "architect", JSON.stringify({ type: "phase_plan", plan, phase: phases[i], projectId }));
         console.log(`[runner] → 架构师：阶段 ${phases[i].phase}「${phases[i].name}」`);
         // 收阶段边界：maintainer 发 phase_done → 架构师发 phase_request 给 manager —— runner 代为响应
-        const req = await station.waitForMessage("manager");
-        const data = req ? JSON.parse(req.content) : null;
-        console.log(`[runner] 收到架构师请求：${data?.type ?? "?"}（阶段 ${data?.phase ?? "?"}）`);
+        let data: any = null;
+        while (!data) {
+            const req = await station.waitForMessage("manager");
+            if (!req || req.sender !== "architect") {
+                console.warn(`[runner] 拒绝阶段消息：发送方应为 architect，实际为 ${req?.sender ?? "?"}`);
+                if (req) station.markDone("manager");
+                continue;
+            }
+            let raw: unknown;
+            try { raw = JSON.parse(req.content); } catch { raw = null; }
+            const parsed = PhaseRequestMessageSchema.safeParse(raw);
+            if (!parsed.success || parsed.data.phase !== Number(phases[i]!.phase)) {
+                console.warn(`[runner] 拒绝过期/错误 phase_request：${req.content}`);
+                station.markDone("manager");
+                continue;
+            }
+            data = parsed.data;
+            station.markDone("manager");
+        }
+        console.log(`[runner] 收到架构师请求：${data.type}（阶段 ${data.phase}）`);
         if (!isLast && exitAtBoundary) {
             console.log(`[runner] 阶段 ${phases[i].phase} 收口，按阶段边界退出（等 Java 对账续拉）`);
             return "boundary";
@@ -278,6 +296,10 @@ if (import.meta.main) {
     console.error("用法: bun run projectRunner.ts {projectId}（或设置环境变量 PROJECT_ID）");
     process.exit(1);
   }
+  // p3 翻车修（9/9）：argv 选了项目但 runEnv 全家（writeWorkspace/projectDir/currentProjectId）只认
+  // env PROJECT_ID——Java spawn 会注入，手工跑漏注入=地基 18 文件全部"缺少 PROJECT_ID"写盘失败。
+  // currentProjectId 是调用时现读，这里回填即全链生效（RUNS_ROOT 是模块期定格，仍需命令行前给）
+  process.env.PROJECT_ID ??= String(projectId);
 
   console.log(`[runner] 启动项目 ${projectId}...`);
   // 配置层先热身后开跑：sys_settings 进缓存（30s 心跳刷新，设置页改动半分钟内生效；读失败静默走内置）

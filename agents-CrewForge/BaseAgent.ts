@@ -18,6 +18,7 @@
 // ============================================================
 
 import { TransferStation, roles, type Message, type Role } from "./Hub";
+import { parseMessagePayloadCompatible } from "./messageProtocol";
 
 /** 消息上下文：处理器拿到的全部信息 */
 export interface MessageContext {
@@ -103,7 +104,7 @@ export class BaseAgent {
     }
 
     private parse(content: string): Record<string, any> | null {
-        try { return JSON.parse(content) as Record<string, any>; } catch { return null; }
+        return parseMessagePayloadCompatible(content) as Record<string, any> | null;
     }
 
     private async dispatch(ctx: MessageContext): Promise<boolean> {
