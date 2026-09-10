@@ -204,6 +204,11 @@ CREATE TABLE `sys_settings` (
   `java_base_url` varchar(255) NOT NULL DEFAULT 'http://localhost:8080' COMMENT '引擎回调 Java 基址（A8 修复）',
   `confirm_timeout_min` int NOT NULL DEFAULT '30' COMMENT '确认门无应答自动放行分钟数（阶段 3）',
   `smoke_build` tinyint NOT NULL DEFAULT '0' COMMENT '1=冒烟追加 bun build/vue-tsc（阶段 4，默认关保演示稳定）',
+  `model_pro` varchar(100) DEFAULT NULL COMMENT 'T3 pro 档模型名（空=不分层）',
+  `role_models` varchar(500) DEFAULT NULL COMMENT 'T3 角色→档位 JSON 文本',
+  `llm_concurrency` int DEFAULT '6' COMMENT 'T7a 端点总闸',
+  `station_slots` int DEFAULT '5' COMMENT 'T7a 阶段令牌上限',
+  `tool_mode` tinyint DEFAULT '0' COMMENT 'T7b 工位工具模式',
   `update_time` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='运行时设置（cc-switch 式单行表；DB 连接参数在 .env，不在此表——自举约束）';
@@ -231,6 +236,7 @@ CREATE TABLE `sys_task` (
   `update_time` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   `deleted` tinyint DEFAULT '0' COMMENT '逻辑删除',
   PRIMARY KEY (`id`),
+  UNIQUE KEY `uk_project_phase_task_ext` (`project_id`,`phase_id`,`task_id_ext`),
   KEY `idx_project` (`project_id`),
   KEY `idx_status` (`status`),
   KEY `idx_assignee` (`assignee`),
@@ -269,4 +275,6 @@ CREATE TABLE `sys_user` (
 -- 种子数据：演示账号 admin（BCrypt 口令哈希入库，明文见面试演示口径）+ 单行运行时配置
 -- 注意 api_key 留空=沿用 .env 的 DEEPSEEK_API_KEY（阶段 2 设置页接管后此处配置优先）
 INSERT IGNORE INTO `sys_user` VALUES (1,'admin','$2b$12$p9VBI/GKrxGOHg/MqjOkGuGzOQOb1EQ3nw3puqLE.97ZjrubuY2zO','系统管理员',NULL,NULL,1,'2026-08-05 20:18:42','2026-08-06 22:47:08',0);
-INSERT IGNORE INTO `sys_settings` VALUES (1,'deepseek-v4-flash',NULL,NULL,'deepseek','http://localhost:8080',30,0,'2026-09-02 15:27:53');
+INSERT IGNORE INTO `sys_settings`
+  (`id`,`model_name`,`model_url`,`api_key`,`model_kind`,`java_base_url`,`confirm_timeout_min`,`smoke_build`,`update_time`)
+  VALUES (1,'deepseek-v4-flash',NULL,NULL,'deepseek','http://localhost:8080',30,0,'2026-09-02 15:27:53');
