@@ -19,7 +19,7 @@ import { BaseAgent } from "./BaseAgent";
 import { roles, type TransferStation, WorkQueue } from "./Hub";
 import { initModels } from "./models";
 import { invokeWithTimeout, DEFAULT_TIMEOUT_MS } from "./llm";
-import { writeWorkspace, readWorkspace, sliceGuard, type ExecTask, REQUEST_WRAPPER_PATH, REQUEST_WRAPPER_CODE } from "./common";
+import { writeWorkspace, readWorkspace, sliceGuard, flushWorkspacePersists, type ExecTask, REQUEST_WRAPPER_PATH, REQUEST_WRAPPER_CODE } from "./common";
 import { currentProjectId, projectDir } from "./runEnv";
 import { updateStatusByExt } from "./task";
 import { nodePrompt, type Node } from "./Node";
@@ -296,6 +296,7 @@ export class FrontendEngineer extends BaseAgent {
             // 模型不碰路由文件（登记死锁病根绝根）；失败只 warn，页面可达性还有测试判定兜底
             await registerRoutes(pid, task, await loadContracts())
                 .catch(e => console.warn(`[${this.name}] ${task.id} 路由机械登记异常（旁路）:`, (e as Error).message));
+            await flushWorkspacePersists();
             console.log(`[${this.name}] ${task.id} 前端实现已写入 workspace/`);
             this.send("merger", { type: "task_result", task, success: true });
             } finally {

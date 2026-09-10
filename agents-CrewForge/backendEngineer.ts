@@ -18,7 +18,7 @@ import { BaseAgent } from "./BaseAgent";
 import { roles, type TransferStation, WorkQueue } from "./Hub";
 import { initModels } from "./models";
 import { invokeWithTimeout, DEFAULT_TIMEOUT_MS } from "./llm";
-import { writeWorkspace, readWorkspace, sliceGuard, type ExecTask } from "./common";
+import { writeWorkspace, readWorkspace, sliceGuard, flushWorkspacePersists, type ExecTask } from "./common";
 import { currentProjectId, projectDir } from "./runEnv";
 import { updateStatusByExt } from "./task";
 import { nodePrompt, type Node } from "./Node";
@@ -224,6 +224,7 @@ export class BackendEngineer extends BaseAgent {
                 writtenFiles.set(f.filePath, f.code);
                 console.log(`已写入 ${full}`);
             }
+            await flushWorkspacePersists();
             console.log(`[${this.name}] ${task.id} 后端实现已写入 workspace/`);
             this.send("merger", { type: "task_result", task, success: true });
             } finally {

@@ -92,6 +92,8 @@ const request = axios.create({ baseURL: '/api', timeout: 10000 });
 export default request;
 `;
 
+const pendingWorkspacePersists = new Set<Promise<unknown>>();
+
 // 写盘（沙箱：只能写当前项目的房间，逃逸直接抛错）
 export function writeWorkspace(relative: string, code: string): string {
   const pid = currentProjectId();
@@ -101,9 +103,18 @@ export function writeWorkspace(relative: string, code: string): string {
   fs.writeFileSync(full, code, "utf-8");
   // 同步落库 sys_project_file（异步 fire-and-forget：失败只 warn，不阻塞写盘）
   // 动态 import 避免与 Node.ts 的静态循环依赖
-  import("./Node").then(m => m.upsertProjectFile(pid, relative, code)).catch(e =>
+  const persist = import("./Node").then(m => m.upsertProjectFile(pid, relative, code)).catch(e =>
     console.warn("[writeWorkspace] 代码落库失败:", (e as Error).message));
+  pendingWorkspacePersists.add(persist);
+  void persist.finally(() => pendingWorkspacePersists.delete(persist));
   return full;
+}
+
+/** 等待本进程已发起的文件桥写入完成；任务结果发送前调用，避免数据库仍是旧版本。 */
+export async function flushWorkspacePersists(): Promise<void> {
+  while (pendingWorkspacePersists.size > 0) {
+    await Promise.allSettled([...pendingWorkspacePersists]);
+  }
 }
 
 /** 读盘：从 DB 读取当前项目已存在的文件内容（用于 agent 追加修改时参考） */
