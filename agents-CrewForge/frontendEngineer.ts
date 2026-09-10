@@ -38,9 +38,8 @@ const FRONTEND_MODEL_JSON = JSON.stringify({
     thinking: false,
 });
 
-// Legacy TDesign smoke helpers remain as compatibility shims only. The production
-// worker no longer starts an MCP process or makes component documentation calls.
-const TDESIGN_WHITELIST_TAGS = "由任务最终技术栈决定";
+// Kept only so historical prompt exports remain import-compatible; production rules below use the selected stack.
+const TDESIGN_WHITELIST_TAGS = "兼容导出，不参与生产编排";
 
 // ---------- 提示词 ----------
 
@@ -146,15 +145,7 @@ function extractGeneratedCode(content: unknown): string | null {
     return code || null;
 }
 
-// ---------- 工具：任务级 TDesign 文档上下文（预取结果 + 通道存活标记） ----------
-
-/** 一个任务共享的文档上下文：docs 组件名→原始文档串；alive=false 表示 MCP 通道已挂（闸门放行） */
-interface TDesignContext {
-    docs: Record<string, string>;
-    alive: boolean;
-}
-
-/** 解析设计稿的【组件清单】声明行 → 组件名列表（剥 <t-> 壳；只留白名单内；≤15 控 prompt 体量）。导出供 smoke 测试 */
+// 历史设计稿兼容解析器；核心生产提示词不再依赖组件库文档/MCP。
 export function parseDesignComponents(design: string | null): string[] {
     if (!design) return [];
     const line = design.match(/【组件清单】(.+)/)?.[1] ?? "";
