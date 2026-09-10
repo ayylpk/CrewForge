@@ -1,0 +1,1144 @@
+{
+  "generatedAt": "2026-09-10T22:33:08.650Z",
+  "runsRoot": "F:\\code\\project\\CrewForge\\runs",
+  "note": "历史基线：由既有产物树静态采集（非可复现的端到端基线）。未运行 agent 团队、未调用 LLM。",
+  "cards": [
+    {
+      "runId": "p1",
+      "items": [
+        {
+          "key": "entry:frontend/index.html",
+          "ok": false,
+          "detail": "缺失（引擎拥有件未直出）"
+        },
+        {
+          "key": "entry:frontend/src/main.ts",
+          "ok": false,
+          "detail": "缺失（引擎拥有件未直出）"
+        },
+        {
+          "key": "entry:frontend/src/App.vue",
+          "ok": false,
+          "detail": "缺失（引擎拥有件未直出）"
+        },
+        {
+          "key": "entry:frontend/src/router/index.ts",
+          "ok": false,
+          "detail": "缺失（引擎拥有件未直出）"
+        },
+        {
+          "key": "indexHtml:scriptTarget",
+          "ok": null,
+          "detail": "未解析到脚本入口（可能无 index.html）"
+        },
+        {
+          "key": "java:syntax",
+          "ok": null,
+          "detail": "本轮无 Java 文件"
+        },
+        {
+          "key": "evidence:testReports",
+          "ok": false,
+          "detail": "测试报告 0 份（期望 ≥ 1）"
+        },
+        {
+          "key": "contract:present",
+          "ok": false,
+          "detail": "缺失（工位将按无契约运行）"
+        },
+        {
+          "key": "artifact:fileCount",
+          "ok": null,
+          "detail": "产物 53 个文件"
+        }
+      ],
+      "pass": 0,
+      "fail": 6,
+      "skip": 3,
+      "ratio": 0
+    },
+    {
+      "runId": "p2",
+      "items": [
+        {
+          "key": "entry:frontend/index.html",
+          "ok": true,
+          "detail": "存在"
+        },
+        {
+          "key": "entry:frontend/src/main.ts",
+          "ok": false,
+          "detail": "缺失（引擎拥有件未直出）"
+        },
+        {
+          "key": "entry:frontend/src/App.vue",
+          "ok": false,
+          "detail": "缺失（引擎拥有件未直出）"
+        },
+        {
+          "key": "entry:frontend/src/router/index.ts",
+          "ok": true,
+          "detail": "存在"
+        },
+        {
+          "key": "indexHtml:scriptTarget",
+          "ok": true,
+          "detail": "指向 /src/main.jsx"
+        },
+        {
+          "key": "java:syntax",
+          "ok": null,
+          "detail": "本轮无 Java 文件"
+        },
+        {
+          "key": "evidence:testReports",
+          "ok": true,
+          "detail": "测试报告 5 份（期望 ≥ 1）"
+        },
+        {
+          "key": "contract:present",
+          "ok": true,
+          "detail": "存在（1181 字符）"
+        },
+        {
+          "key": "artifact:fileCount",
+          "ok": null,
+          "detail": "产物 74 个文件"
+        }
+      ],
+      "pass": 5,
+      "fail": 2,
+      "skip": 2,
+      "ratio": 0.7142857142857143
+    },
+    {
+      "runId": "p4",
+      "items": [
+        {
+          "key": "entry:frontend/index.html",
+          "ok": true,
+          "detail": "存在"
+        },
+        {
+          "key": "entry:frontend/src/main.ts",
+          "ok": true,
+          "detail": "存在"
+        },
+        {
+          "key": "entry:frontend/src/App.vue",
+          "ok": true,
+          "detail": "存在"
+        },
+        {
+          "key": "entry:frontend/src/router/index.ts",
+          "ok": true,
+          "detail": "存在"
+        },
+        {
+          "key": "indexHtml:scriptTarget",
+          "ok": true,
+          "detail": "指向 /src/main.ts"
+        },
+        {
+          "key": "java:syntax",
+          "ok": null,
+          "detail": "本轮无 Java 文件"
+        },
+        {
+          "key": "evidence:testReports",
+          "ok": true,
+          "detail": "测试报告 13 份（期望 ≥ 1）"
+        },
+        {
+          "key": "contract:present",
+          "ok": true,
+          "detail": "存在（1566 字符）"
+        },
+        {
+          "key": "artifact:fileCount",
+          "ok": null,
+          "detail": "产物 104 个文件"
+        }
+      ],
+      "pass": 7,
+      "fail": 0,
+      "skip": 2,
+      "ratio": 1
+    },
+    {
+      "runId": "p9",
+      "items": [
+        {
+          "key": "entry:frontend/index.html",
+          "ok": true,
+          "detail": "存在"
+        },
+        {
+          "key": "entry:frontend/src/main.ts",
+          "ok": false,
+          "detail": "缺失（引擎拥有件未直出）"
+        },
+        {
+          "key": "entry:frontend/src/App.vue",
+          "ok": false,
+          "detail": "缺失（引擎拥有件未直出）"
+        },
+        {
+          "key": "entry:frontend/src/router/index.ts",
+          "ok": true,
+          "detail": "存在"
+        },
+        {
+          "key": "indexHtml:scriptTarget",
+          "ok": true,
+          "detail": "指向 /src/main.ts"
+        },
+        {
+          "key": "java:syntax",
+          "ok": true,
+          "detail": "语法错 0 处"
+        },
+        {
+          "key": "java:encoding",
+          "ok": true,
+          "detail": "编码错 0 处"
+        },
+        {
+          "key": "java:unclassified",
+          "ok": true,
+          "detail": "未归类诊断 0 处"
+        },
+        {
+          "key": "java:typeLayer",
+          "ok": null,
+          "detail": "依赖/类型诊断 100 处（无 classpath，需 M3 用 mvnw compile 复核）"
+        },
+        {
+          "key": "evidence:testReports",
+          "ok": false,
+          "detail": "测试报告 0 份（期望 ≥ 1）"
+        },
+        {
+          "key": "contract:present",
+          "ok": true,
+          "detail": "存在（1619 字符）"
+        },
+        {
+          "key": "artifact:fileCount",
+          "ok": null,
+          "detail": "产物 45 个文件"
+        }
+      ],
+      "pass": 7,
+      "fail": 3,
+      "skip": 2,
+      "ratio": 0.7
+    }
+  ],
+  "snapshots": [
+    {
+      "runId": "p1",
+      "dir": "F:\\code\\project\\CrewForge\\runs\\p1",
+      "fileCount": 53,
+      "byExt": {
+        ".json": 3,
+        ".development": 2,
+        ".example": 2,
+        "(none)": 6,
+        ".py": 24,
+        ".sql": 2,
+        ".txt": 2,
+        ".js": 6,
+        ".ts": 1,
+        ".vue": 5
+      },
+      "entryFiles": [
+        {
+          "path": "frontend/index.html",
+          "present": false
+        },
+        {
+          "path": "frontend/src/main.ts",
+          "present": false
+        },
+        {
+          "path": "frontend/src/App.vue",
+          "present": false
+        },
+        {
+          "path": "frontend/src/router/index.ts",
+          "present": false
+        }
+      ],
+      "indexHtmlScript": null,
+      "testReports": 0,
+      "taskEvidence": 0,
+      "hasContracts": false,
+      "contractsChars": 0,
+      "frontendNodeModules": false,
+      "java": {
+        "fileCount": 0,
+        "checked": false,
+        "summary": "无 Java 文件"
+      }
+    },
+    {
+      "runId": "p2",
+      "dir": "F:\\code\\project\\CrewForge\\runs\\p2",
+      "fileCount": 74,
+      "byExt": {
+        ".json": 3,
+        "(none)": 4,
+        ".example": 2,
+        ".js": 40,
+        ".prisma": 1,
+        ".md": 7,
+        ".sql": 1,
+        ".html": 1,
+        ".jsx": 9,
+        ".tsx": 3,
+        ".css": 2,
+        ".ts": 1
+      },
+      "entryFiles": [
+        {
+          "path": "frontend/index.html",
+          "present": true
+        },
+        {
+          "path": "frontend/src/main.ts",
+          "present": false
+        },
+        {
+          "path": "frontend/src/App.vue",
+          "present": false
+        },
+        {
+          "path": "frontend/src/router/index.ts",
+          "present": true
+        }
+      ],
+      "indexHtmlScript": "/src/main.jsx",
+      "testReports": 5,
+      "taskEvidence": 0,
+      "hasContracts": true,
+      "contractsChars": 1181,
+      "frontendNodeModules": false,
+      "java": {
+        "fileCount": 0,
+        "checked": false,
+        "summary": "无 Java 文件"
+      }
+    },
+    {
+      "runId": "p4",
+      "dir": "F:\\code\\project\\CrewForge\\runs\\p4",
+      "fileCount": 104,
+      "byExt": {
+        ".json": 5,
+        "(none)": 3,
+        ".example": 2,
+        ".db": 1,
+        ".db-shm": 1,
+        ".db-wal": 1,
+        ".js": 44,
+        ".sql": 2,
+        ".md": 15,
+        ".lock": 1,
+        ".html": 1,
+        ".vue": 22,
+        ".ts": 4,
+        ".css": 1,
+        ".mjs": 1
+      },
+      "entryFiles": [
+        {
+          "path": "frontend/index.html",
+          "present": true
+        },
+        {
+          "path": "frontend/src/main.ts",
+          "present": true
+        },
+        {
+          "path": "frontend/src/App.vue",
+          "present": true
+        },
+        {
+          "path": "frontend/src/router/index.ts",
+          "present": true
+        }
+      ],
+      "indexHtmlScript": "/src/main.ts",
+      "testReports": 13,
+      "taskEvidence": 0,
+      "hasContracts": true,
+      "contractsChars": 1566,
+      "frontendNodeModules": true,
+      "java": {
+        "fileCount": 0,
+        "checked": false,
+        "summary": "无 Java 文件"
+      }
+    },
+    {
+      "runId": "p9",
+      "dir": "F:\\code\\project\\CrewForge\\runs\\p9",
+      "fileCount": 45,
+      "byExt": {
+        ".json": 3,
+        "(none)": 3,
+        ".xml": 2,
+        ".java": 21,
+        ".yml": 1,
+        ".md": 1,
+        ".example": 1,
+        ".lock": 1,
+        ".html": 1,
+        ".ts": 4,
+        ".css": 1,
+        ".vue": 4,
+        ".sql": 1,
+        ".png": 1
+      },
+      "entryFiles": [
+        {
+          "path": "frontend/index.html",
+          "present": true
+        },
+        {
+          "path": "frontend/src/main.ts",
+          "present": false
+        },
+        {
+          "path": "frontend/src/App.vue",
+          "present": false
+        },
+        {
+          "path": "frontend/src/router/index.ts",
+          "present": true
+        }
+      ],
+      "indexHtmlScript": "/src/main.ts",
+      "testReports": 0,
+      "taskEvidence": 0,
+      "hasContracts": true,
+      "contractsChars": 1619,
+      "frontendNodeModules": true,
+      "java": {
+        "fileCount": 21,
+        "checked": true,
+        "report": {
+          "exitCode": 1,
+          "syntax": [],
+          "dependency": [
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 15,
+              "message": "package org.slf4j does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:15: error: package org.slf4j does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 16,
+              "message": "package org.slf4j does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:16: error: package org.slf4j does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 17,
+              "message": "package org.springframework.dao does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:17: error: package org.springframework.dao does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 18,
+              "message": "package org.springframework.dao does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:18: error: package org.springframework.dao does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 19,
+              "message": "package org.springframework.http does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:19: error: package org.springframework.http does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 20,
+              "message": "package org.springframework.http does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:20: error: package org.springframework.http does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 21,
+              "message": "package org.springframework.http.converter does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:21: error: package org.springframework.http.converter does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 22,
+              "message": "package org.springframework.jdbc.core does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:22: error: package org.springframework.jdbc.core does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 23,
+              "message": "package org.springframework.jdbc.support does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:23: error: package org.springframework.jdbc.support does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 24,
+              "message": "package org.springframework.jdbc.support does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:24: error: package org.springframework.jdbc.support does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 25,
+              "message": "package org.springframework.security.authentication does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:25: error: package org.springframework.security.authentication does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 26,
+              "message": "package org.springframework.security.core does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:26: error: package org.springframework.security.core does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 27,
+              "message": "package org.springframework.security.core.context does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:27: error: package org.springframework.security.core.context does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 28,
+              "message": "package org.springframework.transaction does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:28: error: package org.springframework.transaction does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 29,
+              "message": "package org.springframework.transaction.support does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:29: error: package org.springframework.transaction.support does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 30,
+              "message": "package org.springframework.web.bind.annotation does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:30: error: package org.springframework.web.bind.annotation does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 31,
+              "message": "package org.springframework.web.bind.annotation does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:31: error: package org.springframework.web.bind.annotation does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 32,
+              "message": "package org.springframework.web.bind.annotation does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:32: error: package org.springframework.web.bind.annotation does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 33,
+              "message": "package org.springframework.web.bind.annotation does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:33: error: package org.springframework.web.bind.annotation does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 34,
+              "message": "package org.springframework.web.bind.annotation does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:34: error: package org.springframework.web.bind.annotation does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 35,
+              "message": "package org.springframework.web.bind.annotation does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:35: error: package org.springframework.web.bind.annotation does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 37,
+              "message": "package com.fasterxml.jackson.annotation does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:37: error: package com.fasterxml.jackson.annotation does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 39,
+              "message": "package jakarta.servlet.http does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:39: error: package jakarta.servlet.http does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 40,
+              "message": "package jakarta.servlet.http does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:40: error: package jakarta.servlet.http does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 91,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:91: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 92,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:92: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 204,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:204: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 206,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:206: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 208,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:208: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 212,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:212: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 212,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:212: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 231,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:231: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 231,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:231: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 272,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:272: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 271,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:271: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 416,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:416: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 482,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:482: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 528,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:528: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 528,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:528: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 533,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:533: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 537,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:537: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 542,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:542: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java",
+              "line": 548,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\controller\\AdminAccountController.java:548: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountCreateRequest.java",
+              "line": 3,
+              "message": "package jakarta.validation.constraints does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountCreateRequest.java:3: error: package jakarta.validation.constraints does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountCreateRequest.java",
+              "line": 4,
+              "message": "package jakarta.validation.constraints does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountCreateRequest.java:4: error: package jakarta.validation.constraints does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountCreateRequest.java",
+              "line": 5,
+              "message": "package lombok does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountCreateRequest.java:5: error: package lombok does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountCreateRequest.java",
+              "line": 6,
+              "message": "package lombok does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountCreateRequest.java:6: error: package lombok does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountCreateRequest.java",
+              "line": 7,
+              "message": "package lombok does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountCreateRequest.java:7: error: package lombok does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountCreateRequest.java",
+              "line": 49,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountCreateRequest.java:49: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountCreateRequest.java",
+              "line": 50,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountCreateRequest.java:50: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountCreateRequest.java",
+              "line": 51,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountCreateRequest.java:51: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountCreateResponse.java",
+              "line": 5,
+              "message": "package lombok does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountCreateResponse.java:5: error: package lombok does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountCreateResponse.java",
+              "line": 6,
+              "message": "package lombok does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountCreateResponse.java:6: error: package lombok does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountCreateResponse.java",
+              "line": 7,
+              "message": "package lombok does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountCreateResponse.java:7: error: package lombok does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountCreateResponse.java",
+              "line": 53,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountCreateResponse.java:53: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountCreateResponse.java",
+              "line": 54,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountCreateResponse.java:54: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountCreateResponse.java",
+              "line": 55,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountCreateResponse.java:55: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountListItem.java",
+              "line": 5,
+              "message": "package lombok does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountListItem.java:5: error: package lombok does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountListItem.java",
+              "line": 6,
+              "message": "package lombok does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountListItem.java:6: error: package lombok does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountListItem.java",
+              "line": 7,
+              "message": "package lombok does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountListItem.java:7: error: package lombok does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountListItem.java",
+              "line": 45,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountListItem.java:45: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountListItem.java",
+              "line": 46,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountListItem.java:46: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountListItem.java",
+              "line": 47,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\dto\\AccountListItem.java:47: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\Account.java",
+              "line": 5,
+              "message": "package com.baomidou.mybatisplus.annotation does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\Account.java:5: error: package com.baomidou.mybatisplus.annotation does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\Account.java",
+              "line": 6,
+              "message": "package com.baomidou.mybatisplus.annotation does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\Account.java:6: error: package com.baomidou.mybatisplus.annotation does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\Account.java",
+              "line": 7,
+              "message": "package com.baomidou.mybatisplus.annotation does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\Account.java:7: error: package com.baomidou.mybatisplus.annotation does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\Account.java",
+              "line": 8,
+              "message": "package com.baomidou.mybatisplus.annotation does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\Account.java:8: error: package com.baomidou.mybatisplus.annotation does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\Account.java",
+              "line": 9,
+              "message": "package com.fasterxml.jackson.annotation does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\Account.java:9: error: package com.fasterxml.jackson.annotation does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\Account.java",
+              "line": 11,
+              "message": "package lombok does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\Account.java:11: error: package lombok does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\Account.java",
+              "line": 12,
+              "message": "package lombok does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\Account.java:12: error: package lombok does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\Account.java",
+              "line": 54,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\Account.java:54: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\Account.java",
+              "line": 55,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\Account.java:55: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\Account.java",
+              "line": 56,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\Account.java:56: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\ActivationCode.java",
+              "line": 5,
+              "message": "package com.baomidou.mybatisplus.annotation does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\ActivationCode.java:5: error: package com.baomidou.mybatisplus.annotation does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\ActivationCode.java",
+              "line": 6,
+              "message": "package com.baomidou.mybatisplus.annotation does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\ActivationCode.java:6: error: package com.baomidou.mybatisplus.annotation does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\ActivationCode.java",
+              "line": 7,
+              "message": "package com.baomidou.mybatisplus.annotation does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\ActivationCode.java:7: error: package com.baomidou.mybatisplus.annotation does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\ActivationCode.java",
+              "line": 8,
+              "message": "package com.baomidou.mybatisplus.annotation does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\ActivationCode.java:8: error: package com.baomidou.mybatisplus.annotation does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\ActivationCode.java",
+              "line": 10,
+              "message": "package lombok does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\ActivationCode.java:10: error: package lombok does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\ActivationCode.java",
+              "line": 11,
+              "message": "package lombok does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\ActivationCode.java:11: error: package lombok does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\ActivationCode.java",
+              "line": 53,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\ActivationCode.java:53: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\ActivationCode.java",
+              "line": 54,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\ActivationCode.java:54: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\ActivationCode.java",
+              "line": 55,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\entity\\ActivationCode.java:55: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\mapper\\AccountMapper.java",
+              "line": 5,
+              "message": "package org.apache.ibatis.annotations does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\mapper\\AccountMapper.java:5: error: package org.apache.ibatis.annotations does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\mapper\\AccountMapper.java",
+              "line": 6,
+              "message": "package org.apache.ibatis.annotations does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\mapper\\AccountMapper.java:6: error: package org.apache.ibatis.annotations does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\mapper\\AccountMapper.java",
+              "line": 7,
+              "message": "package org.apache.ibatis.annotations does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\mapper\\AccountMapper.java:7: error: package org.apache.ibatis.annotations does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\mapper\\AccountMapper.java",
+              "line": 9,
+              "message": "package com.baomidou.mybatisplus.core.mapper does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\mapper\\AccountMapper.java:9: error: package com.baomidou.mybatisplus.core.mapper does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\mapper\\AccountMapper.java",
+              "line": 50,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\mapper\\AccountMapper.java:50: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\mapper\\AccountMapper.java",
+              "line": 49,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\mapper\\AccountMapper.java:49: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\mapper\\ActivationCodeMapper.java",
+              "line": 3,
+              "message": "package org.apache.ibatis.annotations does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\mapper\\ActivationCodeMapper.java:3: error: package org.apache.ibatis.annotations does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\mapper\\ActivationCodeMapper.java",
+              "line": 4,
+              "message": "package org.apache.ibatis.annotations does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\mapper\\ActivationCodeMapper.java:4: error: package org.apache.ibatis.annotations does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\mapper\\ActivationCodeMapper.java",
+              "line": 5,
+              "message": "package org.apache.ibatis.annotations does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\mapper\\ActivationCodeMapper.java:5: error: package org.apache.ibatis.annotations does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\mapper\\ActivationCodeMapper.java",
+              "line": 7,
+              "message": "package com.baomidou.mybatisplus.core.mapper does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\mapper\\ActivationCodeMapper.java:7: error: package com.baomidou.mybatisplus.core.mapper does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\mapper\\ActivationCodeMapper.java",
+              "line": 52,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\mapper\\ActivationCodeMapper.java:52: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\mapper\\ActivationCodeMapper.java",
+              "line": 51,
+              "message": "cannot find symbol",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\mapper\\ActivationCodeMapper.java:51: error: cannot find symbol"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\service\\AdminAccountService.java",
+              "line": 15,
+              "message": "package org.slf4j does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\service\\AdminAccountService.java:15: error: package org.slf4j does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\service\\AdminAccountService.java",
+              "line": 16,
+              "message": "package org.slf4j does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\service\\AdminAccountService.java:16: error: package org.slf4j does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\service\\AdminAccountService.java",
+              "line": 17,
+              "message": "package org.springframework.dao does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\service\\AdminAccountService.java:17: error: package org.springframework.dao does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\service\\AdminAccountService.java",
+              "line": 18,
+              "message": "package org.springframework.dao does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\service\\AdminAccountService.java:18: error: package org.springframework.dao does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\service\\AdminAccountService.java",
+              "line": 19,
+              "message": "package org.springframework.jdbc.core does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\service\\AdminAccountService.java:19: error: package org.springframework.jdbc.core does not exist"
+            },
+            {
+              "kind": "dependency",
+              "file": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\service\\AdminAccountService.java",
+              "line": 20,
+              "message": "package org.springframework.jdbc.support does not exist",
+              "raw": "F:\\code\\project\\CrewForge\\runs\\p9\\backend\\src\\main\\java\\com\\crewforge\\account\\service\\AdminAccountService.java:20: error: package org.springframework.jdbc.support does not exist"
+            }
+          ],
+          "encoding": [],
+          "other": [],
+          "syntaxClean": true
+        },
+        "summary": "exit=1 语法=0 编码=0 依赖/类型=100 未归类=0"
+      }
+    }
+  ]
+}
