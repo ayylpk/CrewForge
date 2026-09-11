@@ -103,6 +103,32 @@ export async function waitForHttp(
     return { ok: false, status: last, attempts, durationMs: Date.now() - t0 };
 }
 
+/** TCP 就绪探测：**MySQL 不说 HTTP**，用 HTTP GET 等它会永远失败——必须按端口探连接 */
+export async function waitForTcp(
+    host: string, port: number,
+    opts: { timeoutMs?: number; intervalMs?: number } = {},
+): Promise<WaitResult> {
+    const timeoutMs = opts.timeoutMs ?? 60_000;
+    const intervalMs = opts.intervalMs ?? 1_000;
+    const net = await import("node:net");
+    const t0 = Date.now();
+    let attempts = 0;
+    while (Date.now() - t0 < timeoutMs) {
+        attempts++;
+        const ok = await new Promise<boolean>(resolve => {
+            const sock = net.connect({ host, port });
+            const done = (v: boolean) => { sock.removeAllListeners(); sock.destroy(); resolve(v); };
+            sock.setTimeout(2_000);
+            sock.once("connect", () => done(true));
+            sock.once("timeout", () => done(false));
+            sock.once("error", () => done(false));
+        });
+        if (ok) return { ok: true, attempts, durationMs: Date.now() - t0 };
+        await new Promise(r => setTimeout(r, intervalMs));
+    }
+    return { ok: false, attempts, durationMs: Date.now() - t0 };
+}
+
 // ---------- HTTP 契约执行（把生成的脚本真跑一遍） ----------
 export interface ContractRunResult {
     outcome: "ok" | "failed" | "env_error" | "tool_error";
