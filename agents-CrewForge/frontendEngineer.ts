@@ -33,6 +33,12 @@ import { runtimeSettings } from "./settings";
 import { assemblePrompt, buildStablePrefix, fingerprint } from "./engine/steps/promptPrefix";
 import { resolveStackProfile, type StackProfile } from "./engine/stacks/profile";
 import { findComponentTagIssues, shouldScanComponentTags } from "./engine/stacks/components";
+import { verifyWrittenTask, type TaskVerifyResult } from "./engine/exec/verify/taskVerify";
+import { FailureLedger } from "./engine/exec/verify/ledger";
+import path from "node:path";
+
+/** M3-a（9/10）：单任务构建返工次数上限 */
+const MAX_BUILD_REPAIRS = 2;
 
 const FRONTEND_MODEL_JSON = JSON.stringify({
     provider: "deepseek",
@@ -152,6 +158,12 @@ function stackContextOf(engineName: string, task: ExecTask): StackContext {
 export class FrontendEngineer extends BaseAgent {
     /** T7b：工具模式一次性判死（同 backendEngineer） */
     private toolModeDead = false;
+    /** M3-a：失败账本（同一签名 + 同一修法重复即升级） */
+    private readonly ledger = new FailureLedger();
+    /** M3-a：单任务已用构建返工次数 */
+    private readonly buildRepairs = new Map<string, number>();
+    /** 最近一次执行式验证结果（供报告/落库） */
+    private lastVerify: TaskVerifyResult | null = null;
     /** queue1：等设计稿的任务 */
     private readonly taskQueue = new WorkQueue<{ task: ExecTask }>();
     /** queue2：设计稿完成、等实现的任务 */
@@ -294,12 +306,64 @@ export class FrontendEngineer extends BaseAgent {
             await registerRoutes(pid, task, await loadContracts())
                 .catch(e => console.warn(`[${this.name}] ${task.id} 路由机械登记异常（旁路）:`, (e as Error).message));
             await flushWorkspacePersists();
+            // ★ M3-a（9/10）：写盘不是交付——前端跑真实 `build`（tsc + 打包）作为最接近"能不能跑"的廉价判据
+            const verdict = await this.verifyAfterWrite(task);
+            if (verdict === "rework") continue;
+            if (verdict === "failed") {
+                this.send("merger", { type: "task_result", task, success: false });
+                continue;
+            }
             console.log(`[${this.name}] ${task.id} 前端实现已写入 workspace/`);
             this.send("merger", { type: "task_result", task, success: true });
             } finally {
                 g.release();   // ★ 真落盘或判失败之后才归还（backend 同款，finally 罩住全部 continue/异常路径）
             }
         }
+    }
+
+    /**
+     * M3-a：写盘后执行式验证。语义与 backendEngineer.verifyAfterWrite 完全一致：
+     *   构建通过 → delivered；构建不过 → 有界返工（把构建诊断喂回）；环境/未验证 → 放行但标注"未验证"。
+     */
+    private async verifyAfterWrite(task: ExecTask): Promise<"delivered" | "rework" | "failed"> {
+        const pid = currentProjectId();
+        if (pid == null) return "delivered";
+        const profile = resolveStackProfile(resolveProjectBaseline(task.stack));
+        const res = await verifyWrittenTask({
+            projectDir: projectDir(pid),
+            layer: "frontend",
+            profile,
+            logDir: path.join(projectDir(pid), "_verify"),
+        });
+        this.lastVerify = res;
+
+        if (res.outcome === "ok") {
+            console.log(`[${this.name}] ${task.id} 执行式验证通过：${res.summary}`);
+            return "delivered";
+        }
+        if (res.outcome === "compile_error") {
+            const decision = this.ledger.record(res.signature, "compile_repair", "build", res.feedback[0] ?? "");
+            const used = this.buildRepairs.get(task.id) ?? 0;
+            if (decision.shouldEscalate || used >= MAX_BUILD_REPAIRS) {
+                console.warn(`[${this.name}] ${task.id} 构建返工停止：${decision.reason ?? `已返工 ${used} 次仍未过`}`);
+                console.warn(`[${this.name}] ${task.id} 最后一次诊断：${res.feedback.slice(0, 3).join(" | ")}`);
+                return "failed";
+            }
+            this.buildRepairs.set(task.id, used + 1);
+            console.warn(`[${this.name}] ${task.id} 构建未过（第 ${used + 1} 次返工，${res.summary}）：${res.feedback.slice(0, 2).join(" | ")}`);
+            this.taskQueue.push({
+                task: {
+                    ...task,
+                    files: task.files,
+                    description: task.description
+                        + `\n\n【构建验证返工（第 ${used + 1} 次，必须逐条解决；错误原文如下）】\n`
+                        + res.feedback.join("\n"),
+                },
+            });
+            return "rework";
+        }
+        console.warn(`[${this.name}] ${task.id} 未完成执行式验证（${res.outcome}）：${res.summary} —— 按"未验证"交付，不计入通过`);
+        return "delivered";
     }
 
     private async generateFile(

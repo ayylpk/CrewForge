@@ -29,6 +29,10 @@ import { FILE_TOOLS, TOOL_PROTOCOL, runToolFileJob, type ToolExecCtx } from "./f
 import { runtimeSettings } from "./settings";
 import { baselinePromptBlock, resolveProjectBaseline } from "./baseline";
 import { assemblePrompt, buildStablePrefix, fingerprint } from "./engine/steps/promptPrefix";
+import path from "node:path";
+import { resolveStackProfile } from "./engine/stacks/profile";
+import { verifyWrittenTask, type TaskVerifyResult } from "./engine/exec/verify/taskVerify";
+import { FailureLedger } from "./engine/exec/verify/ledger";
 
 const BACKEND_MODEL_JSON = JSON.stringify({
     provider: "deepseek",
@@ -43,6 +47,13 @@ const BACKEND_MODEL_JSON = JSON.stringify({
  * 再烧一次调用做骨架属纯开销（runs/p9 是 6 个任务 6 次伪代码调用）。
  */
 const SKIP_PSEUDO_MAX_FILES = 3;
+
+/** M3-a（9/10）：单任务编译返工次数上限（超限则判失败走既有返工链，不无限烧） */
+const MAX_COMPILE_REPAIRS = 2;
+
+/** 生成项目常无 mvnw，用引擎仓库自带的 wrapper 兜底（可用 CREWFORGE_MVNW 覆盖） */
+const REPO_MVNW = process.env.CREWFORGE_MVNW?.trim()
+    || path.resolve(import.meta.dir, "..", "backed-CrewForge", "mvnw.cmd");
 
 // ---------- 提示词 ----------
 
@@ -109,6 +120,12 @@ function extractGeneratedCode(content: unknown): string | null {
 export class BackendEngineer extends BaseAgent {
     /** T7b：工具模式一次性判死（端点不支持 function-calling 等）→ 本进程全退回单发老路 */
     private toolModeDead = false;
+    /** M3-a：失败账本（同一签名 + 同一修法出现第二次即升级，禁止原地重复） */
+    private readonly ledger = new FailureLedger();
+    /** M3-a：单任务已用编译返工次数 */
+    private readonly compileRepairs = new Map<string, number>();
+    /** 最近一次执行式验证结果（供报告/落库，M8 消费） */
+    private lastVerify: TaskVerifyResult | null = null;
     /** queue1：等伪代码的任务 */
     private readonly taskQueue = new WorkQueue<{ task: ExecTask }>();
     /** queue2：伪代码完成、等代码的任务 */
@@ -245,12 +262,68 @@ export class BackendEngineer extends BaseAgent {
                 console.log(`已写入 ${full}`);
             }
             await flushWorkspacePersists();
+            // ★ M3-a（9/10）：**写盘不是交付**——立刻用真实命令验证（Java = 真实 classpath 编译）。
+            //   编译不过 → 带诊断返工（有界）；环境/验证器缺失 → 放行但显式标注"未验证"，绝不计入通过。
+            const verdict = await this.verifyAfterWrite(task);
+            if (verdict === "rework") continue;                       // 已重新入队，本轮不报成功
+            if (verdict === "failed") {
+                this.send("merger", { type: "task_result", task, success: false });
+                continue;
+            }
             console.log(`[${this.name}] ${task.id} 后端实现已写入 workspace/`);
             this.send("merger", { type: "task_result", task, success: true });
             } finally {
                 g.release();   // ★ 真落盘或判失败之后才归还（用户拍板的归还时机；finally 罩住全部 continue/异常路径）
             }
         }
+    }
+
+    /**
+     * M3-a：写盘后执行式验证（自我纠正闭环的入口）。
+     *   · 编译通过      → delivered
+     *   · 编译不过      → 有界返工（把 javac 原文喂回实现器），超限/账本判定重复 → failed
+     *   · 环境/未验证   → delivered，但**明确标注未验证**（未验证 ≠ 通过）
+     */
+    private async verifyAfterWrite(task: ExecTask): Promise<"delivered" | "rework" | "failed"> {
+        const pid = currentProjectId();
+        if (pid == null) return "delivered";
+        const profile = resolveStackProfile(resolveProjectBaseline(task.stack));
+        const res = await verifyWrittenTask({
+            projectDir: projectDir(pid),
+            layer: "backend",
+            profile,
+            mvnwPath: REPO_MVNW,
+            logDir: path.join(projectDir(pid), "_verify"),
+        });
+        this.lastVerify = res;
+
+        if (res.outcome === "ok") {
+            console.log(`[${this.name}] ${task.id} 执行式验证通过：${res.summary}`);
+            return "delivered";
+        }
+        if (res.outcome === "compile_error") {
+            const decision = this.ledger.record(res.signature, "compile_repair", "compile", res.feedback[0] ?? "");
+            const used = this.compileRepairs.get(task.id) ?? 0;
+            if (decision.shouldEscalate || used >= MAX_COMPILE_REPAIRS) {
+                console.warn(`[${this.name}] ${task.id} 编译返工停止：${decision.reason ?? `已返工 ${used} 次仍未过`}`);
+                console.warn(`[${this.name}] ${task.id} 最后一次诊断：${res.feedback.slice(0, 3).join(" | ")}`);
+                return "failed";
+            }
+            this.compileRepairs.set(task.id, used + 1);
+            console.warn(`[${this.name}] ${task.id} 编译未过（第 ${used + 1} 次返工，${res.summary}）：${res.feedback.slice(0, 2).join(" | ")}`);
+            this.taskQueue.push({
+                task: {
+                    ...task,
+                    description: task.description
+                        + `\n\n【编译验证返工（第 ${used + 1} 次，必须逐条解决；错误原文如下）】\n`
+                        + res.feedback.join("\n"),
+                },
+            });
+            return "rework";
+        }
+        // env_error / tool_error / skipped_unverified：环境或验证器缺失，不是代码错
+        console.warn(`[${this.name}] ${task.id} 未完成执行式验证（${res.outcome}）：${res.summary} —— 按"未验证"交付，不计入通过`);
+        return "delivered";
     }
 
     private async generateFile(
