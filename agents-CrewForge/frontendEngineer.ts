@@ -31,6 +31,8 @@ import { gate } from "./concurrency";
 import { FILE_TOOLS, TOOL_PROTOCOL, runToolFileJob, type ToolExecCtx } from "./fileTools";
 import { runtimeSettings } from "./settings";
 import { assemblePrompt, buildStablePrefix, fingerprint } from "./engine/steps/promptPrefix";
+import { CODE_QUALITY_RULES } from "./engine/steps/codeQualityRules";
+import { fitContext, describeFit, DEFAULT_CONTEXT_BUDGET } from "./engine/steps/contextBudget";
 import { resolveStackProfile, type StackProfile } from "./engine/stacks/profile";
 import { findComponentTagIssues, shouldScanComponentTags } from "./engine/stacks/components";
 import { verifyWrittenTask, type TaskVerifyResult } from "./engine/exec/verify/taskVerify";
@@ -428,7 +430,7 @@ export class FrontendEngineer extends BaseAgent {
         // ★ C-1（9/10 成本轨）：稳定段定序装配（角色→基线→契约→文件树[→工具协议]），易变段只许追加在后
         const stack = stackContextOf(this.name, task);                     // ★ 栈驱动规约（组件库/封装/样式变量）
         const stackRule = stack.profile.componentRules(finalBaseline);
-        const stableSections = { role: this.filePrompt + stack.rule, baseline: dynamicBaseline, contract, fileTree: treeBlock };
+        const stableSections = { role: this.filePrompt + stack.rule + CODE_QUALITY_RULES, baseline: dynamicBaseline, contract, fileTree: treeBlock };
         console.log(`[${this.name}] ${task.id} ${filePath} 栈=${stack.label} 验证=${stack.verified} 稳定前缀 ${fingerprint(buildStablePrefix(stableSections))}（${buildStablePrefix(stableSections).length} 字符）`);
         // ---- T7b 工具模式（默认关，backendEngineer 同注释）。幻觉闸挂进工具的 extraGate 位：
         // write/edit 内容里的越库组件标签红=拒绝落盘+错因回给模型（9/5 闸门语义，9/10 改为**栈驱动**：
@@ -473,12 +475,16 @@ export class FrontendEngineer extends BaseAgent {
                 const res = await invokeWithTimeout<any>(`${task.id} ${filePath}`, guard.timeoutMs, sig => model.invoke([
                     new SystemMessage(
                         assemblePrompt(stableSections, [
-                            `\n\n## 当前子任务\n${JSON.stringify(fileTask, null, 2)}`,
-                            designHint,
-                            existingContent,
-                            dbExistingPrompt,
-                            `\n\n## 主题变量\n${DEFAULT_THEME}\n\n## 请求封装（固定路径 ${REQUEST_WRAPPER_PATH}，地基已代码保证落盘）\n${DEFAULT_REQUEST}`,
-                            feedback,
+                            // ★ 上下文预算：essential=返工意见/目标文件；其余按优先级填充
+                            fitContext([
+                                { name: "返工意见", text: feedback, priority: 9, essential: true },
+                                { name: "目标文件", text: `\n\n## 当前子任务路径\n${filePath}`, priority: 9, essential: true },
+                                { name: "设计稿", text: designHint, priority: 6 },
+                                { name: "现有内容", text: dbExistingPrompt, priority: 5 },
+                                { name: "当前子任务", text: `\n\n## 当前子任务\n${JSON.stringify(fileTask, null, 2)}`, priority: 5 },
+                                { name: "本任务其他文件", text: existingContent, priority: 2 },
+                                { name: "主题与封装", text: `\n\n## 主题变量\n${DEFAULT_THEME}\n\n## 请求封装（固定路径 ${REQUEST_WRAPPER_PATH}，地基已代码保证落盘）\n${DEFAULT_REQUEST}`, priority: 4 },
+                            ], DEFAULT_CONTEXT_BUDGET).text,
                         ])
                     ),
                 ], { signal: sig }));

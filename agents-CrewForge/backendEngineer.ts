@@ -29,6 +29,8 @@ import { FILE_TOOLS, TOOL_PROTOCOL, runToolFileJob, type ToolExecCtx } from "./f
 import { runtimeSettings } from "./settings";
 import { baselinePromptBlock, resolveProjectBaseline } from "./baseline";
 import { assemblePrompt, buildStablePrefix, fingerprint } from "./engine/steps/promptPrefix";
+import { CODE_QUALITY_RULES } from "./engine/steps/codeQualityRules";
+import { fitContext, describeFit, DEFAULT_CONTEXT_BUDGET } from "./engine/steps/contextBudget";
 import path from "node:path";
 import { resolveStackProfile } from "./engine/stacks/profile";
 import { verifyWrittenTask, type TaskVerifyResult } from "./engine/exec/verify/taskVerify";
@@ -390,7 +392,7 @@ export class BackendEngineer extends BaseAgent {
         // ★ C-1（9/10 成本轨）：稳定段定序装配（角色→基线→契约→文件树[→工具协议]），
         //   易变段（任务/文件路径/已写文件/现有内容/反馈）只许追加在后。指纹打日志，
         //   便于事后核对"本该命中缓存却没命中"的批次（成本可观测的第一步）。
-        const stableSections = { role: this.codePrompt, baseline: dynamicBaseline, contract, fileTree: treeBlock };
+        const stableSections = { role: this.codePrompt + CODE_QUALITY_RULES, baseline: dynamicBaseline, contract, fileTree: treeBlock };
         console.log(`[${this.name}] ${task.id} ${filePath} 稳定前缀 ${fingerprint(buildStablePrefix(stableSections))}（${buildStablePrefix(stableSections).length} 字符）`);
         // ---- T7b 工具模式（sys_settings.tool_mode 默认关）：runToolFileJob 走 read/write/edit 交付——
         // 工具内 write/edit 自带过闸+落盘+文件锁，落地即返回；未交付则退单发老路（C-4）；
@@ -431,13 +433,17 @@ export class BackendEngineer extends BaseAgent {
                 const res = await invokeWithTimeout<any>(`${task.id} 代码`, guard.timeoutMs, sig => model.invoke([
                     new SystemMessage(
                         assemblePrompt(stableSections, [
-                            `\n\n## 当前任务\n${JSON.stringify(fileTask, null, 2)}`,
-                            `\n\n## 当前目标文件\n${filePath}`,
-                            `\n\n## 项目路径\nworkspace`,
-                            taskExistingPrompt,
-                            existingPrompt,
-                            pseudoHint,
-                            feedback,
+                            // ★ 上下文预算（借标杆经验）：essential=返工意见/目标文件；其余按优先级填充，
+                            //   装不下就截断或丢弃并打日志——不静默丢、不无上限膨胀
+                            fitContext([
+                                { name: "返工意见", text: feedback, priority: 9, essential: true },
+                                { name: "目标文件", text: `\n\n## 当前目标文件\n${filePath}`, priority: 9, essential: true },
+                                { name: "伪代码骨架", text: pseudoHint, priority: 6 },
+                                { name: "现有代码", text: existingPrompt, priority: 5 },
+                                { name: "当前任务", text: `\n\n## 当前任务\n${JSON.stringify(fileTask, null, 2)}`, priority: 5 },
+                                { name: "本任务其他文件", text: taskExistingPrompt, priority: 2 },
+                                { name: "项目路径", text: "\n\n## 项目路径\nworkspace", priority: 1 },
+                            ], DEFAULT_CONTEXT_BUDGET).text,
                         ])
                     ),
                 ], { signal: sig }));
