@@ -30,6 +30,7 @@ import { baselinePromptBlock, resolveProjectBaseline } from "./baseline";
 import { gate } from "./concurrency";
 import { FILE_TOOLS, TOOL_PROTOCOL, runToolFileJob, type ToolExecCtx } from "./fileTools";
 import { runtimeSettings } from "./settings";
+import { assemblePrompt, buildStablePrefix, fingerprint } from "./engine/steps/promptPrefix";
 
 const FRONTEND_MODEL_JSON = JSON.stringify({
     provider: "deepseek",
@@ -37,6 +38,13 @@ const FRONTEND_MODEL_JSON = JSON.stringify({
     temperature: 0.1,
     thinking: false,
 });
+
+/**
+ * C-2（9/10 成本轨）：文件数低于此值的小任务跳过「设计稿」阶段。
+ * 阈值比后端保守（后端 <3、前端 <2）：前端设计稿承载页面结构/交互，价值高于后端伪代码，
+ * 因此只砍最小的单文件任务；多页面任务的整页原子性依赖设计稿，保留。
+ */
+const SKIP_DESIGN_MAX_FILES = 2;
 
 // Kept only so historical prompt exports remain import-compatible; production rules below use the selected stack.
 const TDESIGN_WHITELIST_TAGS = "兼容导出，不参与生产编排";
@@ -208,6 +216,12 @@ export class FrontendEngineer extends BaseAgent {
             const { task } = await this.taskQueue.pop();
             await g.acquire();
             try {
+                // C-2（9/10）：单文件小任务跳过设计稿阶段（阈值 SKIP_DESIGN_MAX_FILES）
+                if (task.files.length < SKIP_DESIGN_MAX_FILES) {
+                    console.log(`[${this.name}] ${task.id} 单文件任务跳过设计稿阶段，直接进实现工位（C-2 省一次调用）`);
+                    this.designQueue.push({ task, design: null });
+                    continue;
+                }
                 console.log(`[${this.name}] ${task.id} 进入设计工位`);
                 const design = await this.generateDesign(task);   // 失败返回 null（降级）
                 this.designQueue.push({ task, design });          // 塞进下游，立即回头
@@ -263,9 +277,12 @@ export class FrontendEngineer extends BaseAgent {
             const implementation: { filePath: string; code: string }[] = [];
             let failed = false;
             const pid = currentProjectId();   // p3 修②：收口登记路由用（generateFile 里同名变量互不干涉）
+            // ★ C-3（9/10）：文件树**快照**——整任务只算一次（磁盘 ∪ 计划内，不含本任务已写文件），
+            //   稳定段不随写盘增长 → 同任务后续调用前缀逐字节一致（缓存命中）；已写文件另由 existingContent 注入
+            const taskTree = fileTreePrompt(buildKnown(pid != null ? projectDir(pid) : null, new Map(), task.files));
 
             for (const filePath of task.files) {
-                const code = await this.generateFile(task, design, filePath, writtenFiles);
+                const code = await this.generateFile(task, design, filePath, writtenFiles, taskTree);
                 if (!code) { failed = true; break; }
                 implementation.push({ filePath, code });
                 // T1 顺带修（9/8）：writtenFiles 生成一个补一个（原先任务全成后才统一 set，生成期恒空，
@@ -301,6 +318,7 @@ export class FrontendEngineer extends BaseAgent {
         design: string | null,
         filePath: string,
         writtenFiles: Map<string, string>,
+        taskTree: string,
     ): Promise<string | null> {
         const model = initModels(FRONTEND_MODEL_JSON, "frontend");   // T3：B 工位（页面实现）归 frontend 档
         const finalBaseline = resolveProjectBaseline(task.stack);
@@ -325,13 +343,15 @@ export class FrontendEngineer extends BaseAgent {
         // 每轮现建：并行 B 工位刚落盘的文件、上一文件新写的内容，下一文件校验时都算已知
         const pid = currentProjectId();
         const known = buildKnown(pid != null ? projectDir(pid) : null, writtenFiles, task.files);
-        // p2 复盘修②（9/9）：磁盘文件树注入实现 prompt——治"模型与闸门信息不对称"，
-        // 打回从猜谜变照抄（known 每轮现建的口径不变：并行工位刚落盘的文件下一文件就能看到）
-        const treeBlock = fileTreePrompt(known);
+        // 文件树用**任务级快照**（C-3）：贴进 prompt 的树不随本任务写盘增长，保证前缀稳定
+        const treeBlock = taskTree;
         const contractsMd = await loadContracts();                         // p3 修④：留原文解析禁用包清单
         const contract = contractPromptBlock(contractsMd);                 // T2：契约头部注入（旁路=无契约空串）
         const banned = parseBannedImports(contractsMd);
         const guard = sliceGuard(task.files.length);                       // T4：竖切大任务收敛为 2 次×600s
+        // ★ C-1（9/10 成本轨）：稳定段定序装配（角色→基线→契约→文件树[→工具协议]），易变段只许追加在后
+        const stableSections = { role: this.filePrompt, baseline: dynamicBaseline, contract, fileTree: treeBlock };
+        console.log(`[${this.name}] ${task.id} ${filePath} 稳定前缀 ${fingerprint(buildStablePrefix(stableSections))}（${buildStablePrefix(stableSections).length} 字符）`);
         // ---- T7b 工具模式（默认关，backendEngineer 同注释）。幻觉闸挂进工具的 extraGate 位：
         // write/edit 内容里的 <t-*> 红=拒绝落盘+错因回给模型（9/5 闸门语义原样搬家，不再吃 attempt 名额）----
         if (runtimeSettings()?.toolMode && !this.toolModeDead) {
@@ -342,19 +362,25 @@ export class FrontendEngineer extends BaseAgent {
                     extraGate: async () => [],
                 };
                 const landed = await runToolFileJob({
-                    system: this.filePrompt + dynamicBaseline + contract + treeBlock
-                        + `\n\n## 当前子任务\n${JSON.stringify(fileTask, null, 2)}` + designHint
-                        + existingContent + dbExistingPrompt
-                        + `\n\n## 主题变量\n${DEFAULT_THEME}\n\n## 请求封装（固定路径 ${REQUEST_WRAPPER_PATH}，地基已代码保证落盘）\n${DEFAULT_REQUEST}`
-                        + TOOL_PROTOCOL,
+                    system: assemblePrompt(
+                        { ...stableSections, toolProtocol: TOOL_PROTOCOL },
+                        [
+                            `\n\n## 当前子任务\n${JSON.stringify(fileTask, null, 2)}`,
+                            designHint,
+                            existingContent,
+                            dbExistingPrompt,
+                            `\n\n## 主题变量\n${DEFAULT_THEME}\n\n## 请求封装（固定路径 ${REQUEST_WRAPPER_PATH}，地基已代码保证落盘）\n${DEFAULT_REQUEST}`,
+                        ],
+                    ),
                     targetFile: filePath, ctx,
                     maxRounds: task.files.length >= 3 ? 12 : 8,   // p3 loop 化（9/9）：五件工具+查证开销，轮次预算翻倍
                     timeoutMs: guard.timeoutMs,
                     label: `${task.id} ${filePath}`,
                     invoke: (msgs, sig) => toolModel.invoke(msgs, { signal: sig }),
                 });
-                if (landed == null) console.warn(`[${this.name}] ${task.id} ${filePath} 工具轮次耗尽/弃赛，本文件判失败`);
-                return landed;
+                if (landed != null) return landed;
+                // ★ C-4（9/10）：轮次耗尽/模型放弃不再直接判死文件——退单发老路重试一次
+                console.warn(`[${this.name}] ${task.id} ${filePath} 工具循环未交付（${ctx.exitReason ?? "?"}；连续未命中 ${ctx.missStreak ?? 0} 次），退单发老路重试`);
             } catch (e) {
                 this.toolModeDead = true;
                 console.warn(`[${this.name}] 工具模式异常（${(e as Error).message.slice(0, 120)}），本进程退回单发老路，当前文件立即重走`);
@@ -367,15 +393,14 @@ export class FrontendEngineer extends BaseAgent {
             try {
                 const res = await invokeWithTimeout<any>(`${task.id} ${filePath}`, guard.timeoutMs, sig => model.invoke([
                     new SystemMessage(
-                        this.filePrompt + dynamicBaseline +
-                        contract +
-                        treeBlock +
-                        `\n\n## 当前子任务\n${JSON.stringify(fileTask, null, 2)}` +
-                        designHint +
-                        existingContent +
-                        dbExistingPrompt +
-                        `\n\n## 主题变量\n${DEFAULT_THEME}\n\n## 请求封装（固定路径 ${REQUEST_WRAPPER_PATH}，地基已代码保证落盘）\n${DEFAULT_REQUEST}` +
-                        feedback
+                        assemblePrompt(stableSections, [
+                            `\n\n## 当前子任务\n${JSON.stringify(fileTask, null, 2)}`,
+                            designHint,
+                            existingContent,
+                            dbExistingPrompt,
+                            `\n\n## 主题变量\n${DEFAULT_THEME}\n\n## 请求封装（固定路径 ${REQUEST_WRAPPER_PATH}，地基已代码保证落盘）\n${DEFAULT_REQUEST}`,
+                            feedback,
+                        ])
                     ),
                 ], { signal: sig }));
                 console.log(`[${this.name}] ${task.id} ${filePath} ${Date.now() - ts}ms`);

@@ -105,7 +105,14 @@ export function formatFileTree(known: GateKnown, cap = 80): string {
     if (all.length === 0) return "";
     const shown = all.slice(0, cap);
     const rest = all.length - shown.length;
-    return shown.join("\n") + (rest > 0 ? `\n…（共 ${all.length} 个文件，其余 ${rest} 个略）` : "");
+    let text = shown.join("\n") + (rest > 0 ? `\n…（共 ${all.length} 个文件，其余 ${rest} 个略）` : "");
+    // C-3（9/10）：字节上限——组件/路径多时文件树会撑爆每轮 prompt 的稳定段；
+    // 截断处显式标注，绝不静默截断（模型必须能看出"树被截了"）
+    const MAX_CHARS = 4000;
+    if (text.length > MAX_CHARS) {
+        text = text.slice(0, MAX_CHARS) + `\n…（文件树按 ${MAX_CHARS} 字符截断，完整树用 ls 工具查询）`;
+    }
+    return text;
 }
 
 /**

@@ -21,6 +21,9 @@ import { writeWorkspace } from "./common";
 import { projectDir } from "./runEnv";
 import { invokeWithTimeout } from "./llm";
 
+/** 工具作业退出原因（C-4 预算化，9/10）：调用方据此决定"退单发老路"还是"判失败" */
+export type ToolExitReason = "landed" | "exhausted" | "gave_up";
+
 /** 工具执行上下文：一次文件作业（一个目标文件）的共享状态 */
 export interface ToolExecCtx {
     pid: number | null;
@@ -31,7 +34,21 @@ export interface ToolExecCtx {
     /** p3 修④（9/9）：技术基线禁用包清单（从契约解析），随 write/edit 过闸 */
     banned?: string[];
     landed: string | null;           // 目标文件成功落盘后的最终内容（机械终止信号）
+    /** C-4（9/10）：连续"无进展"次数（grep/ls/read 全部未命中）——达阈值即下强制交付令 */
+    missStreak?: number;
+    /** C-4（9/10）：预算保护期——只允许 write/edit，只读工具被机械拒绝 */
+    deliveryOnly?: boolean;
+    /** C-4（9/10）：退出原因。exhausted/gave_up 允许调用方退单发老路（此前只有异常才退路） */
+    exitReason?: ToolExitReason;
 }
+
+/** C-4：记一次无进展 */
+function noteMiss(ctx: ToolExecCtx): number {
+    ctx.missStreak = (ctx.missStreak ?? 0) + 1;
+    return ctx.missStreak;
+}
+/** C-4：命中/落盘即清零 */
+function noteProgress(ctx: ToolExecCtx): void { ctx.missStreak = 0; }
 
 /** 给模型看的五件套声明（JSON Schema 手拼——OpenAI function-calling 通用形状，deepseek/openai 两路都吃）
  *  p3 复盘扩具（9/9）：三件套的短板=没眼睛——模型只能按精确路径猜世界。加 ls（目录树）+ grep（全树搜） */
@@ -148,9 +165,29 @@ export async function executeFileTool(ctx: ToolExecCtx, targetFile: string, name
     // p4 实战血案（9/9）：185 次"空 path 拒"全是误伤，模型按 schema 正确调用却被反复打回，烧光轮次击毙 6 个文件
     if (!path && name !== "ls" && name !== "grep") return { ok: false, result: "path 不能为空" };
 
+    // C-4 预算保护（9/10）：剩余轮次只够交付——机械禁止只读工具。
+    //   背景（runs/p9 实锤）：单文件连烧十几轮 grep 全未命中 → 轮次耗尽 → 整阶段 0 产出。
+    //   把"最后的轮次"用代码钉死在交付上，不靠模型自觉。
+    if (ctx.deliveryOnly && (name === "read" || name === "ls" || name === "grep")) {
+        return {
+            ok: false,
+            result: `★ 预算保护：剩余轮次只允许 write/edit 交付 ${targetFile}。立即 write 目标文件完整内容`
+                + `（信息不足就按契约自行实现所需逻辑，不要再查证）。`,
+        };
+    }
+
     if (name === "read") {
         const content = readViaCtx(ctx, path);
-        if (content == null) return { ok: false, result: `文件不存在：${path}（先 ls/grep 查证盘上有什么，别引用没登记的文件）` };
+        if (content == null) {
+            const n = noteMiss(ctx);
+            return {
+                ok: false,
+                result: `文件不存在：${path}`
+                    + (n >= 2 ? `（连续 ${n} 次无命中）。★ 停止查证：立即 write ${targetFile}，不要继续试探路径。`
+                        : "（先 ls 看树确认真实路径，别引用没登记的文件）"),
+            };
+        }
+        noteProgress(ctx);
         return { ok: true, result: content.length > 20_000 ? content.slice(0, 20_000) + "\n…（截断）" : content };
     }
 
@@ -159,7 +196,13 @@ export async function executeFileTool(ctx: ToolExecCtx, targetFile: string, name
         const prefix = String(args.prefix ?? path ?? "").trim().replace(/\\/g, "/").toLowerCase();
         const all = fileKnownView(ctx).list();
         const hit = (prefix ? all.filter(p => p.toLowerCase().startsWith(prefix)) : all).slice(0, 200);
-        return { ok: hit.length > 0, result: hit.length ? hit.join("\n") : "（没有匹配的文件）" };
+        if (hit.length === 0) {
+            const n = noteMiss(ctx);
+            return { ok: false, result: `（${prefix || "全树"} 没有匹配的文件）`
+                + (n >= 2 ? "。★ 停止查证：立即 write 交付目标文件。" : "") };
+        }
+        noteProgress(ctx);
+        return { ok: true, result: hit.join("\n") };
     }
 
     if (name === "grep") {
@@ -181,7 +224,21 @@ export async function executeFileTool(ctx: ToolExecCtx, targetFile: string, name
                 if (rows[i]!.toLowerCase().includes(needle)) hits.push(`${p}:${i + 1}: ${rows[i]!.trim().slice(0, 120)}`);
             }
         }
-        return { ok: hits.length > 0, result: hits.length ? hits.join("\n") : `没搜到「${pattern}」（换个关键词，或先 ls 看树）` };
+        if (hits.length > 0) {
+            noteProgress(ctx);
+            return { ok: true, result: hits.join("\n") };
+        }
+        // C-4（9/10）：旧话术"（换个关键词，或先 ls 看树）"直接教模型继续猜词——
+        // runs/p9 日志里单文件连续十余次 grep 全空、每次都被告知换关键词，最后轮次耗尽判失败。
+        // 第 2 次未命中起，话术改为"停止查证、立即交付"。
+        const n = noteMiss(ctx);
+        return {
+            ok: false,
+            result: n >= 2
+                ? `没搜到「${pattern}」（连续 ${n} 次未命中）。★ 停止查证：不要再换关键词，立即用 write 交付 ${targetFile} 的完整内容；`
+                    + `树里没有的东西就在目标文件内自行实现。`
+                : `没搜到「${pattern}」（先 ls 看树确认真实路径，不要凭猜测引用别的文件）`,
+        };
     }
 
     if (name === "write") {
@@ -194,6 +251,7 @@ export async function executeFileTool(ctx: ToolExecCtx, targetFile: string, name
             writeWorkspace(path, content);
             ctx.written.set(path, content);
             if (path === targetFile) ctx.landed = content;
+            noteProgress(ctx);
             return { ok: true, result: `已落盘 ${path}（${content.length} 字符，编译校验通过）` };
         });
     }
@@ -217,6 +275,7 @@ export async function executeFileTool(ctx: ToolExecCtx, targetFile: string, name
             writeWorkspace(path, patched);
             ctx.written.set(path, patched);
             if (path === targetFile) ctx.landed = patched;
+            noteProgress(ctx);
             return { ok: true, result: `已修补并落盘 ${path}（1 处，校验通过）` };
         });
     }
@@ -242,11 +301,38 @@ export interface ToolJobOpts {
 /**
  * 一个目标文件的工具作业循环。返回 landed 内容（成功）或 null（轮次耗尽/模型放弃）。
  * 抛异常=端点不支持工具/网络炸——调用方捕获后退老路（tool_mode 旁路的落点）。
+ *
+ * C-4 预算化（9/10）三处改动，针对 runs/p9"12 轮 × 0 产出 = 最大浪费形态"：
+ *   ① 倒数第 2 轮起下硬指令：只许 write/edit，不许继续查证
+ *   ② **宽限轮（grace round）**：maxRounds 用尽后仍有 1 轮，该轮只读工具被机械拒绝——
+ *      把"必然失败"用一轮的成本换回"可能成功"（对照 p9：12 轮全废，多 1 轮换回产出是净赚）
+ *   ③ `ctx.exitReason` 明确区分 landed/exhausted/gave_up，调用方据此**退单发老路**
+ *      （此前只有抛异常才退路，轮次耗尽与模型放弃直接把文件判死）
  */
 export async function runToolFileJob(opts: ToolJobOpts): Promise<string | null> {
     const messages: any[] = [new SystemMessage(opts.system)];
     let nudges = 0;
-    for (let round = 1; round <= opts.maxRounds; round++) {
+    const totalRounds = opts.maxRounds + 1;          // ★ 末轮=宽限轮（只许交付）
+    for (let round = 1; round <= totalRounds; round++) {
+        const isGrace = round > opts.maxRounds;
+        const remaining = totalRounds - round;       // 本轮之后还剩几轮
+        // ★ 预算保护必须**提前**告知：只设标志而不告知，模型仍会拿这轮去 grep/ls，
+        //   被拒后就到点了——宽限轮等于白送（本冒烟第一版就是被这条打回的）。
+        if (isGrace) {
+            opts.ctx.deliveryOnly = true;
+            messages.push(new HumanMessage(
+                `★★ 最后一次机会（宽限轮）：现在只允许 write/edit 交付 ${opts.targetFile}。`
+                + `立即 write 该文件的完整内容；不要再调用任何只读工具，也不要输出解释文本。`));
+        } else if (remaining <= 1) {
+            opts.ctx.deliveryOnly = true;
+            messages.push(new HumanMessage(
+                `★ 预算告警：本文件只剩 ${remaining + 1} 轮，**接下来只允许 write/edit 交付 ${opts.targetFile}**`
+                + `——不再允许 ls / grep / read，也不要输出解释文本。信息不足就按契约自行实现。`));
+        } else if (remaining === 2 && opts.ctx.landed == null) {
+            messages.push(new HumanMessage(
+                `★ 预算提示：本文件还剩 ${remaining + 1} 轮。请在这一两轮内用 write/edit 交付 `
+                + `${opts.targetFile}，不要再扩大查证范围。`));
+        }
         const res = await invokeWithTimeout(`${opts.label} 工具轮${round}`, opts.timeoutMs, sig =>
             opts.round ? opts.round(messages, sig) : (opts.invoke?.(messages, sig) ?? Promise.reject(new Error("工具循环缺 invoke/round"))));
         messages.push(res);
@@ -256,12 +342,18 @@ export async function runToolFileJob(opts: ToolJobOpts): Promise<string | null> 
             messages.push(new ToolMessage({ content: out.result.slice(0, 4000), tool_call_id: String(tc.id ?? tc.name ?? round) }));
             if (!out.ok) console.log(`[fileTools] ${opts.targetFile} 工具 ${tc.name} 红：${out.result.slice(0, 120)}`);
         }
-        if (opts.ctx.landed != null) return opts.ctx.landed;        // 机械终止：落地=完成
+        if (opts.ctx.landed != null) { opts.ctx.exitReason = "landed"; return opts.ctx.landed; }   // 机械终止：落地=完成
+        if (isGrace) {
+            // 宽限轮内还只读或依旧白卷 → 直接退出，不再多烧
+            if ((opts.ctx.missStreak ?? 0) > 0 || calls.length === 0) break;
+        }
         if (calls.length === 0) {
             // 模型交白卷（只说话不调工具）：一次提醒，再犯判失败——不让它用嘴交付
-            if (++nudges > 1) return null;
+            if (++nudges > 1) { opts.ctx.exitReason = "gave_up"; return null; }
             messages.push(new HumanMessage("目标文件尚未通过 write/edit 落盘。请调用工具交付（write 整文件，或 edit 修补丁），文本回复不算完成。"));
         }
     }
-    return null;   // 轮次耗尽：调用方按文件失败走既有返工链
+    // 轮次耗尽：调用方按 exitReason 决定退单发老路还是走返工（9/10 起不再直接判死）
+    opts.ctx.exitReason = "exhausted";
+    return null;
 }

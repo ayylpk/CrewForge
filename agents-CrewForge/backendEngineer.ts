@@ -28,6 +28,7 @@ import { gate } from "./concurrency";
 import { FILE_TOOLS, TOOL_PROTOCOL, runToolFileJob, type ToolExecCtx } from "./fileTools";
 import { runtimeSettings } from "./settings";
 import { baselinePromptBlock, resolveProjectBaseline } from "./baseline";
+import { assemblePrompt, buildStablePrefix, fingerprint } from "./engine/steps/promptPrefix";
 
 const BACKEND_MODEL_JSON = JSON.stringify({
     provider: "deepseek",
@@ -35,6 +36,13 @@ const BACKEND_MODEL_JSON = JSON.stringify({
     temperature: 0.1,
     thinking: false,
 });
+
+/**
+ * C-2（9/10 成本轨）：文件数低于此值的小任务跳过「伪代码」阶段。
+ * 口径与 sliceGuard 的"大任务 ≥3 文件"一致——小任务的契约已自包含在 task.description 里，
+ * 再烧一次调用做骨架属纯开销（runs/p9 是 6 个任务 6 次伪代码调用）。
+ */
+const SKIP_PSEUDO_MAX_FILES = 3;
 
 // ---------- 提示词 ----------
 
@@ -151,6 +159,13 @@ export class BackendEngineer extends BaseAgent {
             const { task } = await this.taskQueue.pop();
             await g.acquire();
             try {
+                // C-2（9/10）：小任务跳过伪代码——少一次调用胜过任何缓存优化。
+                // 降级语义与"伪代码失败"一致（pseudo=null → B 单步生成完整代码）
+                if (task.files.length < SKIP_PSEUDO_MAX_FILES) {
+                    console.log(`[${this.name}] ${task.id} 小任务（${task.files.length} 文件）跳过伪代码阶段，直接进代码工位（C-2 省一次调用）`);
+                    this.pseudoQueue.push({ task, pseudo: null });
+                    continue;
+                }
                 console.log(`[${this.name}] ${task.id} 进入伪代码工位`);
                 const pseudo = await this.generatePseudo(task);   // 失败返回 null（降级）
                 this.pseudoQueue.push({ task, pseudo });          // 塞进下游，立即回头处理下一个
@@ -203,9 +218,14 @@ export class BackendEngineer extends BaseAgent {
             const writtenFiles = new Map<string, string>();
             const implementation: { filePath: string; code: string }[] = [];
             let failed = false;
+            // ★ C-3（9/10）：文件树**快照**——整任务只算一次（磁盘 ∪ 计划内，**不含本任务已写文件**）：
+            //   ① 稳定段不随写盘增长 → 同任务后续调用前缀逐字节一致（缓存命中）
+            //   ② 本任务已写文件由 taskExistingPrompt 单独注入，信息一点不丢
+            const pid = currentProjectId();
+            const taskTree = fileTreePrompt(buildKnown(pid != null ? projectDir(pid) : null, new Map(), task.files));
 
             for (const filePath of task.files) {
-                const code = await this.generateFile(task, pseudo, filePath, writtenFiles);
+                const code = await this.generateFile(task, pseudo, filePath, writtenFiles, taskTree);
                 if (!code) { failed = true; break; }
                 implementation.push({ filePath, code });
                 // T1 顺带修（9/8）：writtenFiles 原先只在任务全部成功后统一补——生成期永远是空的，
@@ -238,6 +258,7 @@ export class BackendEngineer extends BaseAgent {
         pseudo: string | null,
         filePath: string,
         writtenFiles: Map<string, string>,
+        taskTree: string,
     ): Promise<string | null> {
         const model = initModels(BACKEND_MODEL_JSON, "backend");   // T3：B 工位（代码实现）归 backend 档
         const dynamicBaseline = `\n\n${baselinePromptBlock(resolveProjectBaseline(task.stack))}`;
@@ -264,34 +285,44 @@ export class BackendEngineer extends BaseAgent {
         // known = 磁盘树(runs/pN) ∪ 本任务已生成 ∪ 计划内路径（存在性可核，内容未生成的自动跳名核验）
         const pid = currentProjectId();
         const known = buildKnown(pid != null ? projectDir(pid) : null, writtenFiles, task.files);
-        // p2 复盘修②（9/9）：磁盘文件树注入实现 prompt（frontendEngineer 同注释）——
-        // 后端侧治的是 prisma/client、middlewares 单复数那 11 次杂散打回
-        const treeBlock = fileTreePrompt(known);
+        // 文件树用**任务级快照**（C-3）：贴进 prompt 的树不随本任务写盘增长，保证前缀稳定
+        const treeBlock = taskTree;
         const contractsMd = await loadContracts();               // p3 修④：留原文解析禁用包清单
         const contract = contractPromptBlock(contractsMd);       // T2：契约头部注入（旁路同伪代码工位）
         const banned = parseBannedImports(contractsMd);
         const guard = sliceGuard(task.files.length);                   // T4：竖切大任务收敛为 2 次×600s
+        // ★ C-1（9/10 成本轨）：稳定段定序装配（角色→基线→契约→文件树[→工具协议]），
+        //   易变段（任务/文件路径/已写文件/现有内容/反馈）只许追加在后。指纹打日志，
+        //   便于事后核对"本该命中缓存却没命中"的批次（成本可观测的第一步）。
+        const stableSections = { role: this.codePrompt, baseline: dynamicBaseline, contract, fileTree: treeBlock };
+        console.log(`[${this.name}] ${task.id} ${filePath} 稳定前缀 ${fingerprint(buildStablePrefix(stableSections))}（${buildStablePrefix(stableSections).length} 字符）`);
         // ---- T7b 工具模式（sys_settings.tool_mode 默认关）：runToolFileJob 走 read/write/edit 交付——
-        // 工具内 write/edit 自带过闸+落盘+文件锁，落地即返回；轮次耗尽=文件失败走返工；
-        // 抛异常（端点不支持 function-calling 等）→ 本进程永久退回下面的单发老路（旁路，一把都算不清就不赌）----
+        // 工具内 write/edit 自带过闸+落盘+文件锁，落地即返回；未交付则退单发老路（C-4）；
+        // 抛异常（端点不支持 function-calling 等）→ 本进程永久退回下面的单发老路 ----
         if (runtimeSettings()?.toolMode && !this.toolModeDead) {
             try {
                 const toolModel = initModels(JSON.stringify({ ...JSON.parse(BACKEND_MODEL_JSON), tools: FILE_TOOLS }), "backend");
                 const ctx: ToolExecCtx = { pid, written: writtenFiles, planned: task.files, landed: null, banned };
                 const landed = await runToolFileJob({
-                    system: this.codePrompt + dynamicBaseline + contract + treeBlock
-                        + `\n\n## 当前任务\n${JSON.stringify(fileTask, null, 2)}`
-                        + `\n\n## 当前目标文件\n${filePath}`
-                        + `\n\n## 项目路径\nworkspace`
-                        + taskExistingPrompt + existingPrompt + pseudoHint + TOOL_PROTOCOL,
+                    system: assemblePrompt(
+                        { ...stableSections, toolProtocol: TOOL_PROTOCOL },
+                        [
+                            `\n\n## 当前任务\n${JSON.stringify(fileTask, null, 2)}`,
+                            `\n\n## 当前目标文件\n${filePath}`,
+                            `\n\n## 项目路径\nworkspace`,
+                            taskExistingPrompt, existingPrompt, pseudoHint,
+                        ],
+                    ),
                     targetFile: filePath, ctx,
                     maxRounds: task.files.length >= 3 ? 12 : 8,   // p3 loop 化（9/9）：五件工具+查证开销翻倍（老路 attempt 仍是 2~3）
                     timeoutMs: guard.timeoutMs,
                     label: `${task.id} ${filePath}`,
                     invoke: (msgs, sig) => toolModel.invoke(msgs, { signal: sig }),
                 });
-                if (landed == null) console.warn(`[${this.name}] ${task.id} ${filePath} 工具轮次耗尽/弃赛，本文件判失败`);
-                return landed;   // 已落盘；codeWorker 末尾对同内容再幂等写一次（upsert 无害），协议零改动
+                if (landed != null) return landed;   // 已落盘；codeWorker 末尾对同内容再幂等写一次（upsert 无害），协议零改动
+                // ★ C-4（9/10）：轮次耗尽/模型放弃**不再直接判死文件**——退单发老路再试一次。
+                //   旧行为（landed==null → return null）正是 runs/p9 阶段 3 六个任务 0 产出的直接原因。
+                console.warn(`[${this.name}] ${task.id} ${filePath} 工具循环未交付（${ctx.exitReason ?? "?"}；连续未命中 ${ctx.missStreak ?? 0} 次），退单发老路重试`);
             } catch (e) {
                 this.toolModeDead = true;
                 console.warn(`[${this.name}] 工具模式异常（${(e as Error).message.slice(0, 120)}），本进程退回单发老路，当前文件立即重走`);
@@ -303,16 +334,15 @@ export class BackendEngineer extends BaseAgent {
             try {
                 const res = await invokeWithTimeout<any>(`${task.id} 代码`, guard.timeoutMs, sig => model.invoke([
                     new SystemMessage(
-                        this.codePrompt + dynamicBaseline +
-                        contract +
-                        treeBlock +
-                        `\n\n## 当前任务\n${JSON.stringify(fileTask, null, 2)}` +
-                        `\n\n## 当前目标文件\n${filePath}` +
-                        `\n\n## 项目路径\nworkspace` +
-                        taskExistingPrompt +
-                        existingPrompt +
-                        pseudoHint +
-                        feedback
+                        assemblePrompt(stableSections, [
+                            `\n\n## 当前任务\n${JSON.stringify(fileTask, null, 2)}`,
+                            `\n\n## 当前目标文件\n${filePath}`,
+                            `\n\n## 项目路径\nworkspace`,
+                            taskExistingPrompt,
+                            existingPrompt,
+                            pseudoHint,
+                            feedback,
+                        ])
                     ),
                 ], { signal: sig }));
                 console.log(`[${this.name}] ${task.id} 代码 ${Date.now() - ts}ms`);
