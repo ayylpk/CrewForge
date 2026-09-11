@@ -33,6 +33,7 @@ import path from "node:path";
 import { resolveStackProfile } from "./engine/stacks/profile";
 import { verifyWrittenTask, type TaskVerifyResult } from "./engine/exec/verify/taskVerify";
 import { FailureLedger } from "./engine/exec/verify/ledger";
+import { decideWrite, OwnershipRegistry } from "./engine/workspace/ownership";
 
 const BACKEND_MODEL_JSON = JSON.stringify({
     provider: "deepseek",
@@ -124,6 +125,8 @@ export class BackendEngineer extends BaseAgent {
     private readonly ledger = new FailureLedger();
     /** M3-a：单任务已用编译返工次数 */
     private readonly compileRepairs = new Map<string, number>();
+    /** M4：文件 owner 登记（一个文件同一时刻只有一个 writer） */
+    private readonly ownership = new OwnershipRegistry();
     /** 最近一次执行式验证结果（供报告/落库，M8 消费） */
     private lastVerify: TaskVerifyResult | null = null;
     /** queue1：等伪代码的任务 */
@@ -256,10 +259,30 @@ export class BackendEngineer extends BaseAgent {
                 this.send("merger", { type: "task_result", task, success: false });
                 continue;
             }
+            // ★ M4（9/10）写盘纪律：越界/引擎件/非声明文件一律拒；一文件一 owner
+            const planProfile = resolveStackProfile(resolveProjectBaseline(task.stack));
             for (const f of implementation) {
+                const decision = decideWrite({ path: f.filePath, taskId: task.id, plannedFiles: task.files, profile: planProfile });
+                if (!decision.ok) {
+                    console.warn(`[${this.name}] ${task.id} 拒绝写盘（${decision.code}）：${decision.reason}`
+                        + (decision.candidates?.length ? `；候选：${decision.candidates.join("、")}` : ""));
+                    failed = true;
+                    break;
+                }
+                const claim = this.ownership.claim(f.filePath, task.id);
+                if (!claim.ok) {
+                    console.warn(`[${this.name}] ${task.id} 拒绝写盘（owner 冲突）：${claim.reason}`);
+                    failed = true;
+                    break;
+                }
                 const full = writeWorkspace(f.filePath, f.code);
                 writtenFiles.set(f.filePath, f.code);
                 console.log(`已写入 ${full}`);
+            }
+            this.ownership.releaseTask(task.id);   // 任务收口即释放（失败路径也要释放，防死锁后续任务）
+            if (failed) {
+                this.send("merger", { type: "task_result", task, success: false });
+                continue;
             }
             await flushWorkspacePersists();
             // ★ M3-a（9/10）：**写盘不是交付**——立刻用真实命令验证（Java = 真实 classpath 编译）。

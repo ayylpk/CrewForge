@@ -35,6 +35,7 @@ import { resolveStackProfile, type StackProfile } from "./engine/stacks/profile"
 import { findComponentTagIssues, shouldScanComponentTags } from "./engine/stacks/components";
 import { verifyWrittenTask, type TaskVerifyResult } from "./engine/exec/verify/taskVerify";
 import { FailureLedger } from "./engine/exec/verify/ledger";
+import { decideWrite, OwnershipRegistry } from "./engine/workspace/ownership";
 import path from "node:path";
 
 /** M3-a（9/10）：单任务构建返工次数上限 */
@@ -162,6 +163,8 @@ export class FrontendEngineer extends BaseAgent {
     private readonly ledger = new FailureLedger();
     /** M3-a：单任务已用构建返工次数 */
     private readonly buildRepairs = new Map<string, number>();
+    /** M4：文件 owner 登记 */
+    private readonly ownership = new OwnershipRegistry();
     /** 最近一次执行式验证结果（供报告/落库） */
     private lastVerify: TaskVerifyResult | null = null;
     /** queue1：等设计稿的任务 */
@@ -296,10 +299,30 @@ export class FrontendEngineer extends BaseAgent {
                 this.send("merger", { type: "task_result", task, success: false });
                 continue;
             }
+            // ★ M4（9/10）写盘纪律：越界/引擎件/非声明文件一律拒（路由登记仍由引擎机械完成）
+            const planProfile = resolveStackProfile(resolveProjectBaseline(task.stack));
             for (const f of implementation) {
+                const decision = decideWrite({ path: f.filePath, taskId: task.id, plannedFiles: task.files, profile: planProfile });
+                if (!decision.ok) {
+                    console.warn(`[${this.name}] ${task.id} 拒绝写盘（${decision.code}）：${decision.reason}`
+                        + (decision.candidates?.length ? `；候选：${decision.candidates.join("、")}` : ""));
+                    failed = true;
+                    break;
+                }
+                const claim = this.ownership.claim(f.filePath, task.id);
+                if (!claim.ok) {
+                    console.warn(`[${this.name}] ${task.id} 拒绝写盘（owner 冲突）：${claim.reason}`);
+                    failed = true;
+                    break;
+                }
                 const full = writeWorkspace(f.filePath, f.code);
                 writtenFiles.set(f.filePath, f.code);
                 console.log(`已写入 ${full}`);
+            }
+            this.ownership.releaseTask(task.id);
+            if (failed) {
+                this.send("merger", { type: "task_result", task, success: false });
+                continue;
             }
             // p3 修②（9/9）：路由机械登记——契约「页面清单」里归本任务的页面由引擎追加进 router/index.ts，
             // 模型不碰路由文件（登记死锁病根绝根）；失败只 warn，页面可达性还有测试判定兜底
