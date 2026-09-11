@@ -7,6 +7,7 @@
 //     checkVue     @vue/compiler-sfc parse + compileTemplate（模板残缺/标签不闭合）+ script 段过 esbuild + import 扫描
 //     checkPy      PATH 有 python 就真 py_compile；没有退化为括号/引号配平文本校验（F-卡面降级阀）
 //     checkJson    JSON.parse（地基 package.json 等同款坑）
+//     checkJavaLike 真 javac 语法闸门（9/10 新增；只否决语法/编码/未归类，缺 classpath 的依赖类诊断不参与判定）
 //
 //   铁律（[[crewforge-code-over-tools]]）：全部纯函数零 LLM——
 //   报错原文喂回工位自修是调用方的事（复用 attempt×3 骨架，话术截断见文末 gateFeedback）。
@@ -20,6 +21,7 @@ import os from "node:os";
 import { execFileSync } from "node:child_process";
 import { transform } from "esbuild";
 import { parse as sfcParse, compileTemplate, type SFCDescriptor } from "@vue/compiler-sfc";
+import { checkJavaContents, javaContentProblems } from "./engine/exec/static/java";
 
 /** 校验结果：人读的中文错误短句列表（直接拼进自修 feedback），空数组=绿 */
 export type CheckProblems = string[];
@@ -433,11 +435,36 @@ export async function checkJson(filePath: string, code: string, _known: GateKnow
 
 // ---------- 总入口 ----------
 
+/** Java 未校验告警只打一次（避免每文件刷屏），但绝不静默 */
+let javaUncheckedWarned = false;
+function warnJavaUncheckedOnce(toolError: string | undefined, summary: string): void {
+    if (javaUncheckedWarned) return;
+    javaUncheckedWarned = true;
+    console.warn(`[gate] ⚠️ Java 未经校验（未校验 ≠ 通过）：${toolError ?? summary}`);
+}
+
+/**
+ * .java：真 javac 语法闸门（9/10 新增）。
+ *   背景：本文件 DISPATCH 此前只有 vue/ts/py/json——**Java 文件一个字节都没被检查过**，
+ *   而 Java 恰是生成项目里占比最高的语言（runs/p9 的 45 个产物中 21 个 .java）。
+ *   形态：`javac -encoding UTF-8 -proc:none -nowarn`；缺 classpath 产生的依赖类诊断被分类器
+ *   归为 dependency，不参与判定（生成期依赖常未下载）；只否决"代码自身写错"的三类：
+ *   语法 / 编码 / 未归类。临时文件按原始相对路径还原，因此
+ *   "public class X 与文件名不符" 这条真错也能抓住。
+ *   未校验（无 javac）→ 放行但**打告警**（不变量 2：静态检查只许否决，不许宣称通过）。
+ */
+export async function checkJavaLike(filePath: string, code: string, _known: GateKnown, _banned?: string[]): Promise<CheckProblems> {
+    const res = checkJavaContents([{ path: filePath, content: code }]);
+    if (!res.checked) { warnJavaUncheckedOnce(res.toolError, res.summary); return []; }
+    return javaContentProblems(res, filePath);
+}
+
 const DISPATCH: [RegExp, (f: string, c: string, k: GateKnown, banned?: string[]) => Promise<CheckProblems>][] = [
     [/\.vue$/i, checkVue],
     [/\.(ts|tsx|js|jsx|mjs|cjs|mts|cts)$/i, checkJsLike],
     [/\.py$/i, checkPy],
     [/\.json$/i, checkJson],
+    [/\.java$/i, checkJavaLike],
 ];
 
 /**
@@ -466,8 +493,21 @@ export async function checkBatch(files: { path: string; content: string }[], kno
     const out = new Map<string, CheckProblems>();
     for (const f of files) {
         if (!f?.path) continue;
+        if (/\.java$/i.test(f.path)) continue;   // Java 走下面的批量通道：一次 javac 处理整批，不逐文件烧 JVM 启动
         const problems = await checkFile(f.path, f.content ?? "", batchKnown, banned);
         if (problems.length) out.set(f.path, problems);
+    }
+    // Java 批量通道（9/10）：bootstrap 一次吐十几个文件，逐文件 javac 会白烧 10+ 次 JVM 启动
+    const javaFiles = files.filter(f => f?.path && /\.java$/i.test(f.path));
+    if (javaFiles.length > 0) {
+        const res = checkJavaContents(javaFiles.map(f => ({ path: f.path, content: f.content ?? "" })));
+        if (!res.checked) warnJavaUncheckedOnce(res.toolError, res.summary);
+        else {
+            for (const f of javaFiles) {
+                const ps = javaContentProblems(res, f.path);
+                if (ps.length) out.set(f.path, [...(out.get(f.path) ?? []), ...ps]);
+            }
+        }
     }
     return out;
 }

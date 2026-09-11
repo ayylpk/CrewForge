@@ -126,3 +126,99 @@ export function javaGateRejects(r: JavaGateResult): boolean {
     if (r.toolError) return false;                     // 工具级错误另行处理
     return r.report.syntax.length > 0 || r.report.encoding.length > 0 || r.report.other.length > 0;
 }
+
+// ============================================================
+// 内容版闸门：给 checkers.checkFile / checkBatch 用
+//
+//   设计要点：
+//     ① 按**原始相对路径**在临时根下还原目录树再编译——文件名必须保留，
+//        否则 javac 的 "class X is public, should be declared in a file named X.java"
+//        这条真错会被掩盖（生成代码里这是高频错）
+//     ② 一次 javac 处理整批（bootstrap 一次吐十几个文件，不逐文件烧 JVM 启动）
+//     ③ 诊断按文件归因回调用方路径；**未校验显式标注**，绝不折算成通过
+// ============================================================
+
+export interface JavaContentGateResult {
+    /** 是否真的跑了 javac */
+    checked: boolean;
+    /** 归一化相对路径 → 问题短句（只含"代码自身写错"的类：语法/编码/未归类） */
+    problems: Map<string, string[]>;
+    summary: string;
+    toolError?: string;
+}
+
+function normKey(p: string): string {
+    return p.replace(/\\/g, "/").replace(/^\.\/+/, "").toLowerCase();
+}
+
+/** 路径安全：只接受项目内相对路径（防写到临时根之外） */
+function safeRel(p: string): string | null {
+    const clean = p.replace(/\\/g, "/").replace(/^\.\/+/, "");
+    if (!clean || clean.startsWith("/") || /^[a-zA-Z]:/.test(clean)) return null;
+    if (clean.split("/").includes("..")) return null;
+    return clean;
+}
+
+export function checkJavaContents(
+    files: { path: string; content: string }[],
+    timeoutMs = 180_000,
+): JavaContentGateResult {
+    const empty = { checked: false, problems: new Map<string, string[]>(), summary: "无 Java 文件" };
+    const targets = files.filter(f => /\.java$/i.test(f.path ?? "") && safeRel(f.path) != null);
+    if (targets.length === 0) return empty;
+
+    const exe = javacAvailable();
+    if (!exe) {
+        return {
+            checked: false, problems: new Map(), toolError: "javac not found",
+            summary: "javac 不可用：Java 未经校验（未校验 ≠ 通过）",
+        };
+    }
+
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "cfjavacont-"));
+    const outDir = path.join(root, "__out");
+    const normToRel = new Map<string, string>();     // 归一化 key → 原始相对路径
+    const absToNorm = new Map<string, string>();     // 临时绝对路径(小写) → 归一化 key
+    try {
+        fs.mkdirSync(outDir, { recursive: true });
+        for (const f of targets) {
+            const rel = safeRel(f.path)!;
+            const key = normKey(rel);
+            if (normToRel.has(key)) continue;         // 同路径去重（后者不覆盖）
+            normToRel.set(key, rel);
+            const abs = path.join(root, ...rel.split("/"));
+            fs.mkdirSync(path.dirname(abs), { recursive: true });
+            fs.writeFileSync(abs, f.content ?? "", "utf-8");
+            absToNorm.set(abs.replace(/\\/g, "/").toLowerCase(), key);
+        }
+
+        const absFiles = [...absToNorm.keys()].map(k => path.join(root, ...normToRel.get(absToNorm.get(k)!)!.split("/")));
+        const gate = checkJavaFiles(absFiles, timeoutMs);
+
+        const problems = new Map<string, string[]>();
+        if (!gate.checked) {
+            return { checked: false, problems, toolError: gate.toolError, summary: gate.summary };
+        }
+        const add = (tempFile: string, line: number, message: string) => {
+            const key = absToNorm.get(tempFile.replace(/\\/g, "/").toLowerCase());
+            if (!key) return;                          // 归因不到本批 → 丢弃（不误挂到别的文件上）
+            const arr = problems.get(key) ?? [];
+            const short = normToRel.get(key)!.split("/").pop();
+            arr.push(`${short}:${line} ${message}`);
+            problems.set(key, arr);
+        };
+        for (const d of [...gate.report.syntax, ...gate.report.encoding, ...gate.report.other]) {
+            add(d.file, d.line, d.message);
+        }
+        return {
+            checked: true, problems, summary: gate.summary, toolError: gate.toolError,
+        };
+    } finally {
+        try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* 清理失败无妨 */ }
+    }
+}
+
+/** 内容版谓词：该文件是否有"必须打回"的问题 */
+export function javaContentProblems(res: JavaContentGateResult, relPath: string): string[] {
+    return res.problems.get(normKey(relPath)) ?? [];
+}

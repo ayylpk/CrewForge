@@ -93,8 +93,10 @@ async function main() {
     ok((await checkFile("frontend/src/api/f.ts", `import { Session } from "./auth";\nconst s: Session = { id: "1" };\nvoid s;`, authKnown)).length === 0,
         "interface 被命名导入（类型位使用）：不误杀（F5② 全量归 T6 运行时审，诚实边界）");
 
-    // 认识不了的全家放行：.java/.yml/.md/.scss/.html
-    for (const f of ["backend/App.java", "docker-compose.yml", "README.md", "frontend/src/a.scss", "public/index.html"]) {
+    // 认识不了的全家放行：.yml/.md/.scss/.html/.svg
+    // ⚠️ 9/10 变更：.java 从本名单移出——Java 已纳入真 javac 闸门（见文末 Java 段），
+    //    旧断言"未认识格式放行：backend/App.java"记录的是当时的缺口，不是期望行为。
+    for (const f of ["docker-compose.yml", "README.md", "frontend/src/a.scss", "public/index.html", "frontend/public/logo.svg"]) {
         ok((await checkFile(f, "whatever {{{ broken???", knownFor({}))).length === 0, `未认识格式放行：${f}`);
     }
 
@@ -199,6 +201,19 @@ async function main() {
     const noiseKnown = knownFor({ "backend/app.js": `export default {};` });
     const noiseProblems = await checkFile("backend/index.js", `import cfg from "./config";\nconsole.log(cfg);`, noiseKnown);
     ok(!noiseProblems.join("；").includes("候选"), "default 导出不进候选（防人人都是候选的噪音）", noiseProblems.join("；").slice(0, 120));
+
+    // ============================================================
+    // Java 闸门（9/10 新增）：真 javac 语法校验
+    // 背景：DISPATCH 此前没有 .java —— Java 是生成项目占比最高的语言（p9 的 45 个产物中 21 个 .java），
+    //      却一个字节都没被检查过。此处固化新行为；细节见 engine/exec/static/java-gate-smoke.ts
+    // ============================================================
+    const javaBad = await checkFile("backend/src/main/java/com/demo/AccountService.java",
+        `package com.demo;\npublic class AccountService {\n  public void run() {\n    int x = 1\n    if (x > 0) { System.out.println(x); }\n  }\n}\n`, knownFor({}));
+    ok(javaBad.length > 0, "java 坏码必拒（真 javac 语法闸门）", javaBad.join("；").slice(0, 120));
+
+    const javaGood = await checkFile("backend/src/main/java/com/demo/AccountService.java",
+        `package com.demo;\nimport org.springframework.stereotype.Service;\n/** 中文注释：账号服务 */\n@Service\npublic class AccountService { public String hi(){ return "ok"; } }\n`, knownFor({}));
+    ok(javaGood.length === 0, "java 好码放行（缺 Spring 依赖不算错 + 中文注释零编码误报）", javaGood.join("；").slice(0, 120));
 
     // ============================================================
     console.log(`\n=== 汇总：${pass} 绿 / ${fail} 红 ===`);
