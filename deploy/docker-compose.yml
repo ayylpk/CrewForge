@@ -1,0 +1,103 @@
+# ============================================================
+# CrewForge 一键部署（MySQL + Redis + 应用/agent 运行时 + 前端站点）
+#
+#   ⚠️ 未实测：本机 Docker daemon 未启动，本文件**未经真机验证**。
+#      首次部署请按 deploy/README.md 的检查清单逐项确认。
+#
+#   拓扑：
+#     web (nginx:80)  → 反代 /api → app:8080
+#     app (Java 后端 + bun agent 运行时 + 生成项目工具链)
+#     mysql / redis   → 仅容器网络内可达，不对外暴露端口
+# ============================================================
+name: crewforge
+
+services:
+  mysql:
+    image: mysql:8.0
+    restart: unless-stopped
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?set in deploy/.env}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-crewforge}
+      MYSQL_USER: ${MYSQL_USER:-crewforge}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:?set in deploy/.env}
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # 首次启动自动建表（把 schema 放这里；空目录会被忽略）
+      - ../sql:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    networks: [cf]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "no"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks: [cf]
+
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.app
+    restart: unless-stopped
+    depends_on:
+      mysql: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    environment:
+      # —— 数据库（走容器网络服务名，不写 localhost）——
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/${MYSQL_DATABASE:-crewforge}?serverTimezone=Asia/Shanghai&useUnicode=true&characterEncoding=utf-8&allowPublicKeyRetrieval=true&useSSL=false
+      SPRING_DATASOURCE_USERNAME: ${MYSQL_USER:-crewforge}
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_PASSWORD:?set in deploy/.env}
+      SPRING_DATASOURCE_DRIVER_CLASS_NAME: com.mysql.cj.jdbc.Driver
+      # —— Redis ——
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: "6379"
+      # —— LLM 密钥（引擎侧读取）——
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:?set in deploy/.env}
+      JAVA_BASE_URL: ${JAVA_BASE_URL:-http://127.0.0.1:8080}
+      # —— 生成项目验证开关：1=允许用宿主 Docker 真验收；0=退化为"未验证" ——
+      CREWFORGE_ALLOW_DOCKER: ${CREWFORGE_ALLOW_DOCKER:-0}
+      SKIP_RUN_VERIFY: ${SKIP_RUN_VERIFY:-0}
+    volumes:
+      # 产物树持久化（生成的代码、证据、报告都在这）
+      - runs-data:/app/runs
+    # ⚠️⚠️ 安全边界：挂 docker.sock ≈ 给容器宿主机 root 权限。
+    #   只有当 CREWFORGE_ALLOW_DOCKER=1 且你**信任提交需求的人**时才打开。
+    #   托管给外部用户时请改成独立 worker 主机 / DinD + 资源限额，或保持 0（未验证交付）。
+    # - /var/run/docker.sock:/var/run/docker.sock
+    deploy:
+      resources:
+        limits:
+          memory: ${APP_MEM_LIMIT:-4g}
+          cpus: "${APP_CPU_LIMIT:-2.0}"
+    networks: [cf]
+
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.web
+    restart: unless-stopped
+    depends_on: [app]
+    ports:
+      - "${WEB_PORT:-80}:80"
+    networks: [cf]
+
+volumes:
+  mysql-data:
+  redis-data:
+  runs-data:
+
+networks:
+  cf:
+    driver: bridge
