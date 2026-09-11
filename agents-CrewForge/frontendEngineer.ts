@@ -31,6 +31,8 @@ import { gate } from "./concurrency";
 import { FILE_TOOLS, TOOL_PROTOCOL, runToolFileJob, type ToolExecCtx } from "./fileTools";
 import { runtimeSettings } from "./settings";
 import { assemblePrompt, buildStablePrefix, fingerprint } from "./engine/steps/promptPrefix";
+import { resolveStackProfile, type StackProfile } from "./engine/stacks/profile";
+import { findComponentTagIssues, shouldScanComponentTags } from "./engine/stacks/components";
 
 const FRONTEND_MODEL_JSON = JSON.stringify({
     provider: "deepseek",
@@ -45,9 +47,6 @@ const FRONTEND_MODEL_JSON = JSON.stringify({
  * 因此只砍最小的单文件任务；多页面任务的整页原子性依赖设计稿，保留。
  */
 const SKIP_DESIGN_MAX_FILES = 2;
-
-// Kept only so historical prompt exports remain import-compatible; production rules below use the selected stack.
-const TDESIGN_WHITELIST_TAGS = "兼容导出，不参与生产编排";
 
 // ---------- 提示词 ----------
 
@@ -82,51 +81,12 @@ ${baselinePromptBlock()}
 - 只输出目标文件的完整源代码，不要 JSON、Markdown 代码围栏或额外说明。
 `;
 
-// ---------- TDesign 规约（9/5 MCP 集成） ----------
-// 刻意不写进 design_prompt/file_prompt 常量本体，而是构造函数里"追加"到最终提示词：
-// DB 的 sys_agent_node 早先已入库旧 prompt，只改内置常量对已建 agent 不生效；
-// 代码侧追加 = 无论节点怎么自定义，规约必在场（同 DEFAULT_THEME 的注入姿势）。
-
-/** 工位 A 追加：设计稿必须声明选用组件（→ 代码侧预取文档 + 幻觉闸门的输入） */
-const FRONTEND_DESIGN_RULE = `
-
-## 组件库规约（强制，与上文冲突时以本节为准）
-- UI 统一 TDesign Vue Next，模板只用 \`<t-*>\` 标签；可用组件白名单：${TDESIGN_WHITELIST_TAGS}
-- 白名单外的能力用原生 HTML/CSS 实现，不得发明组件（写了也会在下游闸门被核验打回）。
-- 设计稿末尾必须单起一行声明本任务选用的组件，格式严格为：
-  【组件清单】<t-form>、<t-input>、<t-button>
-  （只列白名单内、本任务真正用到的；一个都不用就写【组件清单】无）`;
-
-/** 工位 B 追加：只准用白名单组件、API 照抄注入的真实文档、主题走 --td-* 变量 */
-const FRONTEND_FILE_RULE = `
-
-## 组件库规约（强制）
-- 只允许 TDesign Vue Next 组件：<t-button> 等 <t-*> 标签，白名单：${TDESIGN_WHITELIST_TAGS}
-- 禁止其他组件库标签（el-*、a-*、van-*、v-* 除 vue 内置外）；禁止凭记忆发明 <t-xxx>。
-- 下方若附带"TDesign 组件真实 API"文档，props/事件名/v-model 一律照抄文档；文档里没有的属性不要写。
-- 颜色/圆角/间距一律引用输入给定的 --td-* 主题变量，不硬编码色值。`;
-
 // ---------- 基建占位（p2 复盘修①，9/9：路径+内容双同源，不再悬空） ----------
 // 旧文案只写 "request.ts —— 全局请求封装（基建产出）" 不给路径，地基批却未必产出（p2 造的是
 // services/api.js）——34 次打回里 20 次幽灵 import 就是这几行教的。现在：
 //   内容=common.ts 常量（architect.ensureRequestFoundation 落盘用的同一份，教的路径=盘上真实存在）；
 //   路径钉死契约标准 frontend/src/utils/request.ts，由地基代码强制保证在场。
-// 主题串在 tdesignMcp.ts 单一来源（architect bootstrap 落盘用的同一份，防提示词与真实文件漂移）
 const DEFAULT_THEME = STYLE_CSS;
-
-const FRONTEND_STACK_DESIGN_RULE = `
-
-## Element Plus 规约（强制，与上文冲突时以本节为准）
-- UI 统一使用 Element Plus；设计稿只列实际需要的 Element Plus 组件和原生 HTML/CSS。
-- 组件 props、事件和 v-model 必须使用 Element Plus 真实 API，不凭记忆发明组件或属性。
-- 设计稿必须列出页面文件、交互状态、接口 method/path、请求字段和响应字段。`;
-
-const FRONTEND_STACK_FILE_RULE = `
-
-## Element Plus 规约（强制）
-- 只使用 Element Plus 组件或原生 HTML，不得引入 TDesign、Ant Design、Vant 等未声明依赖。
-- 颜色、圆角和间距引用 frontend/src/style.css 的 --cf-* 变量，硬编码色值最多 5 处。
-- 业务请求只能 import ${REQUEST_WRAPPER_PATH}；不得另起 services/api.js、utils/request.js 或其他 axios/fetch 封装。`;
 
 const DEFAULT_REQUEST = REQUEST_WRAPPER_CODE + `
 // 用法（页面/组件统一走这个封装，不要另起 axios/fetch 轮子）：
@@ -159,6 +119,30 @@ export function parseDesignComponents(design: string | null): string[] {
     const line = design.match(/【组件清单】(.+)/)?.[1] ?? "";
     const names = [...new Set([...line.matchAll(/t-([a-z][a-z0-9-]*)/g)].map(m => m[1] ?? ""))].filter(Boolean);
     return names.slice(0, 15);
+}
+
+// ============================================================
+// 技术栈上下文（9/10：替代已删除的四条硬编码规约常量）
+//
+//   此前引擎里躺着 TDesign×2 + Element Plus×2 四条规约，**全部零引用**——模型拿不到组件库规约，
+//   而 architect 又强制装 element-plus、幻觉闸还是空实现。现在规约由 StackProfile **按任务技术栈**
+//   生成：换栈只换描述符，不换引擎。未登记栈走 GENERIC（verified=false）并在日志里显式标注。
+// ============================================================
+interface StackContext { profile: StackProfile; rule: string; verified: boolean; label: string }
+
+function stackContextOf(engineName: string, task: ExecTask): StackContext {
+    const baseline = resolveProjectBaseline(task.stack);
+    const profile = resolveStackProfile(baseline);
+    if (!profile.verified) {
+        console.warn(`[${engineName}] ⚠️ 未登记技术栈（${baseline.frontend.framework}/${baseline.backend.framework}）：`
+            + `本栈无验证器，产物只能"未验证"交付，不得计入通过`);
+    }
+    return {
+        profile,
+        rule: profile.uiRule(baseline),
+        verified: profile.verified,
+        label: `${profile.id}·${baseline.frontend.ui}`,
+    };
 }
 
 // ============================================================
@@ -233,15 +217,20 @@ export class FrontendEngineer extends BaseAgent {
 
     private async generateDesign(task: ExecTask): Promise<string | null> {
         const model = initModels(FRONTEND_MODEL_JSON, "pseudo");   // T3：A 工位（设计稿）归 pseudo 档
-        const dynamicBaseline = `\n\n${baselinePromptBlock(resolveProjectBaseline(task.stack))}`;
+        const baseline = resolveProjectBaseline(task.stack);
+        const dynamicBaseline = `\n\n${baselinePromptBlock(baseline)}`;
         const contract = contractPromptBlock(await loadContracts());   // T2：契约头部注入（设计稿的页面/路由归属以此为准）
+        const stack = stackContextOf(this.name, task);                 // ★ 栈驱动规约（替代已删的硬编码常量）
         let feedback = "";
         for (let attempt = 1; attempt <= 3; attempt++) {
             const ts = Date.now();
             try {
                 // 工位超时 9/3 拍板：与主链同级 300s（旧 180s 两档制被 run10 击穿，见 backendEngineer 同款注释）
                 const res = await invokeWithTimeout<any>(`${task.id} 设计稿`, DEFAULT_TIMEOUT_MS, sig => model.invoke([
-                    new SystemMessage(this.designPrompt + dynamicBaseline + contract + `\n\n## 当前任务\n${JSON.stringify(task, null, 2)}` + feedback),
+                    new SystemMessage(assemblePrompt(
+                        { role: this.designPrompt + stack.rule, baseline: dynamicBaseline, contract },
+                        [`\n\n## 当前任务\n${JSON.stringify(task, null, 2)}`, feedback],
+                    )),
                 ], { signal: sig }));
                 console.log(`[${this.name}] ${task.id} 设计稿 ${Date.now() - ts}ms`);
                 const design = extractGeneratedCode(res.content);
@@ -350,16 +339,19 @@ export class FrontendEngineer extends BaseAgent {
         const banned = parseBannedImports(contractsMd);
         const guard = sliceGuard(task.files.length);                       // T4：竖切大任务收敛为 2 次×600s
         // ★ C-1（9/10 成本轨）：稳定段定序装配（角色→基线→契约→文件树[→工具协议]），易变段只许追加在后
-        const stableSections = { role: this.filePrompt, baseline: dynamicBaseline, contract, fileTree: treeBlock };
-        console.log(`[${this.name}] ${task.id} ${filePath} 稳定前缀 ${fingerprint(buildStablePrefix(stableSections))}（${buildStablePrefix(stableSections).length} 字符）`);
+        const stack = stackContextOf(this.name, task);                     // ★ 栈驱动规约（组件库/封装/样式变量）
+        const stackRule = stack.profile.componentRules(finalBaseline);
+        const stableSections = { role: this.filePrompt + stack.rule, baseline: dynamicBaseline, contract, fileTree: treeBlock };
+        console.log(`[${this.name}] ${task.id} ${filePath} 栈=${stack.label} 验证=${stack.verified} 稳定前缀 ${fingerprint(buildStablePrefix(stableSections))}（${buildStablePrefix(stableSections).length} 字符）`);
         // ---- T7b 工具模式（默认关，backendEngineer 同注释）。幻觉闸挂进工具的 extraGate 位：
-        // write/edit 内容里的 <t-*> 红=拒绝落盘+错因回给模型（9/5 闸门语义原样搬家，不再吃 attempt 名额）----
+        // write/edit 内容里的越库组件标签红=拒绝落盘+错因回给模型（9/5 闸门语义，9/10 改为**栈驱动**：
+        //   判据来自本栈声明的组件库，不再硬编码 Element Plus/TDesign）----
         if (runtimeSettings()?.toolMode && !this.toolModeDead) {
             try {
                 const toolModel = initModels(JSON.stringify({ ...JSON.parse(FRONTEND_MODEL_JSON), tools: FILE_TOOLS }), "frontend");
                 const ctx: ToolExecCtx = {
                     pid, written: writtenFiles, planned: task.files, landed: null, banned,
-                    extraGate: async () => [],
+                    extraGate: async (fp, code) => shouldScanComponentTags(fp) ? findComponentTagIssues(code, stackRule) : [],
                 };
                 const landed = await runToolFileJob({
                     system: assemblePrompt(
@@ -413,6 +405,10 @@ export class FrontendEngineer extends BaseAgent {
                 // ---- T1 编译闸门（9/8）：幻觉过了还要过编译——语法/SFC 结构/相对引用一锅查，
                 // 与幻觉闸共用本轮工位 attempt 名额，耗尽同样判文件失败走返工（宁失败不交坏码）----
                 const problems = await checkFile(filePath, code, known, banned);
+                // ★ 9/10：组件库校验在老路同样生效（此前只挂在工具模式的空实现 extraGate 上，等于全丢）
+                if (shouldScanComponentTags(filePath)) {
+                    problems.push(...findComponentTagIssues(code, stackRule));
+                }
                 if (problems.length > 0) {
                     if (attempt < guard.maxAttempt) {
                         feedback = gateFeedback(attempt, problems);
