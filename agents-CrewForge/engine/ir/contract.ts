@@ -225,3 +225,62 @@ process.exit(failed > 0 ? 1 : 0);
 export function checkResponseFields(json: unknown, checks: Record<string, import("./predicates").Predicate>): string[] {
     return evaluateJsonPath(json, checks);
 }
+
+// ============================================================
+// 从**结构化任务**生成验收（★ 不碰文本正则）
+//
+//   背景：旧实现用 `expectedApisOf` 正则去戳 task.description 文本行（`- POST /api/x`），
+//   格式一变就漏检、而漏检即放行。ExecTask 本来就带 method/path 字段，直接读字段即可。
+// ============================================================
+
+export interface TaskLike {
+    id: string;
+    layer: "backend" | "frontend";
+    method: string;
+    path: string;
+    title?: string;
+}
+
+export interface AcceptanceFromTasksOpts {
+    apiPrefix?: string;
+    /** 期望状态码（默认 200） */
+    expectStatus?: number;
+    /** 成功码断言（来自基线；给了就断言 $.code） */
+    successCode?: number;
+}
+
+/**
+ * 每个后端任务 → 一条 http 验收：断言状态码（+ 成功码）。
+ * 前端任务不产生验收（它由渲染审与契约测试的响应字段覆盖）。
+ * method/path 为空的任务被跳过并**如实计数**（不发明验收）。
+ */
+export function acceptanceFromTasks(tasks: TaskLike[], opts: AcceptanceFromTasksOpts = {}): { cases: Acceptance[]; skipped: string[] } {
+    const prefix = (opts.apiPrefix ?? "/api").replace(/\/$/, "");
+    const status = opts.expectStatus ?? 200;
+    const cases: Acceptance[] = [];
+    const skipped: string[] = [];
+    const seen = new Set<string>();
+    for (const t of tasks) {
+        if (t.layer !== "backend") continue;
+        const method = (t.method ?? "").trim().toUpperCase();
+        const rawPath = (t.path ?? "").trim();
+        if (!method || !rawPath || !rawPath.startsWith("/")) {
+            skipped.push(`${t.id}${t.title ? `（${t.title}）` : ""}：缺 method/path，无法生成验收`);
+            continue;
+        }
+        const full = rawPath.startsWith(prefix) ? rawPath : `${prefix}${rawPath}`;
+        const key = `${method} ${full}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const jsonPath: Record<string, { op: "equals"; value: unknown }> = {};
+        if (opts.successCode != null) jsonPath["$.code"] = { op: "equals", value: opts.successCode };
+        cases.push({
+            kind: "http",
+            id: `${method}-${full.replace(/[^\w]+/g, "-")}`,
+            request: { method, path: full },
+            expect: { status, ...(Object.keys(jsonPath).length ? { jsonPath } : {}) },
+            display: t.title ?? `${method} ${full}`,
+        });
+    }
+    return { cases, skipped };
+}

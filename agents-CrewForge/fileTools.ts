@@ -20,6 +20,7 @@ import { checkFile, buildKnown, type GateKnown } from "./checkers";
 import { writeWorkspace } from "./common";
 import { projectDir } from "./runEnv";
 import { invokeWithTimeout } from "./llm";
+import { findNormalizedWindow, findAnchorCandidates, renderAnchorCandidates } from "./engine/exec/editAnchor";
 
 /** 工具作业退出原因（C-4 预算化，9/10）：调用方据此决定"退单发老路"还是"判失败" */
 export type ToolExitReason = "landed" | "exhausted" | "gave_up";
@@ -40,6 +41,8 @@ export interface ToolExecCtx {
     deliveryOnly?: boolean;
     /** C-4（9/10）：退出原因。exhausted/gave_up 允许调用方退单发老路（此前只有异常才退路） */
     exitReason?: ToolExitReason;
+    /** edit 锚点连续失配次数（达阈值即提示"先 read 再改"，防反复猜锚点） */
+    anchorMiss?: number;
 }
 
 /** C-4：记一次无进展 */
@@ -266,17 +269,43 @@ export async function executeFileTool(ctx: ToolExecCtx, targetFile: string, name
             // 锁内重读当前盘上/内存内容——补丁永远打在最新版上（防排队期间被人抢写）
             const current = readViaCtx(ctx, path);
             if (current == null) return { ok: false, result: `文件不存在：${path}（新文件请直接 write 整文件）` };
+
             const hits = current.split(oldText).length - 1;
-            if (hits === 0) return { ok: false, result: `old_text 在 ${path} 中找不到（锚点必须逐字一致含缩进；先 read 拿现状再 edit）` };
-            if (hits > 1 && !replaceAll) return { ok: false, result: `old_text 在 ${path} 出现 ${hits} 处不唯一：加长锚点上下文，或明确 replace_all=true` };
-            const patched = replaceAll ? current.split(oldText).join(newText) : current.replace(oldText, () => newText);
+            let patched: string;
+            let note = "";
+            if (hits === 0) {
+                // ★ 结构化降级①（9/10）：归一化窗口匹配——逐行 trim 后整段相等，且**必须唯一命中**。
+                //   生成代码的缩进/行尾空白常与模型记忆不一致；逐字失配就报错会逼它整文件重写（贵且易改错地方）。
+                const win = findNormalizedWindow(current, oldText);
+                if (win) {
+                    patched = current.slice(0, win.start) + newText + current.slice(win.end);
+                    note = `（锚点按忽略缩进归一化命中：第 ${win.line} 行起 ${win.lines} 行）`;
+                    console.log(`[fileTools] ${path} edit 归一化命中 第${win.line}行`);
+                } else {
+                    // ★ 结构化降级②：给相似位置候选，把"重试"变成"照着改"
+                    const cands = findAnchorCandidates(current, oldText);
+                    ctx.anchorMiss = (ctx.anchorMiss ?? 0) + 1;
+                    noteProgress(ctx);
+                    return {
+                        ok: false,
+                        result: `old_text 在 ${path} 中找不到（逐字与归一化都不命中）。\n${renderAnchorCandidates(cands)}`
+                            + (ctx.anchorMiss >= 2 ? "\n★ 连续失配：不要再猜锚点，先 read 该文件，用现状原文重写 old_text。" : ""),
+                    };
+                }
+            } else if (hits > 1 && !replaceAll) {
+                return { ok: false, result: `old_text 在 ${path} 出现 ${hits} 处不唯一：加长锚点上下文，或明确 replace_all=true` };
+            } else {
+                patched = replaceAll ? current.split(oldText).join(newText) : current.replace(oldText, () => newText);
+                if (replaceAll && hits > 1) note = `（replace_all：替换 ${hits} 处）`;
+            }
+
             const problems = await gateContent(ctx, path, patched);
             if (problems.length > 0) return { ok: false, result: `闸门拒绝（补丁未落盘）：${problems.join("；").slice(0, 600)}` };
             writeWorkspace(path, patched);
             ctx.written.set(path, patched);
             if (path === targetFile) ctx.landed = patched;
             noteProgress(ctx);
-            return { ok: true, result: `已修补并落盘 ${path}（1 处，校验通过）` };
+            return { ok: true, result: `已修补并落盘 ${path}${note}（校验通过）` };
         });
     }
 

@@ -35,6 +35,7 @@ import { buildKnown, checkBatch } from "./checkers";
 import { publishContracts } from "./contracts";
 import { enforceEngineFoundation, tidyExecTasks, bannedDependencyList } from "./foundation";
 import { baselinePromptBlock, resolveProjectBaseline } from "./baseline";
+import { acceptanceFromTasks } from "./engine/ir/contract";
 
 // ---------- 模型 ----------
 
@@ -627,6 +628,24 @@ function makeDispatchNode(station: TransferStation): StateNodeFn {
         // 发布失败只 warn 不拦下发（旁路）；契约本身也随 writeWorkspace 落库进 sys_project_file
         try { await publishContracts(phaseNo, plan, tasks, stack); }
         catch (e) { console.warn("[architect] 契约发布异常（旁路，工位按无契约运行）:", (e as Error).message); }
+
+        // 2.6 ★ 交付关输入（9/10）：把**可执行验收**落成产物（per-phase），供 runner 最后统一验证。
+        //     为什么走文件而不是 DB：sys_task 不落 method/path（工位按描述重推），而交付关必须拿到
+        //     结构化接口清单——从 ExecTask 字段机械生成，**不碰文本正则**（旧 expectedApisOf 的坑）。
+        try {
+            const pid = currentProjectId();
+            if (pid != null) {
+                const { cases, skipped } = acceptanceFromTasks(
+                    tasks.map(t => ({ id: t.id, layer: t.layer, method: t.method, path: t.path, title: t.title })),
+                    { apiPrefix: stack?.apiPrefix ?? "/api", successCode: 1 },
+                );
+                const dir = projectDir(pid) + "/_verify";
+                fs.mkdirSync(dir, { recursive: true });
+                fs.writeFileSync(`${dir}/acceptance-p${phaseNo}.json`,
+                    JSON.stringify({ phase: phaseNo, generatedAt: new Date().toISOString(), cases, skipped }, null, 2), "utf-8");
+                console.log(`[architect] 交付关输入已落盘：_verify/acceptance-p${phaseNo}.json（${cases.length} 条可执行验收${skipped.length ? `，跳过 ${skipped.length} 个缺 method/path 的任务` : ""}）`);
+            }
+        } catch (e) { console.warn("[architect] 验收 IR 落盘失败（旁路）:", (e as Error).message); }
 
         // 3. 副作用：按层分流下发开发 + 声明给维护（final）+ 通知合并器清配对缓存
         for (const t of tasks) {

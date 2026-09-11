@@ -14,7 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { jsonPathGet, evaluatePredicate, evaluateJsonPath } from "./predicates";
 import { validateAcceptance, judgeHttpAcceptance, type Acceptance } from "./acceptance";
-import { validateContract, acceptanceFromContract, renderClientStub, renderAcceptanceRunner, renderContractDoc } from "./contract";
+import { validateContract, acceptanceFromContract, renderClientStub, renderAcceptanceRunner, renderContractDoc, acceptanceFromTasks } from "./contract";
 import { runCommand } from "../exec/run";
 import { PROJECT_BASELINE } from "../../baseline";
 
@@ -100,6 +100,23 @@ console.log("=== ③ 契约 → 可执行验收 ===");
     const stub = renderClientStub(c.value!, PROJECT_BASELINE.frontend.requestPath);
     ok(stub.includes("from \"../utils/request\"") || stub.includes("utils/request"), "前端桩 import 唯一封装路径");
     ok(stub.includes("postauth_login") || stub.includes("export const post"), "桩函数按路径机械生成");
+}
+
+console.log("=== ④ 从结构化任务生成验收（不碰文本正则） ===");
+{
+    const tasks = [
+        { id: "T1", layer: "backend" as const, method: "POST", path: "/auth/login", title: "登录" },
+        { id: "T1-F", layer: "frontend" as const, method: "POST", path: "/auth/login", title: "登录页" },
+        { id: "T2", layer: "backend" as const, method: "GET", path: "/api/accounts", title: "账号列表（已带前缀）" },
+        { id: "T3", layer: "backend" as const, method: "", path: "", title: "脏任务" },
+        { id: "T4", layer: "backend" as const, method: "POST", path: "/auth/login", title: "重复接口" },
+    ];
+    const { cases, skipped } = acceptanceFromTasks(tasks, { apiPrefix: "/api", successCode: 1 });
+    ok(cases.length === 2, `后端任务生成 ${cases.length} 条验收（前端任务不产生、重复接口去重）`);
+    ok(cases[0]!.kind === "http" && (cases[0] as any).request.path === "/api/auth/login", "缺前缀自动补 /api");
+    ok((cases[1] as any).request.path === "/api/accounts", "已带前缀不重复拼接");
+    ok((cases[0] as any).expect.jsonPath["$.code"].value === 1, "成功码断言来自基线");
+    ok(skipped.length === 1 && skipped[0]!.includes("T3"), `★ 脏任务如实计入 skipped 而非发明验收：${skipped[0]}`);
 }
 
 console.log("=== ⑤ 生成的契约测试脚本真跑一遍 ===");

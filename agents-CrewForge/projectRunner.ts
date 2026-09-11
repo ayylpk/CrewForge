@@ -16,6 +16,8 @@
 // ============================================================
 
 import { HumanMessage, type BaseMessage } from "@langchain/core/messages";
+import fs from "node:fs";
+import { finalGate, type FinalGateResult } from "./engine/run/finalGate";
 import { TransferStation, roles } from "./Hub";
 import type { BaseAgent } from "./BaseAgent";
 import { Manager } from "./manager";
@@ -31,6 +33,7 @@ import { pickQuestioner } from "./confirm";
 import { closeTaskBridge, getTasksByProject, type Task } from "./task";   // 出口保险：退出前冲干净在途 sys_task 写（9/3 run10 T4 竞态）
 import { closeRenderGates } from "./renderGate";                           // T6 出口保险：整树杀渲染审的 vite 进程链
 import { archiveProjectDir } from "./runEnv";
+import { projectDir } from "./runEnv";
 import { refreshSettings } from "./settings";
 import { PhaseRequestMessageSchema } from "./messageProtocol";
 
@@ -293,10 +296,67 @@ export async function runProject(projectId: number, questioner: Questioner): Pro
     // 4. 逐阶段下发（边界行为见 drivePhases）
     const outcome = await drivePhases(station, projectId, plan, phases, startIdx, exitAtBoundary);
     if (outcome === "done") {
-        await updateProjectField(projectId, { status: "done" });
-        console.log("[runner] 全阶段完成 → status=done 已落库");
+        // ★ 交付关（9/10）：项目"完成"必须等于"验证通过"——全阶段跑完不再直接落 done。
+        //   runs/p9 的教训：阶段全过、落 done，产物却根本编译不过（3 处幻觉 API）。
+        const gate = await runFinalGate(projectId, plan);
+        await updateProjectField(projectId, { status: gate.status });
+        if (gate.status === "done" && gate.verified) {
+            console.log(`[runner] ✅ 全阶段完成且执行式验证通过 → status=done（${gate.summary}）`);
+        } else if (gate.status === "done") {
+            console.warn(`[runner] ⚠️ 全阶段完成但**未验证** → status=done：${gate.summary}`);
+            console.warn(`[runner]    报告：${gate.reportFile ?? "（无）"}；对外不得宣称"已验证"`);
+        } else {
+            console.error(`[runner] ❌ 全阶段完成但执行式验证未通过 → status=failed：${gate.summary}`);
+            console.error(`[runner]    报告：${gate.reportFile ?? "（无）"}`);
+        }
     }
     console.log("[runner] 流程结束");
+}
+
+/**
+ * 交付关：读产物树里的验收 IR（architect 每阶段落盘）+ 任务清单 → finalGate。
+ * 全程 try 包住：交付关自身异常不得让 runner 崩（但要显式标注未验证）。
+ */
+async function runFinalGate(projectId: number, plan: unknown): Promise<FinalGateResult> {
+    try {
+        const dir = projectDir(projectId);
+        const verifyDir = dir + "/_verify";
+        let acceptanceFiles: string[] = [];
+        try {
+            acceptanceFiles = fs.readdirSync(verifyDir)
+                .filter(f => /^acceptance-p\d+\.json$/i.test(f))
+                .map(f => verifyDir + "/" + f);
+        } catch { acceptanceFiles = []; }
+
+        const rows = await getTasksByProject(projectId);
+        const tasks = rows.map(r => ({
+            id: r.task_id_ext ?? String(r.id),
+            layer: (r.layer === "frontend" ? "frontend" : "backend") as "backend" | "frontend",
+            method: "",
+            path: "",
+            title: r.title ?? "",
+        }));
+
+        // 技术选型从 .architect-state.json 读回（bootstrap 落盘的那份）
+        let stack: unknown = null;
+        try {
+            const f = dir + "/.architect-state.json";
+            if (fs.existsSync(f)) stack = JSON.parse(fs.readFileSync(f, "utf-8"))?.stack ?? null;
+        } catch { /* 读不到=按默认基线 */ }
+
+        const result = await finalGate({
+            projectDir: dir,
+            tasks,
+            acceptanceFiles,
+            stack,
+            skip: process.env.SKIP_RUN_VERIFY === "1",
+        });
+        console.log(`[runner] 交付关：验收 IR ${acceptanceFiles.length} 份 / 任务 ${tasks.length} 条 → ${result.summary}`);
+        return result;
+    } catch (e) {
+        console.warn("[runner] 交付关异常（按未验证处理）:", (e as Error).message);
+        return { status: "done", verified: false, summary: `交付关异常：${(e as Error).message.slice(0, 120)}`, reportFile: null };
+    }
 }
 
 // ---------- CLI 入口（沙箱：命令行或 Java spawn 直接启动） ----------
