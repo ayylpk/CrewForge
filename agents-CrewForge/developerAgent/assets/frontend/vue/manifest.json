@@ -1,0 +1,42 @@
+{
+  "schemaVersion": "crewforge.asset/v1",
+  "id": "vue",
+  "kind": "frontend",
+  "displayName": "Vue",
+  "version": "3.5.21",
+  "language": "TypeScript",
+  "runtime": { "name": "Node.js", "range": ">=20 <25" },
+  "summaryFile": "summary.md",
+  "constraintsFile": "constraints.md",
+  "tags": ["spa", "forms", "crud", "vite", "typescript"],
+  "provides": ["frontend.spa", "ui.reactive", "routing.client", "http.json-client"],
+  "requires": ["backend.http"],
+  "conflicts": [],
+  "variables": [
+    { "name": "APP_NAME", "required": true, "example": "demo-web" },
+    { "name": "APP_TITLE", "required": true, "example": "示例项目" },
+    { "name": "API_PROXY_TARGET", "required": false, "default": "http://127.0.0.1:8080" }
+  ],
+  "files": [
+    { "source": "template/package.json.tpl", "target": "frontend/package.json", "mode": "render", "required": true },
+    { "source": "template/index.html.tpl", "target": "frontend/index.html", "mode": "render", "required": true },
+    { "source": "template/vite.config.ts.tpl", "target": "frontend/vite.config.ts", "mode": "render", "required": true },
+    { "source": "template/tsconfig.json.tpl", "target": "frontend/tsconfig.json", "mode": "copy", "required": true },
+    { "source": "template/env.d.ts.tpl", "target": "frontend/src/env.d.ts", "mode": "copy", "required": true },
+    { "source": "template/main.ts.tpl", "target": "frontend/src/main.ts", "mode": "copy", "required": true },
+    { "source": "template/App.vue.tpl", "target": "frontend/src/App.vue", "mode": "render", "required": true },
+    { "source": "template/router.ts.tpl", "target": "frontend/src/router/index.ts", "mode": "copy", "required": true }
+  ],
+  "extensionPoints": { "routes": "APP_ROUTES", "styles": "APP_STYLES" },
+  "validation": {
+    "commands": [
+      { "id": "frontend.typecheck", "command": "npm", "args": ["run", "typecheck"], "cwd": "frontend", "timeoutMs": 300000 },
+      { "id": "frontend.build", "command": "npm", "args": ["run", "build"], "cwd": "frontend", "timeoutMs": 300000 }
+    ],
+    "requiredRoutes": ["/"]
+  },
+  "selection": {
+    "recommendedFor": ["表单", "后台管理", "CRUD 页面", "仪表盘"],
+    "avoidWhen": ["需求明确不要 Web 前端", "只交付静态内容"]
+  }
+}

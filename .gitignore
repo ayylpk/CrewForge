@@ -40,3 +40,15 @@ agents-CrewForge/dist-node/
 smoke-input*
 # 阶段2起 RUNS_ROOT 统一指仓库根 runs/（产物树 pN/_archive/logs 不入库）
 runs/
+# Developer 本机 soft 冒烟的隔离工作区（生成的临时项目 / Ledger / 运行报告都不入库）
+.runs/
+
+# Local cleanup archive
+_archive/
+
+# ===== developerAgent 实弹实验产物（任务包/生成项目不入库，源码除外）=====
+agents-CrewForge/developerAgent/live/p0-*
+agents-CrewForge/developerAgent/live/mysite/
+agents-CrewForge/developerAgent/live/ts-site/
+agents-CrewForge/developerAgent/live/ts-site-v2/
+

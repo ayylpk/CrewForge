@@ -1,0 +1,42 @@
+{
+  "version": "developerAgent/2",
+  "note": "权限由代码强制（tools/registry.ts 的角色闸门 + workspace.ts 的路径检查 + tools/processSandbox.ts 的执行边界）；本文件只做配置留档，不参与运行时判定。",
+  "tools": {
+    "readonly": ["inspectTree", "readFile", "search", "gitDiff"],
+    "write": ["mkdir", "writeFile", "editFile"],
+    "exec": ["runCommand", "runBuild", "shell", "httpRequest"],
+    "process": ["startProcess", "readProcess", "stopProcess"],
+    "delegate": ["delegateReadonly"],
+    "note": "runCommand / runBuild 保留在核心工具集；shell / httpRequest / 进程三件套在扩展工具集（createDeveloperProcessRegistry）。Developer 实际使用两者合并后的 15 个工具。"
+  },
+  "privilegedTools": {
+    "note": "写盘 ∪ 执行 ∪ 进程 —— 只有 Developer 角色能调；其余角色一律返回 NOT_DEVELOPER。",
+    "count": 10
+  },
+  "roles": {
+    "developer": {
+      "read": "*",
+      "write": ["mkdir", "writeFile", "editFile"],
+      "exec": ["runCommand", "runBuild", "shell", "httpRequest"],
+      "process": ["startProcess", "readProcess", "stopProcess"],
+      "note": "唯一可写生成项目、唯一可执行命令、唯一可起进程的角色。角色值由代码注入（DEVELOPER_ROLE_NAME），不来自消息或配置。"
+    },
+    "pm": { "read": [], "write": [], "exec": [], "process": [] },
+    "architect": { "read": [], "write": [], "exec": [], "process": [] },
+    "test": {
+      "read": ["inspectTree", "readFile", "search", "gitDiff"],
+      "write": [],
+      "exec": [],
+      "process": [],
+      "note": "只读验证角色。只能走固定验证工具，拿不到 Developer 的任意 shell（工具名层面就被 createTestAgentToolbox 挡住），也只能返回机器证据。"
+    },
+    "document": { "read": [], "write": [], "exec": [], "process": [] }
+  },
+  "rejectCode": "NOT_DEVELOPER",
+  "readonlyRejectCode": "NOT_READONLY",
+  "authorityBoundary": {
+    "note": "Developer 自己的 build / grep / HTTP 结果只能用于调试，不能产生 verified=true。",
+    "verifiedProducedBy": "外部 TestAgent 的机器证据 + 快照绑定，由 Orchestrator 写入",
+    "hook": "tools/registry.ts 拒绝写盘/执行；graph.ts 的 canGoReady 只认受信 test_passed"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "crewforge.asset-catalog/v1",
+  "assets": [
+    { "id": "springboot", "kind": "backend", "version": "3.5.5", "path": "backend/springboot", "summary": "Spring Boot 3 / Java 17 REST 后端" },
+    { "id": "express", "kind": "backend", "version": "5.1.0", "path": "backend/express", "summary": "Express 5 / TypeScript 轻量 REST 后端" },
+    { "id": "vue", "kind": "frontend", "version": "3.5.21", "path": "frontend/vue", "summary": "Vue 3 / TypeScript / Vite 单页前端" },
+    { "id": "element-plus", "kind": "frontend-ui", "version": "2.11.5", "path": "frontend-ui/element-plus", "summary": "Vue 3 企业后台 UI 组件库" },
+    { "id": "tdesign-vue-next", "kind": "frontend-ui", "version": "1.16.1", "path": "frontend-ui/tdesign-vue-next", "summary": "腾讯 TDesign Vue 3 UI 组件库" },
+    { "id": "mysql", "kind": "database", "version": "8.4", "path": "database/mysql", "summary": "MySQL 8.4 关系数据库" }
+  ]
+}

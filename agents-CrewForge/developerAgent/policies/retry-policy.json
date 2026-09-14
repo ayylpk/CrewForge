@@ -1,0 +1,35 @@
+{
+  "version": "developerAgent/2",
+  "note": "与 state.ts / graph.ts 的默认值一致；改这里必须同步改代码与测试。",
+  "maxRepairAttempts": 2,
+  "maxLlmCalls": 40,
+  "maxStepsPerLoop": 12,
+  "waitTestTimeoutMs": 900000,
+  "stopOnRepeatedFailureSignature": true,
+  "stopOnBudgetExceeded": true,
+  "stopOnStalledRepair": true,
+  "stopOnRepeatedTimeout": {
+    "enabled": true,
+    "threshold": 2,
+    "marker": "TIMEOUT_REPEATED",
+    "note": "同一命令签名连续超时达到阈值即停手，标 TIMEOUT_REPEATED 并留 Ledger 失败记录，交给 TestAgent / Orchestrator 决定下一步（规格五.8）。任何一次正常返回都会把该签名的计数清零。"
+  },
+  "timeoutExtension": {
+    "enabled": true,
+    "maxPerCommand": 1,
+    "requiresReason": "timeoutReason（会写入 Ledger 的 timeout_extended 事件）",
+    "deniedCode": "TIMEOUT_EXTENSION_DENIED",
+    "note": "规格五.7：允许 Developer 主动延长一次超时，但必须记录原因。"
+  },
+  "commandDedupe": {
+    "enabled": true,
+    "fingerprintFields": ["tool", "command", "args", "cwd", "sourceSnapshotHash"],
+    "reuseOnSameSnapshot": true,
+    "neverCache": ["httpRequest", "startProcess", "readProcess", "stopProcess"],
+    "neverCacheKilled": "超时被杀 / 越界被终止的命令没有结果可复用，不入缓存",
+    "note": "规格五.2/5.3/5.4：同一文件快照下的重复命令直接复用结果；文件变了才重跑。"
+  },
+  "readyRequiresTestPassed": true,
+  "readyRequiresEvidence": true,
+  "readyRequiresTrustedTestAgent": true
+}

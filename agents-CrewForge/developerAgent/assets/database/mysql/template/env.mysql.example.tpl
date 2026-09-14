@@ -1,0 +1,6 @@
+DB_HOST=127.0.0.1
+DB_PORT={{DB_PORT}}
+DB_NAME={{DB_NAME}}
+DB_USER={{DB_USER}}
+DB_PASSWORD=change-me
+DB_ROOT_PASSWORD=change-root-password

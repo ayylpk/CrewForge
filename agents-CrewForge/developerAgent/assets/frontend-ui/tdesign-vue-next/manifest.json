@@ -1,0 +1,31 @@
+{
+  "schemaVersion": "crewforge.asset/v1",
+  "id": "tdesign-vue-next",
+  "kind": "frontend-ui",
+  "displayName": "TDesign Vue Next",
+  "version": "1.16.1",
+  "language": "TypeScript",
+  "runtime": { "name": "Vue", "range": ">=3.3 <4" },
+  "summaryFile": "summary.md",
+  "constraintsFile": "constraints.md",
+  "tags": ["vue", "ui", "tdesign", "admin", "crud", "tables"],
+  "provides": ["ui.components", "ui.forms", "ui.tables"],
+  "requires": ["frontend.vue"],
+  "conflicts": ["element-plus"],
+  "variables": [],
+  "files": [
+    { "source": "package-fragment.json", "target": "frontend/package.json", "mode": "merge", "required": true },
+    { "source": "integration/main.ts.snippet", "target": "frontend/src/main.ts", "mode": "snippet", "required": false }
+  ],
+  "extensionPoints": { "appRegistration": "tdesign-vue-next", "styles": "tdesign-vue-next.css" },
+  "validation": {
+    "commands": [
+      { "id": "frontend.ui.tdesign.build", "command": "npm", "args": ["run", "build"], "cwd": "frontend", "timeoutMs": 300000 }
+    ],
+    "checks": ["TDesign registration", "TDesign CSS import", "no conflicting UI asset"]
+  },
+  "selection": {
+    "recommendedFor": ["品牌化后台", "数据密集页面", "统一设计语言"],
+    "avoidWhen": ["项目明确要求 Element Plus"]
+  }
+}

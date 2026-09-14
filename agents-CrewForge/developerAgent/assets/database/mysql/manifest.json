@@ -1,0 +1,42 @@
+{
+  "schemaVersion": "crewforge.asset/v1",
+  "id": "mysql",
+  "kind": "database",
+  "displayName": "MySQL",
+  "version": "8.4",
+  "language": "SQL",
+  "runtime": { "name": "MySQL Server", "range": ">=8.4 <9" },
+  "summaryFile": "summary.md",
+  "constraintsFile": "constraints.md",
+  "tags": ["relational", "transaction", "sql", "jdbc"],
+  "provides": ["database.relational", "database.sql", "database.transactions", "jdbc.mysql"],
+  "requires": [],
+  "conflicts": [],
+  "variables": [
+    { "name": "DB_NAME", "required": true, "example": "app" },
+    { "name": "DB_USER", "required": true, "example": "app" },
+    { "name": "DB_PORT", "required": false, "default": "3306" },
+    { "name": "ENTITY_TABLE", "required": true, "source": "DomainModel.table" },
+    { "name": "ENTITY_COLUMNS_SQL", "required": true, "source": "DomainModel.fields" }
+  ],
+  "files": [
+    { "source": "template/compose.mysql.yml.tpl", "target": "compose.mysql.yml", "mode": "render", "required": true },
+    { "source": "template/env.mysql.example.tpl", "target": ".env.mysql.example", "mode": "render", "required": true },
+    { "source": "template/V1__baseline.sql.tpl", "target": "backend/src/main/resources/db/migration/V1__baseline.sql", "mode": "render", "required": true },
+    { "source": "integrations/springboot/maven-dependencies.xml.tpl", "target": "@extension/DATABASE_MAVEN_DEPENDENCIES", "mode": "fragment", "required": false },
+    { "source": "integrations/springboot/application.yml.tpl", "target": "@extension/DATABASE_APPLICATION_YAML", "mode": "fragment", "required": false }
+  ],
+  "integrations": [
+    { "with": "springboot", "files": ["integrations/springboot/maven-dependencies.xml.tpl", "integrations/springboot/application.yml.tpl"] }
+  ],
+  "validation": {
+    "commands": [
+      { "id": "database.health", "command": "mysqladmin", "args": ["ping", "--silent"], "cwd": ".", "timeoutMs": 30000 }
+    ],
+    "migrationPattern": "backend/src/main/resources/db/migration/V*.sql"
+  },
+  "selection": {
+    "recommendedFor": ["关系模型", "事务数据", "CRUD", "报表查询"],
+    "avoidWhen": ["只能嵌入式部署", "核心数据天然是无模式文档"]
+  }
+}

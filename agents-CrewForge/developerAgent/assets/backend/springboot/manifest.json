@@ -1,0 +1,42 @@
+{
+  "schemaVersion": "crewforge.asset/v1",
+  "id": "springboot",
+  "kind": "backend",
+  "displayName": "Spring Boot",
+  "version": "3.5.5",
+  "language": "Java",
+  "runtime": { "name": "JDK", "range": ">=17 <26" },
+  "summaryFile": "summary.md",
+  "constraintsFile": "constraints.md",
+  "tags": ["rest", "crud", "transaction", "jpa", "production"],
+  "provides": ["backend.http", "http.rest", "validation.bean", "persistence.jpa", "health.http"],
+  "requires": ["database.relational"],
+  "conflicts": [],
+  "variables": [
+    { "name": "GROUP_ID", "required": true, "example": "com.example" },
+    { "name": "ARTIFACT_ID", "required": true, "example": "demo" },
+    { "name": "APP_NAME", "required": true, "example": "demo" },
+    { "name": "PACKAGE_NAME", "required": true, "example": "com.example.demo" },
+    { "name": "PACKAGE_PATH", "required": true, "example": "com/example/demo" }
+  ],
+  "files": [
+    { "source": "template/pom.xml.tpl", "target": "backend/pom.xml", "mode": "render", "required": true },
+    { "source": "template/Application.java.tpl", "target": "backend/src/main/java/{{PACKAGE_PATH}}/Application.java", "mode": "render", "required": true },
+    { "source": "template/application.yml.tpl", "target": "backend/src/main/resources/application.yml", "mode": "render", "required": true }
+  ],
+  "extensionPoints": {
+    "mavenDependencies": "DATABASE_MAVEN_DEPENDENCIES",
+    "applicationConfig": "DATABASE_APPLICATION_YAML"
+  },
+  "validation": {
+    "commands": [
+      { "id": "backend.compile", "command": "./mvnw", "args": ["-q", "test"], "cwd": "backend", "timeoutMs": 600000 },
+      { "id": "backend.package", "command": "./mvnw", "args": ["-q", "package", "-DskipTests"], "cwd": "backend", "timeoutMs": 600000 }
+    ],
+    "healthPath": "/actuator/health"
+  },
+  "selection": {
+    "recommendedFor": ["CRUD API", "事务业务", "企业管理系统"],
+    "avoidWhen": ["部署环境不能运行 JVM", "仅需极小无状态函数"]
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "schemaVersion": "crewforge.asset/v1",
+  "id": "express",
+  "kind": "backend",
+  "displayName": "Express",
+  "version": "5.1.0",
+  "language": "TypeScript",
+  "runtime": { "name": "Node.js", "range": ">=20 <25" },
+  "summaryFile": "summary.md",
+  "constraintsFile": "constraints.md",
+  "tags": ["rest", "lightweight", "typescript", "bff", "node"],
+  "provides": ["backend.http", "http.rest", "middleware.composable", "health.http"],
+  "requires": [],
+  "conflicts": [],
+  "variables": [
+    { "name": "APP_NAME", "required": true, "example": "demo-api" },
+    { "name": "PACKAGE_NAME", "required": true, "example": "demo-api" },
+    { "name": "PORT", "required": false, "default": "3000" }
+  ],
+  "files": [
+    { "source": "template/package.json.tpl", "target": "backend/package.json", "mode": "render", "required": true },
+    { "source": "template/tsconfig.json.tpl", "target": "backend/tsconfig.json", "mode": "copy", "required": true },
+    { "source": "template/src/config.ts.tpl", "target": "backend/src/config.ts", "mode": "render", "required": true },
+    { "source": "template/src/app.ts.tpl", "target": "backend/src/app.ts", "mode": "copy", "required": true },
+    { "source": "template/src/index.ts.tpl", "target": "backend/src/index.ts", "mode": "render", "required": true },
+    { "source": "template/src/routes/health.ts.tpl", "target": "backend/src/routes/health.ts", "mode": "copy", "required": true }
+  ],
+  "extensionPoints": { "routes": "APP_ROUTES", "middleware": "APP_MIDDLEWARE", "database": "APP_DATABASE_ADAPTER" },
+  "validation": {
+    "commands": [
+      { "id": "backend.typecheck", "command": "npm", "args": ["run", "typecheck"], "cwd": "backend", "timeoutMs": 300000 },
+      { "id": "backend.build", "command": "npm", "args": ["run", "build"], "cwd": "backend", "timeoutMs": 300000 }
+    ],
+    "healthPath": "/health"
+  },
+  "selection": {
+    "recommendedFor": ["轻量 REST API", "BFF", "快速原型", "Node.js 部署"],
+    "avoidWhen": ["必须使用 JVM", "复杂事务和强类型 ORM 是核心需求"]
+  }
+}

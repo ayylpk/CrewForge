@@ -1,0 +1,31 @@
+{
+  "schemaVersion": "crewforge.asset/v1",
+  "id": "element-plus",
+  "kind": "frontend-ui",
+  "displayName": "Element Plus",
+  "version": "2.11.5",
+  "language": "TypeScript",
+  "runtime": { "name": "Vue", "range": ">=3.3 <4" },
+  "summaryFile": "summary.md",
+  "constraintsFile": "constraints.md",
+  "tags": ["vue", "ui", "admin", "crud", "forms", "tables"],
+  "provides": ["ui.components", "ui.forms", "ui.tables"],
+  "requires": ["frontend.vue"],
+  "conflicts": ["tdesign-vue-next"],
+  "variables": [],
+  "files": [
+    { "source": "package-fragment.json", "target": "frontend/package.json", "mode": "merge", "required": true },
+    { "source": "integration/main.ts.snippet", "target": "frontend/src/main.ts", "mode": "snippet", "required": false }
+  ],
+  "extensionPoints": { "appRegistration": "element-plus", "styles": "element-plus.css" },
+  "validation": {
+    "commands": [
+      { "id": "frontend.ui.element-plus.build", "command": "npm", "args": ["run", "build"], "cwd": "frontend", "timeoutMs": 300000 }
+    ],
+    "checks": ["ElementPlus registration", "element-plus CSS import", "no conflicting UI asset"]
+  },
+  "selection": {
+    "recommendedFor": ["后台管理", "CRUD", "复杂表单", "数据表格"],
+    "avoidWhen": ["项目明确要求其他 UI 体系"]
+  }
+}

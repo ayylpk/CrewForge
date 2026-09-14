@@ -1,0 +1,77 @@
+{
+  "version": "developerAgent/2",
+  "note": "运行时以 workspace.ts / tools/processSandbox.ts 的代码为准；本文件是口径留档与审计对照，改这里必须同步改代码与测试。",
+  "commandPolicy": {
+    "note": "命令自由：Developer 没有默认命令白名单（规格二.1）。边界是环境，不是命令种类。",
+    "developerDefaultAllowlist": null,
+    "deploymentCommandAllow": {
+      "note": "只有部署方显式配置时才生效，属于部署环境安全策略；命中时返回 DEPLOYMENT_COMMAND_DENIED，不是 COMMAND_NOT_ALLOWED。",
+      "configuredVia": "DeveloperAgentOptions.commandAllowlist 或 WorkspacePolicyConfig.sandbox.deploymentCommandAllow",
+      "defaultValue": []
+    }
+  },
+  "allowedRoots": ["frontend", "backend"],
+  "forbiddenSegments": [".git", "_engine2", "_verify"],
+  "forbiddenFiles": ["CONTRACTS.md"],
+  "forbiddenPatterns": ["^acceptance-.*\\.json$", "\\.(test|spec)\\.[cm]?[jt]sx?$"],
+  "protectedPaths": {
+    "note": "这些是**不属于生成项目**、任何命令都不许写的位置；用文件快照（mtime）监视，命令执行前后各比一次，执行期间按 watchIntervalMs 轮询，命中即终止进程树。",
+    "roots": [
+      "agents-CrewForge/developerAgent（CrewForge 控制平面自身源码）",
+      "<projectDir>/CONTRACTS.md",
+      "<projectDir>/.git",
+      "<projectDir>/_verify",
+      "<projectDir>/_engine2",
+      "部署方额外声明的 protectedPaths"
+    ],
+    "ledger": {
+      "note": "Ledger 由宿主进程持续写入（每写一条事件 mtime 就变），用文件快照监视必然误报；改用 integrityProbe：命令前后取各表行数，**只降不升**即判违规。",
+      "probe": "DeveloperLedger.integrityCounters()",
+      "violationCode": "OUT_OF_PROJECT_WRITE"
+    }
+  },
+  "sandbox": {
+    "mode": "strict",
+    "backend": "none",
+    "note": "默认严格模式且没有隔离后端 → 命令**不执行**，返回结构化 SANDBOX_UNAVAILABLE。禁止静默降级为宿主机裸跑。",
+    "softModeRequires": "显式 sandbox.mode = \"soft\"（仅供单元测试与显式知情场景）",
+    "dockerBackend": "sandbox.backend = \"docker\" 且提供可用镜像；探测通过才算 realIsolation = true",
+    "currentStage": {
+      "decision": "2026-09-13 定稿：本阶段启用本机 soft 执行，**不实现 Docker**。",
+      "allowedFor": "本机开发 + 真实 LLM 冒烟（live/runner.ts --sandbox soft）",
+      "forbiddenFor": "生产运行不受信生成代码",
+      "defaultBackendWhenSoft": "local",
+      "mustBeReportedAs": { "realIsolation": false, "softIsolation": true, "backend": "local" },
+      "mustNotClaim": "「已完成安全隔离」/「环境是安全的」/「cwd 限制就是隔离」",
+      "runReportFields": ["sandbox.mode", "sandbox.backend", "sandbox.realIsolation", "sandbox.softIsolation", "sandbox.limitations", "declaration"]
+    },
+    "envFilter": {
+      "denyExact": [
+        "OPENAI_API_KEY", "DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY", "DASHSCOPE_API_KEY",
+        "DATABASE_PASSWORD", "DB_PASSWORD", "MYSQL_PASSWORD", "MYSQL_ROOT_PASSWORD",
+        "PGPASSWORD", "REDIS_PASSWORD", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN", "GITHUB_TOKEN", "GH_TOKEN", "NPM_TOKEN", "CI_JOB_TOKEN",
+        "TENCENT_SECRET_ID", "TENCENT_SECRET_KEY", "ALIYUN_ACCESS_KEY_ID", "ALIYUN_ACCESS_KEY_SECRET"
+      ],
+      "denyPattern": "(API_?KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_?KEY|SSH_?AUTH_SOCK|_AUTH)$",
+      "passthrough": "sandbox.passthroughEnv 可显式放行安全变量；密钥类过滤优先于白名单",
+      "alwaysDropped": ["NODE_OPTIONS"]
+    },
+    "networkPolicy": { "allowHosts": ["localhost", "127.0.0.1", "::1"], "allowExternal": false },
+    "limits": { "maxOutputBytes": 262144, "maxProcessCount": 8, "watchIntervalMs": 1000 },
+    "timeoutsMs": { "commandMs": 120000, "buildMs": 600000, "startMs": 120000, "httpMs": 30000 },
+    "truncation": {
+      "note": "输出超过 maxOutputBytes：对外只回上限内的切片并标 truncated=true，退出后把完整 stdout/stderr 重写到 rawOutputPath。",
+      "rawLogDir": "<os.tmpdir()>/crewforge-developer-logs"
+    }
+  },
+  "rejectCodes": [
+    "ESCAPE", "NOT_IN_ALLOWED_ROOTS", "GIT", "CONTROL_PLANE", "ENGINE_OWNED",
+    "CONTRACT", "ACCEPTANCE", "TEST_SCRIPT",
+    "COMMAND_NOT_ALLOWED", "DEPLOYMENT_COMMAND_DENIED", "COMMAND_TIMEOUT",
+    "SANDBOX_UNAVAILABLE", "OUT_OF_PROJECT_WRITE", "PATH_ESCAPE", "NETWORK_DENIED",
+    "PROCESS_LIMIT", "TIMEOUT_EXTENSION_DENIED", "NOT_DEVELOPER"
+  ],
+  "atomicWrite": true,
+  "auditFields": ["path", "owner", "at", "taskId", "bytes", "action"]
+}

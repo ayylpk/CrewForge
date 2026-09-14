@@ -1,0 +1,11 @@
+{
+  // developerAgent 是独立模块：这里放自己的 tsconfig，
+  // 免得 IDE 从仓库根（那里没有 tsconfig.json）解析不到 node/bun 的类型。
+  // 编译口径与 agents-CrewForge/tsconfig.json 保持一致。
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "types": ["bun", "node"]
+  },
+  "include": ["**/*.ts"],
+  "exclude": ["node_modules"]
+}
