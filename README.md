@@ -1,6 +1,6 @@
 # CrewForge
 
-> 一句话启动一支虚拟开发团队：**产品经理 → 架构师 → 前后端开发（双工位流水线）→ 测试 → 维护收敛**，Web 控制台全程可视、可介入。
+> 一句话启动一支虚拟开发团队：**产品经理 → 架构师 → 开发（developerAgent 单开发流，分批消费蓝图）→ 测试 → 维护收敛**，Web 控制台全程可视、可介入。
 >
 > 定位：Agent 编排能力的面试演示工程——所有取舍按 演示效果 > 架构讲稿 > 代码质量 > 稳定性。
 
@@ -30,12 +30,15 @@
 **团队消息协议**（`Hub.ts`，协议消息只带 taskId，数据真相在 `sys_task`）：
 
 ```
-manager → architect : phase_plan      architect → dev     : task
-dev     → merger    : task_result     merger  → test      : pair_ready
-test    → dev       : revision        test    → maintainer: task_passed
-architect → maintainer: tasks_declared   maintainer → architect: phase_done(含失败清单)
+manager → architect : phase_plan         architect → developer : architect_task(蓝图) + architect_batch(逐批，按蓝图序)
+developer → test-core : test_request     test-core → developer : test_passed / test_failure（受信名单闸+acceptanceHash 自检）
+developer → architect+maintainer : developer_started/progress/ready/blocked/failed（终态抄送记账方）
+architect → maintainer: tasks_declared（派发前声明）   maintainer → architect: phase_done(含失败清单)
 architect → manager   : phase_request（阶段收尾，runner 代发下一阶段）
 ```
+
+> 9/15 换代：后端开发+前端开发+Merger 三工位退役，由 `developerAgent/`（bun+LangGraph 单开发流，
+> 自带编译/契约/验收判据消费）整体替换；装配层 `developerTeamRunner.ts`，团队入口不变（`projectRunner.ts`）。
 
 **数据模型**（MySQL `crewforge`，全表结构基线见 `backed-CrewForge/sql/schema.sql`）：
 自定义 Agent 池 `sys_agent` + 节点声明 `sys_agent_node` + 连线 `sys_agent_edge` → 加入项目时**整表复制**为 `sys_project_agent` / `sys_project_agent_node`（复制非引用，项目间互不干扰）；产物文件 `sys_project_file`；任务桥 `sys_task`；确认门 `sys_confirm`；运行时配置 `sys_settings`（cc-switch 式：模型名/URL/key/回调基址——DB 连接参数在 `.env`，自举约束）。
