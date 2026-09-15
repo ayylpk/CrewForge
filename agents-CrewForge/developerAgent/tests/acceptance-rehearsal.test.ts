@@ -12,7 +12,8 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { budgetText } from "../realLlm";
-import { pickByPath, suggestServeCommand, fillVars, fillVarsDeep } from "../../contractProbeCore";
+import { pickByPath, suggestServeCommand, fillVars, fillVarsDeep, deepEqual, evalAssertion } from "../../contractProbeCore";
+import type { JsonAssertion } from "../../contractProbeCore";
 import { prepareCheck } from "../live/verifier";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cforge-accept-"));
@@ -177,6 +178,31 @@ describe("verifier / CONTRACT 判据的翻译（验收通道打通）", () => {
         expect(intent.setup).toEqual(setup);              // 一步不少、字段不变形
         expect(intent.path).toBe("/api/todos?status=completed");
     });
+
+    it("结构化断言（assertJson）原样透传：过滤/汇总类判据的强度不能在路上丢", () => {
+        const proj = mk("vproj5", { "backend/package.json": JSON.stringify({ scripts: { dev: "node src/index.js" } }) });
+        const assertJson = [
+            { path: "data", minLength: 1 },
+            { path: "data", each: { path: "month", matches: "^2026-09" } },
+            { path: "data.total", equals: 123.45 },
+            { path: "data.0.secret", exists: false },
+        ];
+        const p = prepareCheck(proj, {
+            id: "ac-10", kind: "CONTRACT", method: "GET", path: "/api/stats?month=2026-09", expectedStatus: 200, assertJson,
+        } as never);
+        const intent = JSON.parse(String(p.exec?.args[5]));
+        expect(intent.assertJson).toEqual(assertJson);
+    });
+
+    it("干净起点（resetPaths）透传进 serve 规格——「测试前清空数据库」从此是机械动作", () => {
+        const proj = mk("vproj6", { "backend/package.json": JSON.stringify({ scripts: { dev: "node src/index.js" } }) });
+        const p = prepareCheck(proj, {
+            id: "ac-11", kind: "CONTRACT", method: "POST", path: "/api/todos", expectedStatus: 201,
+            resetPaths: ["backend/data/todos.db"],
+        } as never);
+        const serve = JSON.parse(String(p.exec?.args[3]));
+        expect(serve.resetPaths).toEqual(["backend/data/todos.db"]);   // 进的是 serve 规格（起服务前删）
+    });
 });
 
 // ============================================================
@@ -207,5 +233,106 @@ describe("多步契约的变量机制（真实应用需要「先播数据再断�
         expect(fillVarsDeep(7, { })).toBe(7);
         expect(fillVarsDeep(true, { })).toBe(true);
         expect(fillVarsDeep(null, { })).toBeNull();
+    });
+});
+
+// ============================================================
+// 结构化断言（assertJson）：过滤/隔离/汇总类语义的唯一可信判据
+//
+//   为什么必须单测这个：断言器**自己错了**比断言不过危险得多——它会静默把
+//   坏实现判成绿的（正是本项目最反对的假绿）。所以每条形状的通过与不通过都要钉。
+describe("evalAssertion / 结构化断言（治 expectBodyContains 的假绿）", () => {
+    it("deepEqual 按内容比对象与数组（equals 的对象不能按引用比）", () => {
+        expect(deepEqual({ a: 1, b: [2, 3] }, { b: [2, 3], a: 1 })).toBe(true);   // 键序无关
+        expect(deepEqual([1, 2], [1, 2])).toBe(true);
+        expect(deepEqual([1, 2], [2, 1])).toBe(false);
+        expect(deepEqual({ a: 1 }, { a: 1, b: 2 })).toBe(false);
+        expect(deepEqual(1, "1")).toBe(false);                                   // 不做隐式转换
+        expect(deepEqual(null, undefined)).toBe(false);
+    });
+
+    it("exists: false 是**负向断言**——「不该出现的东西不出现」只能靠它验", () => {
+        const root = { data: { id: 1 } };
+        expect(evalAssertion(root, { path: "data.id", exists: true })).toBeNull();
+        expect(evalAssertion(root, { path: "data.secret", exists: false })).toBeNull();
+        // 反过来必须失败（否则负向断言形同虚设）
+        expect(evalAssertion(root, { path: "data.secret", exists: true })).toContain("exists=true 不成立");
+        expect(evalAssertion(root, { path: "data.id", exists: false })).toContain("exists=false 不成立");
+    });
+
+    it("equals 深等：金额汇总这类数值断言必须精确", () => {
+        const root = { data: { total: 123.45, count: 3 } };
+        expect(evalAssertion(root, { path: "data.total", equals: 123.45 })).toBeNull();
+        expect(evalAssertion(root, { path: "data.total", equals: 123.46 })).toContain("期望深等于 123.46");
+        expect(evalAssertion(root, { path: "data.count", equals: 3 })).toBeNull();
+        expect(evalAssertion(root, { path: "data.count", equals: "3" })).not.toBeNull();  // 类型也算数
+    });
+
+    it("notEquals：筛选后**不应**再出现别的分类（负向）", () => {
+        expect(evalAssertion({ categoryId: 2 }, { path: "categoryId", notEquals: 1 })).toBeNull();
+        expect(evalAssertion({ categoryId: 1 }, { path: "categoryId", notEquals: 1 })).toContain("断言要求**不等于**");
+    });
+
+    it("contains：数组按元素深等、字符串按子串", () => {
+        expect(evalAssertion({ tags: ["a", { k: 1 }] }, { path: "tags", contains: { k: 1 } })).toBeNull();
+        expect(evalAssertion({ tags: ["a"] }, { path: "tags", contains: "b" })).toContain("数组不含期望元素");
+        expect(evalAssertion({ msg: "created ok" }, { path: "msg", contains: "ok" })).toBeNull();
+        expect(evalAssertion({ n: 5 }, { path: "n", contains: 5 })).toContain("不是数组也不是字符串");
+    });
+
+    it("length / minLength：区分「恰好 N 条」与「至少 N 条」", () => {
+        const root = { data: [{ id: 1 }, { id: 2 }] };
+        expect(evalAssertion(root, { path: "data", length: 2 })).toBeNull();
+        expect(evalAssertion(root, { path: "data", length: 3 })).toContain("长度 2，期望恰好 3");
+        expect(evalAssertion(root, { path: "data", minLength: 1 })).toBeNull();
+        expect(evalAssertion({ data: [] }, { path: "data", minLength: 1 })).toContain("期望 ≥ 1");
+        expect(evalAssertion({ n: 5 }, { path: "n", length: 1 })).toContain("不是数组/字符串");
+    });
+
+    it("each：过滤类判据的核心——数组**每一项**都满足才算过，空数组也过（故要配 minLength）", () => {
+        const ok = { data: [{ status: "completed" }, { status: "completed" }] };
+        expect(evalAssertion(ok, { path: "data", each: { path: "status", equals: "completed" } })).toBeNull();
+        // 混进一条未完成的 → 必须失败，并指出是第几条（模型据此定位）
+        const bad = { data: [{ status: "completed" }, { status: "active" }] };
+        const why = evalAssertion(bad, { path: "data", each: { path: "status", equals: "completed" } });
+        expect(why).toContain("data[1].status");
+        // 空数组 each 恒过 —— 这正是它必须配 minLength 的原因（否则"过滤全空"也绿）
+        expect(evalAssertion({ data: [] }, { path: "data", each: { path: "status", equals: "x" } })).toBeNull();
+        expect(evalAssertion(ok, { path: "data", each: { path: "status", equals: "completed" }, minLength: 1 })).toBeNull();
+    });
+
+    it("形状非法 → 直接判失败并说明（不静默放过一条写错的断言）", () => {
+        expect(evalAssertion({}, { path: "a" })).toContain("至少要有");
+        expect(evalAssertion({}, { path: "a", equals: 1, exists: true })).toContain("同时给了");
+    });
+
+    it("matches：日期/前缀类过滤唯一能表达的形式（等值断言写不出来）", () => {
+        const root = { data: [{ createdAt: "2026-09-15T05:10:01.612Z" }, { createdAt: "2026-09-02T00:00:00.000Z" }] };
+        // 按月过滤：正确表达
+        expect(evalAssertion(root, { path: "data", minLength: 1, each: { path: "createdAt", matches: "^2026-09" } })).toBeNull();
+        // 混进一条 8 月的 → 必须红，并指出是第几条
+        const bad = { data: [{ createdAt: "2026-09-15T00:00:00Z" }, { createdAt: "2026-08-31T00:00:00Z" }] };
+        const why = evalAssertion(bad, { path: "data", each: { path: "createdAt", matches: "^2026-09" } });
+        expect(why).toContain("data[1].createdAt");
+        expect(why).toContain("不匹配正则");
+        // 直接断言单个字符串
+        expect(evalAssertion({ at: "2026-09-15" }, { path: "at", matches: "\\d{4}-\\d{2}-\\d{2}" })).toBeNull();
+        // 非字符串 → 明确失败而不是静默通过
+        expect(evalAssertion({ n: 9 }, { path: "n", matches: "9" })).toContain("不是字符串");
+        // 正则写坏 → 明确失败（不吞异常）
+        expect(evalAssertion({ s: "x" }, { path: "s", matches: "([" })).toContain("正则非法");
+        // each 必须给 equals 或 matches
+        expect(evalAssertion({ data: [1] }, { path: "data", each: { path: "x" } as never })).toContain("至少要给");
+    });
+
+    it("JSON 解析不出断言时**判失败**，绝不「解析不了就算过」", async () => {
+        // 这条由探针主路径保证；这里钉住语义：非 JSON 响应体不可能通过结构化断言
+        const why = evalAssertion(undefined, { path: "data", minLength: 1 });
+        expect(why).not.toBeNull();
+    });
+
+    it("路径不存在时的报错是人可读的（模型能直接看懂缺什么）", () => {
+        expect(evalAssertion({ data: {} }, { path: "data.items", each: { path: "x", equals: 1 } }))
+            .toContain("不是数组（实际 undefined）");
     });
 });

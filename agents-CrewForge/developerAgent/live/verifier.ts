@@ -43,7 +43,7 @@ const PROBE_CLI = path.resolve(import.meta.dir, "..", "..", "httpContractProbe.t
  */
 function resolveServeSpec(
     projectDir: string,
-    c: { serveCommand?: unknown; serveArgs?: unknown; serveCwd?: unknown; portEnv?: unknown; healthPath?: unknown; bootWaitMs?: unknown },
+    c: { serveCommand?: unknown; serveArgs?: unknown; serveCwd?: unknown; portEnv?: unknown; healthPath?: unknown; bootWaitMs?: unknown; resetPaths?: unknown },
 ): ServeSpec | null {
     const cwd = typeof c.serveCwd === "string" && c.serveCwd ? c.serveCwd : "backend";
     const common = {
@@ -51,6 +51,8 @@ function resolveServeSpec(
         portEnv: typeof c.portEnv === "string" && c.portEnv ? c.portEnv : "PORT",
         healthPath: typeof c.healthPath === "string" && c.healthPath ? c.healthPath : "/",
         bootWaitMs: typeof c.bootWaitMs === "number" ? c.bootWaitMs : 30_000,
+        // 干净起点：判据声明了要清哪些数据文件就清（"测试前清空数据库"从此是机械动作，不是一句空话）
+        ...(Array.isArray(c.resetPaths) ? { resetPaths: (c.resetPaths as unknown[]).map(String) } : {}),
     };
     if (typeof c.serveCommand === "string" && c.serveCommand) {
         return {
@@ -129,6 +131,7 @@ export function prepareCheck(projectDir: string, check: AcceptanceCheck & { id: 
     const c = check as unknown as {
         command?: unknown; args?: unknown; cwd?: unknown;
         kind?: unknown; target?: unknown; method?: unknown; path?: unknown;
+        assertJson?: unknown;
     };
     const skipKind = typeof c.kind === "string" ? c.kind : "UNKNOWN";
 
@@ -189,6 +192,8 @@ export function prepareCheck(projectDir: string, check: AcceptanceCheck & { id: 
             expectedStatus: typeof c.expectedStatus === "number" ? c.expectedStatus : 200,
             ...(c.body !== undefined ? { body: c.body } : {}),
             ...(typeof c.expectBodyContains === "string" ? { expectBodyContains: c.expectBodyContains } : {}),
+            // 结构化断言（过滤/隔离/汇总类语义）：与 Developer 侧同形状透传
+            ...(Array.isArray(c.assertJson) ? { assertJson: c.assertJson } : {}),
             ...(c.auth ? { auth: c.auth } : {}),
             // 前置步骤（播数据/取变量）：与 Developer 侧 runAcceptance 走同一份执行逻辑
             ...(Array.isArray(c.setup) ? { setup: c.setup } : {}),

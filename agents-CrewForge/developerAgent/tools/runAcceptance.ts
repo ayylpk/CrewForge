@@ -41,6 +41,10 @@ interface RehearsalItem {
     expectedStatus?: number;
     body?: unknown;
     expectBodyContains?: string;
+    /** 结构化断言（过滤/隔离/汇总类语义）——原样透传给探针 */
+    assertJson?: unknown[];
+    /** 本条判据自己的干净起点声明（优先于工具级 resetPaths） */
+    resetPaths?: string[];
     auth?: { method: string; path: string; body?: unknown };
     /** 前置步骤（播数据 / 取变量）——原样透传给探针 */
     setup?: unknown[];
@@ -101,6 +105,8 @@ function collectChecks(
                 expectedStatus: typeof c["expectedStatus"] === "number" ? c["expectedStatus"] : 200,
                 ...(c["body"] !== undefined ? { body: c["body"] } : {}),
                 ...(typeof c["expectBodyContains"] === "string" ? { expectBodyContains: c["expectBodyContains"] } : {}),
+                ...(Array.isArray(c["assertJson"]) ? { assertJson: c["assertJson"] as unknown[] } : {}),
+                ...(Array.isArray(c["resetPaths"]) ? { resetPaths: (c["resetPaths"] as unknown[]).map(String) } : {}),
                 ...(c["auth"] ? { auth: c["auth"] as { method: string; path: string; body?: unknown } } : {}),
                 ...(Array.isArray(c["setup"]) ? { setup: c["setup"] as unknown[] } : {}),
             });
@@ -128,6 +134,7 @@ export const runAcceptanceTool: ToolSpec = {
         portEnv: { type: "string", required: false, description: "端口注入的环境变量名，默认 PORT" },
         healthPath: { type: "string", required: false, description: "健康检查路径，默认 /" },
         bootWaitMs: { type: "number", required: false, description: "等服务启动的上限毫秒数，默认 30000" },
+        resetPaths: { type: "array", required: false, description: "起服务前删除的数据文件（相对项目根，如 [\"backend/data/ledger.db\"]）；用于保证「干净起点」——精确断言（id=1、汇总=某值）依赖它" },
         timeoutMs: { type: "number", required: false, description: "整体超时毫秒数，默认 300000" },
     },
     async run(ctx: ToolContext, args): Promise<ToolResult> {
@@ -182,6 +189,9 @@ export const runAcceptanceTool: ToolSpec = {
                 };
             }
         }
+        // 干净起点：无论命令来自显式还是探测，都挂上 resetPaths（判据/调用方声明的）
+        const resetPaths = Array.isArray(args["resetPaths"]) ? (args["resetPaths"] as unknown[]).map(String) : [];
+        if (serve && resetPaths.length > 0) serve = { ...serve, resetPaths };
 
         const timeoutMs = num(args, "timeoutMs", 300_000);
         const startedAll = Date.now();
@@ -230,6 +240,7 @@ export const runAcceptanceTool: ToolSpec = {
                 expectedStatus: item.expectedStatus ?? 200,
                 ...(item.body !== undefined ? { body: item.body } : {}),
                 ...(item.expectBodyContains ? { expectBodyContains: item.expectBodyContains } : {}),
+                ...(item.assertJson ? { assertJson: item.assertJson as ContractIntent["assertJson"] } : {}),
                 ...(item.auth ? { auth: item.auth } : {}),
                 ...(item.setup ? { setup: item.setup as ContractIntent["setup"] } : {}),
             };
