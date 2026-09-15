@@ -196,43 +196,8 @@ async function drivePhases(
 
 /** 项目级主流程：建团队 → 有 plan 直接开工（续跑），没有才 PM 对话 → 逐阶段下发 → 终态落库 */
 export async function runProject(projectId: number, questioner: Questioner): Promise<void> {
-    // ★ engine2 feature flag（阶段 2 定稿）：权威 = sys_project.pipeline_version（逐项目 DB 字段）。
-    //   · 默认 legacy——未改字段的项目行为与从前逐字节一致；
-    //   · engine2 项目只能启动 Engine2（env 不允许静默回退，CF_ENGINE=legacy 直接拒绝启动）；
-    //   · legacy 项目可用 CF_ENGINE=engine2 显式手工启用（测试用）。
-    {
-        const { decidePipelineForProject, runProjectWithEngine2, Engine2StartRejected } = await import("./engine2/projectAdapter");
-        let decision;
-        try {
-            decision = await decidePipelineForProject(projectId);
-        } catch (e) {
-            if (e instanceof Engine2StartRejected) {
-                console.error(`[runner] engine2 拒绝启动：${e.message}`);
-                await updateProjectField(projectId, { status: "failed" }).catch(() => {});
-                return;
-            }
-            throw e;
-        }
-        console.log(`[runner] pipeline 判定：${decision.version}（${decision.why}）`);
-        if (decision.use) {
-            try {
-                const outcome = await runProjectWithEngine2(projectId);
-                // 落库只写**程序判定出来的真实结论**（绝不为了让看板好看而改状态）
-                console.log(`[runner] engine2 结束：runId=${outcome.runId}（${outcome.resumed ? "续跑" : "新跑"}） 终态=${outcome.status} done=${outcome.done}`);
-                for (const u of outcome.unmet) console.log(`[runner]   · 未满足：${u}`);
-                console.log(`[runner] 运行报告：${outcome.stateFile}`);
-                return;
-            } catch (e) {
-                if (e instanceof Engine2StartRejected) {
-                    console.error(`[runner] engine2 拒绝启动：${e.message}`);
-                    await updateProjectField(projectId, { status: "failed" }).catch(() => {});
-                    return;
-                }
-                throw e;
-            }
-        }
-        // decision.use === false → 继续走旧系统（legacy 项目默认路径）
-    }
+    // 9/15：engine2（确定性流水线实验线）已拔除——其 36 个文件从未进 git、真库 6 个项目全是 legacy，
+    //   原 feature-flag 入口只制造了"已 push 代码 import 未提交模块"的 clone 即崩，故整段删除。
 
     // 按阶段起进程模式（Java spawn 注入；手工跑默认关=旧行为单进程跑完全部阶段）
     const exitAtBoundary = process.env.EXIT_AT_PHASE_BOUNDARY === "1";
