@@ -101,6 +101,9 @@ export function createArchitectAgent(o: ArchitectAgentOptions) {
 
                 const raw = await o.llm.next({
                     system, task: user, skill: null, history: [], tools: [],
+                    // 架构师的"预算"= 剩余重试次数（批 E 预算可见性的同款用途：
+                    // 让模型知道还有几次机会，而不是盲重试）
+                    budget: { used: attempt - 1, total: maxAttempts },
                 });
 
                 // ① 抠 JSON（围栏/叙述都能处理；抠不出=原文交回当拒绝原因）

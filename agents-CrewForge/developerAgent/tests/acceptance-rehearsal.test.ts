@@ -234,6 +234,23 @@ describe("verifier / CONTRACT 判据的翻译（验收通道打通）", () => {
         expect(missing.abs.endsWith("nope.db")).toBe(true);
     });
 
+    it("自定义请求头（headers）原样透传——多身份判据（B 读 A 的私密项目→403）唯一的表达方式", () => {
+        const proj = mk("vproj-hdr", { "backend/package.json": JSON.stringify({ scripts: { dev: "node src/index.js" } }) });
+        const headers = { "X-User-Id": "2" };
+        const setup = [
+            { method: "POST", path: "/api/projects", body: { name: "私密项目" }, expectedStatus: 201,
+              headers: { "X-User-Id": "1" }, extract: { name: "pid", from: "data.id" } },
+        ];
+        const p = prepareCheck(proj, {
+            id: "ac-iso", kind: "CONTRACT", method: "GET", path: "/api/projects/{pid}", expectedStatus: 403,
+            headers, setup,
+        } as never);
+        const intent = JSON.parse(String(p.exec?.args[5]));
+        expect(intent.headers).toEqual(headers);              // 主请求的头（B 的身份）不能丢
+        expect(intent.setup[0].headers).toEqual({ "X-User-Id": "1" });   // setup 的头（A 的身份）不能丢
+        expect(intent.expectedStatus).toBe(403);
+    });
+
     it("干净起点（resetPaths）透传进 serve 规格——「测试前清空数据库」从此是机械动作", () => {
         const proj = mk("vproj6", { "backend/package.json": JSON.stringify({ scripts: { dev: "node src/index.js" } }) });
         const p = prepareCheck(proj, {

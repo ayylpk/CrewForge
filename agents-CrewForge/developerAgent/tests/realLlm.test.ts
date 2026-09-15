@@ -246,6 +246,8 @@ function stubSequence(replies: { status?: number; text?: string; body?: unknown;
 const BASE_OPTS = { baseUrl: "https://fake.test/apps/anthropic", authToken: "sk-test-123", model: "qwen3.8-flash" };
 /** 批 C 集成用例统一用它：退避压到 1ms，测试不真等 */
 const FAST_RETRY = { retryInitialDelayMs: 1 };
+/** 批 E 起 next() 的 budget 必填；测试里的固定值（与真实调用语义无关，只满足形状） */
+const BUDGET = { used: 0, total: 100 };
 
 beforeEach(() => { globalThis.fetch = realFetch; });
 afterEach(() => { globalThis.fetch = realFetch; });
@@ -271,7 +273,7 @@ describe("realLlm / HTTP 契约（公共）", () => {
         // maxRetries:0 = 关掉 9/15 批 C 的内部重试，专门验"错误原文原样带出"这一条
         // （重试行为本身在下面「重试退避」一节的用例里验）
         const llm = createRealLlm({ ...BASE_OPTS, maxRetries: 0 });
-        await expect(llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] }))
+        await expect(llm.next({ system: "s", task: "t", skill: null, history: [], tools: [], budget: BUDGET }))
             .rejects.toThrow(/429.*throttling/s);
     });
 
@@ -283,8 +285,8 @@ describe("realLlm / HTTP 契约（公共）", () => {
             onCall: (i) => { seen.push({ seq: i.seq, mode: i.mode }); expect(i.rawText).toContain("kind"); },
         });
         expect(llm.calls()).toBe(0);
-        await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] });
-        await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] });
+        await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [], budget: BUDGET });
+        await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [], budget: BUDGET });
         expect(llm.calls()).toBe(2);
         expect(seen).toEqual([{ seq: 1, mode: "native" }, { seq: 2, mode: "native" }]);
     });
@@ -296,7 +298,7 @@ describe("realLlm / 原生 tool_use（缺省模式）", () => {
     it("请求带 tools + tool_choice:auto（③并行：并行已放开）；工具清单不再进文本", async () => {
         const calls = stubFetch({ text: "ok" });
         const llm = createRealLlm(BASE_OPTS);
-        await llm.next({ system: "你是 Developer。", task: "做个任务", skill: "技能指引X", history: [], tools: TOOLS });
+        await llm.next({ system: "你是 Developer。", task: "做个任务", skill: "技能指引X", history: [], tools: TOOLS, budget: BUDGET });
 
         const body = JSON.parse(String(calls[0]!.init.body));
         expect(body.tools.length).toBe(1);
@@ -314,7 +316,7 @@ describe("realLlm / 原生 tool_use（缺省模式）", () => {
     it("工具为空时不发 tools/tool_choice（避免畸形请求）", async () => {
         const calls = stubFetch({ text: "完成" });
         const llm = createRealLlm(BASE_OPTS);
-        await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] });
+        await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [], budget: BUDGET });
         const body = JSON.parse(String(calls[0]!.init.body));
         expect(body.tools).toBeUndefined();
         expect(body.tool_choice).toBeUndefined();
@@ -329,7 +331,7 @@ describe("realLlm / 原生 tool_use（缺省模式）", () => {
             },
         });
         const llm = createRealLlm(BASE_OPTS);
-        const raw = await llm.next({ system: "s", task: "t", skill: null, history: [], tools: TOOLS });
+        const raw = await llm.next({ system: "s", task: "t", skill: null, history: [], tools: TOOLS, budget: BUDGET });
         const d = coerceDecision(raw);
         expect(d).toEqual({ kind: "tool", call: { tool: "readFile", args: { path: "src/a.ts" }, note: "" } });
     });
@@ -337,7 +339,7 @@ describe("realLlm / 原生 tool_use（缺省模式）", () => {
     it("无工具响应 → done（完成信号不再依赖模型手写 JSON）", async () => {
         stubFetch({ text: "四周已经做完。" });
         const llm = createRealLlm(BASE_OPTS);
-        const d = coerceDecision(await llm.next({ system: "s", task: "t", skill: null, history: [], tools: TOOLS }));
+        const d = coerceDecision(await llm.next({ system: "s", task: "t", skill: null, history: [], tools: TOOLS, budget: BUDGET }));
         expect(d).toEqual({ kind: "done", note: "四周已经做完。" });
     });
 });
@@ -353,6 +355,7 @@ describe("realLlm / 文本协议保底（nativeTools:false，行为与 9/14 前�
             system: "你是 Developer。", task: "做个任务", skill: "技能指引X",
             history: [{ tool: "readFile", ok: true, output: "内容" }],
             tools: TOOLS,
+            budget: BUDGET,
         });
 
         const body = JSON.parse(String(calls[0]!.init.body));
@@ -369,14 +372,14 @@ describe("realLlm / 文本协议保底（nativeTools:false，行为与 9/14 前�
     it("正常响应 → 扁平决策（9/12 冒烟教训的形状）", async () => {
         stubFetch({ text: '{"kind":"tool","tool":"mkdir","args":{"path":"src"}}' });
         const llm = createRealLlm(LEGACY);
-        const d = coerceDecision(await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] }));
+        const d = coerceDecision(await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [], budget: BUDGET }));
         expect(d).toEqual({ kind: "tool", call: { tool: "mkdir", args: { path: "src" }, note: "" } });
     });
 
     it("脏输出（叙述+JSON）也能出正确决策", async () => {
         stubFetch({ text: 'Sure! I will create src dir first.\n{"kind":"tool","tool":"mkdir","args":{"path":"src"},"note":"建目录"}\nDone.' });
         const llm = createRealLlm(LEGACY);
-        const d = coerceDecision(await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] }));
+        const d = coerceDecision(await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [], budget: BUDGET }));
         expect(d?.kind).toBe("tool");
         expect(d?.call?.note).toBe("建目录");
     });
@@ -384,7 +387,7 @@ describe("realLlm / 文本协议保底（nativeTools:false，行为与 9/14 前�
     it("完全无 JSON → 原文字符串返回，coerceDecision 判 null（按一步失败计费）", async () => {
         stubFetch({ text: "我不知道该做什么。" });
         const llm = createRealLlm(LEGACY);
-        const raw = await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] });
+        const raw = await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [], budget: BUDGET });
         expect(raw).toBe("我不知道该做什么。");
         expect(coerceDecision(raw)).toBeNull();
     });
@@ -395,7 +398,7 @@ describe("realLlm / 文本协议保底（nativeTools:false，行为与 9/14 前�
         try {
             const calls = stubFetch({ text: '{"kind":"done"}' });
             const llm = createRealLlm({ ...BASE_OPTS });
-            await llm.next({ system: "s", task: "t", skill: null, history: [], tools: TOOLS });
+            await llm.next({ system: "s", task: "t", skill: null, history: [], tools: TOOLS, budget: BUDGET });
             const body = JSON.parse(String(calls[0]!.init.body));
             expect(body.tools).toBeUndefined();          // 已退回文本协议
         } finally {
@@ -485,7 +488,7 @@ describe("batchC / 重试的接线（mock fetch，零真调用）", () => {
         ]);
         const infos: { attempts: number; inputTokens: number; outputTokens: number }[] = [];
         const llm = createRealLlm({ ...BASE_OPTS, ...FAST_RETRY, onCall: (i) => infos.push({ attempts: i.attempts, inputTokens: i.inputTokens, outputTokens: i.outputTokens }) });
-        const raw = await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] });
+        const raw = await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [], budget: BUDGET });
 
         expect(calls.length).toBe(2);                  // 真发了 2 次
         expect(llm.calls()).toBe(1);                   // 但只是"一步"
@@ -501,7 +504,7 @@ describe("batchC / 重试的接线（mock fetch，零真调用）", () => {
             { status: 502, text: "final failure" },
         ]);
         const llm = createRealLlm({ ...BASE_OPTS, ...FAST_RETRY });
-        await expect(llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] }))
+        await expect(llm.next({ system: "s", task: "t", skill: null, history: [], tools: [], budget: BUDGET }))
             .rejects.toThrow(/502.*final failure/s);
         expect(calls.length).toBe(1 + RETRY_MAX_RETRIES);   // 1 首发 + 2 重试
     });
@@ -509,7 +512,7 @@ describe("batchC / 重试的接线（mock fetch，零真调用）", () => {
     it("4xx（400 请求不合法）**不重试**：一发即抛，别浪费预算", async () => {
         const calls = stubSequence([{ status: 400, text: "bad request" }]);
         const llm = createRealLlm({ ...BASE_OPTS, ...FAST_RETRY });
-        await expect(llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] }))
+        await expect(llm.next({ system: "s", task: "t", skill: null, history: [], tools: [], budget: BUDGET }))
             .rejects.toThrow(/400/);
         expect(calls.length).toBe(1);
     });
@@ -517,7 +520,7 @@ describe("batchC / 重试的接线（mock fetch，零真调用）", () => {
     it("maxRetries:0 → 关掉内部重试（行为退回 9/15 前，交 graph 层按步容错）", async () => {
         const calls = stubSequence([{ status: 429, text: "throttling" }]);
         const llm = createRealLlm({ ...BASE_OPTS, maxRetries: 0, ...FAST_RETRY });
-        await expect(llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] }))
+        await expect(llm.next({ system: "s", task: "t", skill: null, history: [], tools: [], budget: BUDGET }))
             .rejects.toThrow(/429/);
         expect(calls.length).toBe(1);
     });
@@ -532,7 +535,7 @@ describe("batchC / 重试的接线（mock fetch，零真调用）", () => {
             });
         }) as unknown as typeof fetch;
         const llm = createRealLlm({ ...BASE_OPTS, ...FAST_RETRY });
-        const d = coerceDecision(await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] }));
+        const d = coerceDecision(await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [], budget: BUDGET }));
         expect(d?.kind).toBe("done");
         expect(n).toBe(2);
     });
@@ -551,7 +554,7 @@ describe("batchC / 重试的接线（mock fetch，零真调用）", () => {
         }) as unknown as typeof fetch;
         // timeoutMs=20 → 第一次必然超时且耗光预算；退避首档 1ms 也救不回来
         const llm = createRealLlm({ ...BASE_OPTS, timeoutMs: 20, retryInitialDelayMs: 1 });
-        await expect(llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] }))
+        await expect(llm.next({ system: "s", task: "t", skill: null, history: [], tools: [], budget: BUDGET }))
             .rejects.toThrow(/超时/);
         expect(n).toBe(1);                            // 只发了一发
     });
@@ -563,7 +566,7 @@ describe("batchC / 重试的接线（mock fetch，零真调用）", () => {
         ]);
         const startedAt = Date.now();
         const llm = createRealLlm({ ...BASE_OPTS, ...FAST_RETRY });
-        await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] });
+        await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [], budget: BUDGET });
         expect(calls.length).toBe(2);
         expect(Date.now() - startedAt).toBeLessThan(1000);   // retry-after:0 → 不该等出自身退避
     });
@@ -582,7 +585,7 @@ describe("batchC / max_tokens 升档（cc utils/context.ts 8000→64000 同款�
     it("截断 → 用 ESCALATED_MAX_TOKENS 重发同一份请求，升档后正常返回", async () => {
         const calls = stubSequence([truncated, done]);
         const llm = createRealLlm({ ...BASE_OPTS, ...FAST_RETRY });
-        const d = coerceDecision(await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] }));
+        const d = coerceDecision(await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [], budget: BUDGET }));
 
         expect(calls.length).toBe(2);
         const first = JSON.parse(String(calls[0]!.init.body));
@@ -598,7 +601,7 @@ describe("batchC / max_tokens 升档（cc utils/context.ts 8000→64000 同款�
     it("只升一次：升档后还是截断就不再抬价（不反复烧钱，交上层判失败）", async () => {
         const calls = stubSequence([truncated]);
         const llm = createRealLlm({ ...BASE_OPTS, ...FAST_RETRY });
-        const raw = await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] });
+        const raw = await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [], budget: BUDGET });
         expect(calls.length).toBe(2);                       // 1 首 + 1 升档，没有第 3 发
         expect(coerceDecision(raw)).toBeNull();             // 仍是截断 → 按一步失败计费
     });
@@ -606,7 +609,7 @@ describe("batchC / max_tokens 升档（cc utils/context.ts 8000→64000 同款�
     it("调用方显式给了 maxTokens → 守住不被突破（对齐 cc maxOutputTokensOverride 守卫）", async () => {
         const calls = stubSequence([truncated, done]);
         const llm = createRealLlm({ ...BASE_OPTS, maxTokens: 4096, ...FAST_RETRY });
-        await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] });
+        await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [], budget: BUDGET });
         expect(calls.length).toBe(1);                       // 一次都没重发
         expect(JSON.parse(String(calls[0]!.init.body)).max_tokens).toBe(4096);
     });
@@ -614,7 +617,7 @@ describe("batchC / max_tokens 升档（cc utils/context.ts 8000→64000 同款�
     it("escalateOnMaxTokens:false → 一键关掉升档", async () => {
         const calls = stubSequence([truncated]);
         const llm = createRealLlm({ ...BASE_OPTS, escalateOnMaxTokens: false, ...FAST_RETRY });
-        await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] });
+        await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [], budget: BUDGET });
         expect(calls.length).toBe(1);
     });
 });
@@ -633,7 +636,7 @@ describe("batchC / usage 缓存记账（只读不发，模型无关）", () => {
         });
         const seen: { input: number; cacheRead: number; cacheCreation: number }[] = [];
         const llm = createRealLlm({ ...BASE_OPTS, onCall: (i) => seen.push({ input: i.inputTokens, cacheRead: i.cacheReadTokens, cacheCreation: i.cacheCreationTokens }) });
-        await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] });
+        await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [], budget: BUDGET });
 
         expect(seen[0]!.input).toBe(100);            // 原样，**没有**减去缓存命中
         expect(seen[0]!.cacheRead).toBe(900);
@@ -644,7 +647,7 @@ describe("batchC / usage 缓存记账（只读不发，模型无关）", () => {
         stubFetch({ text: "完成" });
         const seen: number[] = [];
         const llm = createRealLlm({ ...BASE_OPTS, onCall: (i) => seen.push(i.cacheReadTokens) });
-        await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] });
+        await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [], budget: BUDGET });
         expect(seen[0]).toBe(0);
     });
 
@@ -656,7 +659,7 @@ describe("batchC / usage 缓存记账（只读不发，模型无关）", () => {
         ]);
         const seen: { input: number; output: number; attempts: number }[] = [];
         const llm = createRealLlm({ ...BASE_OPTS, ...FAST_RETRY, onCall: (i) => seen.push({ input: i.inputTokens, output: i.outputTokens, attempts: i.attempts }) });
-        await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] });
+        await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [], budget: BUDGET });
 
         expect(calls.length).toBe(2);
         expect(seen[0]!.input).toBe(40);             // 10 + 30
@@ -669,14 +672,14 @@ describe("batchC / usage 缓存记账（只读不发，模型无关）", () => {
         // 场景一：瞬时故障重试 → escalated=false
         stubSequence([{ status: 503, text: "boom" }, { text: "完成" }]);
         const a = createRealLlm({ ...BASE_OPTS, ...FAST_RETRY, onCall: (i) => infos.push(i.escalated) });
-        await a.next({ system: "s", task: "t", skill: null, history: [], tools: [] });
+        await a.next({ system: "s", task: "t", skill: null, history: [], tools: [], budget: BUDGET });
         // 场景二：升档重发 → escalated=true
         stubSequence([
             { body: { content: [{ type: "text", text: "截" }], stop_reason: "max_tokens", usage: {} } },
             { text: "完成" },
         ]);
         const b = createRealLlm({ ...BASE_OPTS, ...FAST_RETRY, onCall: (i) => infos.push(i.escalated) });
-        await b.next({ system: "s", task: "t", skill: null, history: [], tools: [] });
+        await b.next({ system: "s", task: "t", skill: null, history: [], tools: [], budget: BUDGET });
 
         expect(infos).toEqual([false, true]);
     });
@@ -722,7 +725,7 @@ describe("batchD / 前缀顺序契约（性能关键路径，改了就悄悄变�
     it("**不发任何缓存字段**（批 D 实测结论：显式标记在本网关反而更差）", async () => {
         const calls = stubFetch({ text: "完成" });
         const llm = createRealLlm(BASE_OPTS);
-        await llm.next({ system: "你是 Developer。", task: "做个任务", skill: null, history: [], tools: TOOLS });
+        await llm.next({ system: "你是 Developer。", task: "做个任务", skill: null, history: [], tools: TOOLS, budget: BUDGET });
         const body = JSON.parse(String(calls[0]!.init.body));
         const raw = String(calls[0]!.init.body);
         expect(raw).not.toContain("cache_control");       // 请求体里一个字都不许有
@@ -770,7 +773,7 @@ describe("batchD / usage 缓存字段兜底（网关字段名不止一套）", (
         });
         const seen: number[] = [];
         const llm = createRealLlm({ ...BASE_OPTS, onCall: (i) => seen.push(i.cacheReadTokens) });
-        await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] });
+        await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [], budget: BUDGET });
         expect(seen[0]).toBe(900);                        // 批 D 之前这里会是 0
     });
 });

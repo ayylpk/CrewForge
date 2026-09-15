@@ -54,7 +54,7 @@ console.log(`model=${llm.id}`);
 console.log("\n[1] done 探针：期望 {kind:'done'}");
 const d1 = await llm.next({
     system, task: "这是一次连通性检查，没有任何要做的开发工作。请直接给出 done 决策。",
-    skill: null, history: [], tools,
+    skill: null, history: [], tools, budget: { used: 0, total: 100 },
 });
 const c1 = coerceDecision(d1);
 ok(c1 !== null, "决策可解析");
@@ -71,6 +71,7 @@ const d2 = await llmDbg.next({
     skill: null,
     history: [{ tool: "inspectTree", args: { path: "." }, ok: false, output: "Error: ENOENT: no such file or directory", rejected: null }],
     tools,
+    budget: { used: 0, total: 100 },
 });
 const c2 = coerceDecision(d2);
 ok(c2 !== null, "决策可解析");

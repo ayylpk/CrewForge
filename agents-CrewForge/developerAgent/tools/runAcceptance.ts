@@ -48,6 +48,8 @@ interface RehearsalItem {
     auth?: { method: string; path: string; body?: unknown };
     /** 前置步骤（播数据 / 取变量）——原样透传给探针 */
     setup?: unknown[];
+    /** 自定义请求头（通用能力：多身份判据靠它表达；引擎不解释头语义） */
+    headers?: Record<string, string>;
 }
 
 /**
@@ -60,7 +62,7 @@ interface RehearsalItem {
  */
 function collectChecks(
     projectDirAbs: string,
-    checks: unknown[],
+    checks: readonly unknown[],
     resolveCommand: (dirAbs: string) => { command: string; args: string[] } | null,
 ): { runnable: RehearsalItem[]; unexecutable: { id: string; kind: string; reason: string }[] } {
     const runnable: RehearsalItem[] = [];
@@ -109,6 +111,8 @@ function collectChecks(
                 ...(Array.isArray(c["resetPaths"]) ? { resetPaths: (c["resetPaths"] as unknown[]).map(String) } : {}),
                 ...(c["auth"] ? { auth: c["auth"] as { method: string; path: string; body?: unknown } } : {}),
                 ...(Array.isArray(c["setup"]) ? { setup: c["setup"] as unknown[] } : {}),
+                ...(c["headers"] && typeof c["headers"] === "object"
+                    ? { headers: c["headers"] as Record<string, string> } : {}),
             });
             continue;
         }
@@ -154,7 +158,7 @@ export const runAcceptanceTool: ToolSpec = {
             return { ok: false, output: "内部错误：工具上下文缺 projectDirAbs（无法定位项目根）" };
         }
 
-        const only = new Set(Array.isArray(args["only"]) ? (args["only"] as unknown[]).map(String) : []);
+        const only = new Set<string>(Array.isArray(args["only"]) ? (args["only"] as readonly unknown[]).map(String) : []);
         const picked = only.size > 0 ? checks.filter((c) => only.has(String((c as Record<string, unknown>)["id"]))) : checks;
 
         if (picked.length === 0) {
@@ -243,6 +247,7 @@ export const runAcceptanceTool: ToolSpec = {
                 ...(item.assertJson ? { assertJson: item.assertJson as ContractIntent["assertJson"] } : {}),
                 ...(item.auth ? { auth: item.auth } : {}),
                 ...(item.setup ? { setup: item.setup as ContractIntent["setup"] } : {}),
+                ...(item.headers ? { headers: item.headers } : {}),
             };
             const r = await runContractProbe({
                 projectDirAbs, serve, intent,

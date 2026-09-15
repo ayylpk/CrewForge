@@ -43,7 +43,12 @@ const PROBE_CLI = path.resolve(import.meta.dir, "..", "..", "httpContractProbe.t
  */
 function resolveServeSpec(
     projectDir: string,
-    c: { serveCommand?: unknown; serveArgs?: unknown; serveCwd?: unknown; portEnv?: unknown; healthPath?: unknown; bootWaitMs?: unknown; resetPaths?: unknown },
+    c: {
+        serveCommand?: unknown; serveArgs?: unknown; serveCwd?: unknown; portEnv?: unknown;
+        healthPath?: unknown; bootWaitMs?: unknown; resetPaths?: unknown;
+        method?: unknown; path?: unknown; expectedStatus?: unknown; body?: unknown;
+        expectBodyContains?: unknown; assertJson?: unknown; auth?: unknown; setup?: unknown; headers?: unknown;
+    },
 ): ServeSpec | null {
     const cwd = typeof c.serveCwd === "string" && c.serveCwd ? c.serveCwd : "backend";
     const common = {
@@ -131,7 +136,10 @@ export function prepareCheck(projectDir: string, check: AcceptanceCheck & { id: 
     const c = check as unknown as {
         command?: unknown; args?: unknown; cwd?: unknown;
         kind?: unknown; target?: unknown; method?: unknown; path?: unknown;
-        assertJson?: unknown;
+        expectedStatus?: unknown; body?: unknown; expectBodyContains?: unknown;
+        assertJson?: unknown; auth?: unknown; setup?: unknown; headers?: unknown;
+        serveCommand?: unknown; serveArgs?: unknown; serveCwd?: unknown; portEnv?: unknown;
+        healthPath?: unknown; bootWaitMs?: unknown; resetPaths?: unknown;
     };
     const skipKind = typeof c.kind === "string" ? c.kind : "UNKNOWN";
 
@@ -197,6 +205,8 @@ export function prepareCheck(projectDir: string, check: AcceptanceCheck & { id: 
             ...(c.auth ? { auth: c.auth } : {}),
             // 前置步骤（播数据/取变量）：与 Developer 侧 runAcceptance 走同一份执行逻辑
             ...(Array.isArray(c.setup) ? { setup: c.setup } : {}),
+            // 自定义请求头（通用能力：多身份判据靠它表达；引擎不解释头语义）
+            ...(c.headers && typeof c.headers === "object" ? { headers: c.headers } : {}),
         });
         return {
             check,

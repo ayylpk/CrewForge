@@ -27,6 +27,8 @@ export interface ServeSpec {
     bootWaitMs?: number;
     /** 健康检查路径（默认 /） */
     healthPath?: string;
+    /** 起服务方式的来源（declared-serveCommand / package.json.scripts.dev / …）——只做溯源记录，探针不使用 */
+    why?: string;
     /**
      * 起服务**之前**要删除的文件（相对项目根；连带 -wal/-shm/-journal 一起删）。
      *
@@ -62,6 +64,15 @@ export interface ContractSetupStep {
     method: string;
     path: string;
     body?: unknown;
+    /**
+     * 本步骤的自定义请求头（值里可用前面步骤取的 {name} 变量）。
+     *
+     *   ★ 通用能力，不为任何项目特化：引擎不知道头叫什么、代表谁——
+     *     身份约定（如需求里写的 "X-User-Id"）由任务包声明，引擎只负责**如实发送**。
+     *     多身份判据（"B 读 A 的私密项目 → 403"）靠它表达：A 的身份放进 setup 步骤，
+     *     B 的身份放在主请求上。
+     */
+    headers?: Record<string, string>;
     /** 期望状态码；缺省 = 2xx */
     expectedStatus?: number;
     /** 从响应里取值：{ name: "id", from: "data.id" }（点路径，相对 JSON 根） */
@@ -110,6 +121,12 @@ export interface ContractIntent {
     path: string;
     expectedStatus: number;
     body?: unknown;
+    /**
+     * 本请求的自定义请求头（值里可用前置步骤取的 {name} 变量）。
+     * 合并顺序：content-type → auth 的 Authorization → 这里的头（**显式头最后合并，可覆盖前者**）。
+     * 与 setup 步骤的 headers 同一口径：引擎只做"如实发送"，不内置任何身份语义。
+     */
+    headers?: Record<string, string>;
     expectBodyContains?: string;
     /** 结构化断言（强于 expectBodyContains；过滤/隔离/汇总类语义必须用它） */
     assertJson?: JsonAssertion[];
@@ -509,9 +526,14 @@ export async function runContractProbe(o: {
                 const vars: Record<string, string> = {};
                 const setupLogs: string[] = [];
                 for (const [si, step] of (o.intent.setup ?? []).entries()) {
+                    // 合并顺序：content-type → auth 的 Authorization → 步骤显式头（最后合并，可覆盖前者）
+                    const setupHeaders: Record<string, string> = {
+                        "content-type": "application/json", ...authHeader,
+                        ...(fillVarsDeep(step.headers ?? {}, vars) as Record<string, string>),
+                    };
                     const setupInit: RequestInit = {
                         method: step.method.toUpperCase(),
-                        headers: { "content-type": "application/json", ...authHeader },
+                        headers: setupHeaders,
                         signal: AbortSignal.timeout(requestTimeoutMs),
                     };
                     if (step.body !== undefined && !["GET", "HEAD"].includes(setupInit.method as string)) {
@@ -564,9 +586,15 @@ export async function runContractProbe(o: {
 
                 // —— 正式契约请求（path/body 里的 {name} 用前置取的变量填） ——
                 const mainPath = fillVars(o.intent.path, vars);
+                // 合并顺序：content-type → auth 的 Authorization → 显式头（最后合并，可覆盖前者）；
+                // 显式头的值支持 {name} 占位符（与 path/body 同一变量池）
+                const mainHeaders: Record<string, string> = {
+                    "content-type": "application/json", ...authHeader,
+                    ...(fillVarsDeep(o.intent.headers ?? {}, vars) as Record<string, string>),
+                };
                 const init: RequestInit = {
                     method: o.intent.method.toUpperCase(),
-                    headers: { "content-type": "application/json", ...authHeader },
+                    headers: mainHeaders,
                     signal: AbortSignal.timeout(requestTimeoutMs),
                 };
                 if (o.intent.body !== undefined && !["GET", "HEAD"].includes(init.method as string)) {
