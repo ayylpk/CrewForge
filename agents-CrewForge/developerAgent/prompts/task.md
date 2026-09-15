@@ -32,6 +32,9 @@
 - 验收检查 AcceptanceChecks：{{acceptanceChecks}}
 - 开发者指令 DeveloperInstructions：{{developerInstructions}}
 
+> 分批拆解说明：工作项携带 `detail` 字段时，该项一律**以 detail 为主规格**——它是架构师
+> 针对这一项细化过的完整规格，比标题与路径清单更具体；detail 有冲突时以 detail 为准。
+
 {{scaffoldHint}}
 
 ## 当前阶段 Skill

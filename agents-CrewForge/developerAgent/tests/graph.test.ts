@@ -45,7 +45,7 @@ const failure = (sig: string): TestFailure => ({
 });
 
 describe("graph / 结构写死", () => {
-    it("节点集合固定为规格定义的 10 个", () => {
+    it("节点集合固定为规格定义的 12 个（9/15 分批加入 waitBatch / acceptBatch）", () => {
         const compiled = compileGraph() as unknown as {
             nodes?: Record<string, unknown>;
             getGraph?: () => { nodes: Record<string, unknown> };
@@ -55,8 +55,9 @@ describe("graph / 结构写死", () => {
         // __start__ 是 LangGraph 自带的入口节点，不参与业务
         expect(names).toEqual([
             "__start__",
-            "bootstrapOrImplement", "developerBlocked", "developerReady", "handleTestResult",
-            "inspectProject", "loadContext", "receiveTask", "repair", "requestTest", "runLocalChecks",
+            "acceptBatch", "bootstrapOrImplement", "developerBlocked", "developerReady",
+            "handleTestResult", "inspectProject", "loadContext", "receiveTask", "repair",
+            "requestTest", "runLocalChecks", "waitBatch",
         ]);
     });
 
@@ -176,6 +177,87 @@ describe("graph / 路由", () => {
     it("没有测试结果就想 ready → developerBlocked", () => {
         const s = initialDeveloperState({ status: "testing", messages: [] });
         expect(routeAfterTestResult(s)).toBe("developerBlocked");
+    });
+});
+
+// ---------- 分批路由（9/15「拆出一个推一个」）：纯函数金标准 ----------
+//   铁律：①batched=false 的旧链路逐字节不变（上面 27 个 it 即金标准）；
+//   ②batched=true 时「还有未达项」是总闸——所有通往 requestTest 的路（含 :1090
+//     无 error 直通与恢复兜底）都必须先被 waitBatch 拦下，判据未齐就送检 = 静默欠验收。
+describe("graph / 分批路由（waitBatch）", () => {
+    const items = [
+        { id: "w1", kind: "backend" as const },
+        { id: "w2", kind: "frontend" as const },
+    ];
+    /** 蓝图 w1,w2；w1 已完已达、w2 未达 —— "等批"的标准形态（严格顺序投递保证它前缀闭合） */
+    const waitingBatch = (over: Partial<DeveloperState> = {}): DeveloperState => initialDeveloperState({
+        status: "implementing", batched: true, workItems: items,
+        completedWorkItems: ["w1"], arrivedItems: ["w1"], ...over,
+    });
+    /** w1 未完已到、w2 未达 —— "有活可干就先干"的形态 */
+    const arrivedPending = (over: Partial<DeveloperState> = {}): DeveloperState => initialDeveloperState({
+        status: "implementing", batched: true, workItems: items,
+        completedWorkItems: [], arrivedItems: ["w1"], ...over,
+    });
+
+    it("routeAfterImplement：batched + 有已到未完项 → continueWorkItems（与旧链路同义）", () => {
+        expect(routeAfterImplement(arrivedPending())).toBe("continueWorkItems");
+    });
+
+    it("routeAfterImplement：batched + 下一项未到 → waitBatch（不裸跑、不送检）", () => {
+        expect(routeAfterImplement(waitingBatch())).toBe("waitBatch");
+    });
+
+    it("routeAfterImplement：batched + 有已到 pending 但预占不到 → 仍 waitBatch（不落到 runLocalChecks）", () => {
+        expect(routeAfterImplement(arrivedPending({ llmCallsPlanned: 40 }), 40)).toBe("waitBatch");
+    });
+
+    it("routeAfterImplement：batched 下预算/超时仍是硬闸，先于 waitBatch", () => {
+        expect(routeAfterImplement(waitingBatch({ llmCallsCompleted: 40, llmCallsPlanned: 40 }), 40)).toBe("runLocalChecks");
+        expect(routeAfterImplement(waitingBatch({ timeoutRepeated: true }))).toBe("runLocalChecks");
+    });
+
+    it("routeAfterImplement：batched + 全部已到全部做完 → runLocalChecks（流关闭，正常送检）", () => {
+        expect(routeAfterImplement(initialDeveloperState({
+            status: "implementing", batched: true, workItems: items,
+            completedWorkItems: ["w1", "w2"], arrivedItems: ["w1", "w2"],
+        }))).toBe("runLocalChecks");
+    });
+
+    it("routeAfterLocalChecks：batched + 无 error 但有未达项 → waitBatch（封堵 :1090 直通 requestTest 的洞）", () => {
+        // 旧行为：无 error → requestTest —— 判据未齐就送检=静默欠验收，这是分批必拦的头号洞
+        expect(routeAfterLocalChecks(waitingBatch({ error: null, llmCallsPlanned: 40 }), 40)).toBe("waitBatch");
+    });
+
+    it("routeAfterLocalChecks：batched + 恢复兜底路径（带 error、到不了工作项推进）→ 仍 waitBatch", () => {
+        // 预占不到 → :1089 不成立落到下面；有 error → 旧行为会进 repair。两者都不对：批还没齐。
+        expect(routeAfterLocalChecks(waitingBatch({ error: "frontend build 失败", llmCallsPlanned: 40 }), 40)).toBe("waitBatch");
+    });
+
+    it("routeAfterLocalChecks：batched 下预算超限仍先收口 developerBlocked（硬闸次序不变）", () => {
+        expect(routeAfterLocalChecks(waitingBatch({ llmCallsCompleted: 99 }), 40)).toBe("developerBlocked");
+    });
+
+    it("routeAfterLocalChecks：batched + 判据齐（无未达项）→ 旧行为原样（continueWorkItems / requestTest）", () => {
+        expect(routeAfterLocalChecks(arrivedPending())).toBe("continueWorkItems");
+        expect(routeAfterLocalChecks(initialDeveloperState({
+            status: "implementing", batched: true, workItems: items, error: null,
+            completedWorkItems: ["w1", "w2"], arrivedItems: ["w1", "w2"],
+        }))).toBe("requestTest");
+    });
+
+    it("金标准守卫：batched=false 的一切形态都不许产出 waitBatch（arrivedItems 字段被无视）", () => {
+        const matrix: Partial<DeveloperState>[] = [
+            { workItems: items, completedWorkItems: ["w1"], arrivedItems: [] },                 // legacy：pending 照旧推进
+            { workItems: items, completedWorkItems: ["w1"], arrivedItems: [], llmCallsPlanned: 40 }, // 预占不到 → runLocalChecks
+            { workItems: items, completedWorkItems: ["w1", "w2"], arrivedItems: [], error: null },
+            { workItems: items, completedWorkItems: ["w1", "w2"], arrivedItems: [], error: "build 失败" },
+            { workItems: [], completedWorkItems: [], arrivedItems: [], error: null },
+        ];
+        for (const m of matrix) {
+            expect(routeAfterImplement(initialDeveloperState({ status: "implementing", ...m }), 40)).not.toBe("waitBatch");
+            expect(routeAfterLocalChecks(initialDeveloperState({ status: "implementing", ...m }), 40)).not.toBe("waitBatch");
+        }
     });
 });
 

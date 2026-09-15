@@ -28,10 +28,13 @@ import type { SandboxCapabilities, SandboxConfig } from "./tools/processSandbox"
 import { createReadonlyTestAssistant } from "./tools/testAssistant";
 import type { ReadonlySubAgentLlm } from "./tools/readonlySubAgent";
 import { Workspace } from "./workspace";
-import { initialDeveloperState, isTestWaitExpired } from "./state";
+import { initialDeveloperState, isTestWaitExpired, nextUnarrivedWorkItem } from "./state";
 import type { DeveloperState, DeveloperStatus } from "./state";
-import { validateTestFailure, validateTestPassed } from "./protocol";
-import type { ArchitectTask, InboundMessage, TestTrustContext } from "./protocol";
+import {
+    ArchitectBatchSchema, acceptanceHashOf, deriveWorkItems,
+    validateTestFailure, validateTestPassed,
+} from "./protocol";
+import type { AcceptanceCheck, ArchitectBatch, ArchitectTask, InboundMessage, TestTrustContext } from "./protocol";
 
 export interface DeveloperAgentOptions {
     projectId: string;
@@ -77,6 +80,12 @@ export interface DeveloperAgentOptions {
     subagentTimeoutMs?: number;
     /** 每任务子 Agent 调用上限（默认 3；同一 failureSignature 恒为 1，规格九.2） */
     maxSubagentCalls?: number;
+    /**
+     * 分批模式（9/15「拆出一个推一个」）：true = 蓝图先行、架构师逐工作项推批，
+     * 有未达项时图停 in waitBatch（waiting_item）不送检。
+     * 默认 false = 存量一步整包链路（--task / hub-runner / 旧任务包）逐字节不变。
+     */
+    batched?: boolean;
 }
 
 export interface DeveloperAgentHandle {
@@ -86,12 +95,28 @@ export interface DeveloperAgentHandle {
     readonly tools: ToolRegistry;
     /** 跑一个 ArchitectTask 到终态（或从 Ledger 恢复后的终态）；等价于 acceptArchitectTask */
     run(input: { task: ArchitectTask }): Promise<DeveloperState>;
-    /** 规格十一接入接口：接收架构师任务（含 schema 与身份校验） */
-    acceptArchitectTask(task: ArchitectTask): Promise<DeveloperState>;
+    /**
+     * 规格十一接入接口：接收架构师任务（含 schema 与身份校验）。
+     * seedBatches（9/15 分批）= 蓝图之后**已到批**的重播种（首跑必含 w1，否则 w1 裸跑；
+     * 崩溃重放则把 `_tasks/` 里已落盘的批次全量重喂）。校验不过直接 throw——绝不静默丢。
+     */
+    acceptArchitectTask(task: ArchitectTask, seedBatches?: ArchitectBatch[]): Promise<DeveloperState>;
     /** 阻塞从 Hub 收一条消息，是 architect_task 就执行（供接入旧 Hub 时驱动） */
     serveOnce(): Promise<DeveloperState | null>;
     /** 测试消息到达后的恢复入口（校验信任链后从 handleTestResult 继续） */
     resumeFromTestMessage(msg: InboundMessage, sender: string): Promise<DeveloperState | "rejected">;
+    /**
+     * 分批模式（9/15）：架构师批次到达的恢复入口（仿 resumeFromTestMessage 的闸门序列：
+     * 快照存在 → status=waiting_item → 消息是 architect_batch → 身份对上 → **严格在序**
+     * （itemId 必须是首个未达项）。通过后从 acceptBatch 节点复活，不重跑已完成阶段。
+     */
+    resumeWithBatch(msg: InboundMessage): Promise<DeveloperState | "rejected">;
+    /**
+     * 整次作废（9/15）：某批连拒三次等场景由驱动方调它收口——仿 blockUnverified：
+     * 终态幂等、清进程、留痕 run_aborted、落 blocked 并发 developer_blocked。故意做钝：
+     * 不判断 reason，作废与否是调用方（runner / Orchestrator）的权威决定。
+     */
+    abortRun(reason: string): Promise<DeveloperState>;
     /** 规格十一接入接口：显式取消任务（任何非终态都可取消；终态幂等返回） */
     cancelTask(reason?: string): Promise<DeveloperState>;
     /**
@@ -111,7 +136,8 @@ export interface DeveloperAgentHandle {
         repairAttempts: number; failureSignatures: string[]; changedFiles: string[];
         llmCallsPlanned: number; llmCallsCompleted: number; toolCalls: number;
         subagentCalls: number;
-        workItems: { id: string; kind: string; done: boolean }[];
+        /** arrived（9/15 分批）：该项批次是否已到——等批看板与 runner 驱动循环都读它 */
+        workItems: { id: string; kind: string; done: boolean; arrived: boolean }[];
         lastCheckpoint: { node: string; phase: string; resumeNode: string | null } | null;
         activeProcesses: number;
         sandbox: { mode: string; backend: string; realIsolation: boolean; softIsolation: boolean };
@@ -124,6 +150,23 @@ export interface DeveloperAgentHandle {
 }
 
 const DEFAULT_COMMANDS: string[] = [];
+
+/**
+ * 验收判据按 id 去重、**先到者胜**（9/15 分批）：种子合并与崩溃重放共用的唯一口径，
+ * 与 graph.ts 的 mergeArchitectBatch 语义一致——同一批喂两遍 = 喂一遍（幂等），
+ * hash 才不会在重放后漂移（TestPassed 的 acceptanceHash 核对依赖这个稳定性）。
+ */
+function dedupeChecksById(checks: AcceptanceCheck[]): AcceptanceCheck[] {
+    const out: AcceptanceCheck[] = [];
+    const seen = new Set<string>();
+    for (const c of checks) {
+        const id = String((c as { id?: unknown }).id ?? "");
+        if (seen.has(id)) continue;
+        seen.add(id);
+        out.push(c);
+    }
+    return out;
+}
 
 export function createDeveloperAgent(o: DeveloperAgentOptions): DeveloperAgentHandle {
     ensureDir(path.dirname(o.ledgerPath));
@@ -229,7 +272,64 @@ export function createDeveloperAgent(o: DeveloperAgentOptions): DeveloperAgentHa
         });
     };
 
-    const acceptArchitectTask = async (task: ArchitectTask): Promise<DeveloperState> => {
+    const acceptArchitectTask = async (
+        task: ArchitectTask, seedBatches?: ArchitectBatch[],
+    ): Promise<DeveloperState> => {
+        // ★ 种子批校验（9/15 分批，计划点名的"w1 不许裸跑"修复 + 崩溃重放入口）：
+        //   发生在任何副作用之前，校验不过直接 throw——绝不静默丢（"我以为传了、其实没传"
+        //   是最难查的一类断链，与 protocol 里 detail 必须显式入 schema 同一道理）。
+        //   闸都在代码侧：形状走 ArchitectBatchSchema；身份对齐蓝图；itemId ∈ 蓝图工作项；
+        //   **严格沿蓝图序推进（pos===k）**——乱序 / 重复 / 跳批一个都进不来（前缀闭合，
+        //   这正是 resumeWithBatch 在序闸立法过的同一件事的种子版）。
+        const seeds = seedBatches ?? [];
+        const seedMsgs: ArchitectBatch[] = [];
+        if (seeds.length > 0) {
+            const blueprintIds = deriveWorkItems(task.foundationPlan ?? null).map((w) => w.id);
+            for (let k = 0; k < seeds.length; k++) {
+                const parsed = ArchitectBatchSchema.safeParse(seeds[k]);
+                if (!parsed.success) {
+                    throw new Error(`种子批 #${k} 不是合法 architect_batch：${parsed.error.message}`);
+                }
+                const b = parsed.data;
+                if (b.projectId !== task.projectId || b.taskId !== task.taskId) {
+                    throw new Error(
+                        `种子批 #${k} 身份与蓝图不匹配：批 ${b.projectId}/${b.taskId}，`
+                        + `蓝图 ${task.projectId}/${task.taskId}`,
+                    );
+                }
+                const pos = blueprintIds.indexOf(b.itemId);
+                if (pos < 0) {
+                    throw new Error(`种子批 #${k} 的 itemId 不在蓝图工作项里：${b.itemId}`);
+                }
+                if (pos !== k) {
+                    throw new Error(
+                        `种子批 #${k} 不按蓝图顺序推进：期望 ${blueprintIds[k]}，实际 ${b.itemId}`
+                        + "（乱序 / 重复 / 跳批一律拒绝）",
+                    );
+                }
+                seedMsgs.push(b);
+            }
+        }
+        // 种子合并进任务副本（与图内 acceptBatch 节点同一套"按 id 去重、先到者胜"语义）：
+        // 蓝图项带上 detail、全局底线判据在前、竖切判据按批序跟进。旧链路（无种子）逐字节不变。
+        const batched = (o.batched ?? false) || seedMsgs.length > 0;
+        const runTask: ArchitectTask = seedMsgs.length > 0
+            ? {
+                ...task,
+                foundationPlan: {
+                    ...(task.foundationPlan ?? { dirs: [] }),
+                    workItems: deriveWorkItems(task.foundationPlan ?? null).map((w) => {
+                        const hit = seedMsgs.find((s) => s.itemId === w.id);
+                        return hit ? { ...w, detail: hit.detail } : w;
+                    }),
+                },
+                acceptanceChecks: dedupeChecksById([
+                    ...(task.acceptanceChecks ?? []),
+                    ...seedMsgs.flatMap((s) => s.checks ?? []),
+                ]),
+            }
+            : task;
+
         // ★ 身份校验（规格八）：任务必须与入口配置同一身份，否则拒绝执行
         if (task.projectId !== o.projectId || task.taskId !== o.taskId) {
             const why = `身份不匹配：入口 ${o.projectId}/${o.taskId}，任务 ${task.projectId}/${task.taskId}`;
@@ -289,28 +389,45 @@ export function createDeveloperAgent(o: DeveloperAgentOptions): DeveloperAgentHa
             });
         }
 
+        // 分批模式的蓝图字段预填（batched=false 时整段短路，旧链路逐字节不变）：
+        // 崩溃重放的 resumeFrom 可能是 receiveTask 之后的节点（那时 receiveTask 不会重跑，
+        // workItems / acceptanceChecks 就只能靠这里预填）；receiveTask 若照常跑，
+        // 覆盖的是同一份合并后的值——幂等，零扰动。
+        const batchedBlueprint = deriveWorkItems(runTask.foundationPlan ?? null);
         const initial = initialDeveloperState({
-            projectId: task.projectId,
-            taskId: task.taskId,
+            projectId: runTask.projectId,
+            taskId: runTask.taskId,
             runId,
             projectDir: o.projectDir,
-            allowedRoots: task.allowedRoots,
-            requirementSnapshot: task.requirementSnapshot,
-            stackProfile: task.stackProfile,
-            domainModel: task.domainModel,
-            contract: task.contract,
-            foundationPlan: task.foundationPlan,
-            developerInstructions: task.developerInstructions,
-            messages: [task],
+            allowedRoots: runTask.allowedRoots,
+            requirementSnapshot: runTask.requirementSnapshot,
+            stackProfile: runTask.stackProfile,
+            domainModel: runTask.domainModel,
+            contract: runTask.contract,
+            foundationPlan: runTask.foundationPlan,
+            developerInstructions: runTask.developerInstructions,
+            messages: [runTask],
             repairAttempts: prior?.repairAttempts ?? 0,
             failureSignatures: prior?.failureSignatures ?? [],
             changedFiles: prior?.changedFiles ?? [],
             llmCallsCompleted: prior?.llmCalls ?? 0,
             maxRepairAttempts: o.maxRepairAttempts ?? 2,
             status: "received",
-            // 崩溃恢复：有 checkpoint 就从它记录的下一节点接着跑（不重跑已完成阶段）
-            resumeFrom: cp?.resumeNode ?? null,
+            // 崩溃恢复：有 checkpoint 就从它记录的下一节点接着跑（不重跑已完成阶段）。
+            // 例外——带种子的分批重放：种子 = "蓝图 + 已到批"全量输入，必须从 receiveTask
+            // 整体重入；若沿用 cp.resumeNode（如 acceptBatch），消息里没有可收割的批次，
+            // 只会命中 acceptBatch 防御分支原地回等待态，永远续不起来。重复写盘由
+            // Ledger 指纹缓存挡（恢复语义与旧链路同一套）。
+            resumeFrom: seedMsgs.length > 0 ? null : (cp?.resumeNode ?? null),
             correlationId: cp?.correlationId ?? null,
+            ...(batched ? {
+                batched: true,
+                arrivedItems: seedMsgs.map((b) => b.itemId),
+                workItems: batchedBlueprint,
+                acceptanceChecks: runTask.acceptanceChecks ?? [],
+                acceptanceHash: acceptanceHashOf(runTask.acceptanceChecks ?? []),
+                currentWorkItemId: batchedBlueprint[0]?.id ?? null,
+            } : {}),
         });
 
         ledger.appendEvent("run_start", { projectId: task.projectId, taskId: task.taskId });
@@ -442,6 +559,69 @@ export function createDeveloperAgent(o: DeveloperAgentOptions): DeveloperAgentHa
         }
     };
 
+    /**
+     * 分批模式（9/15）：架构师批次到达的恢复入口——resumeFromTestMessage 的镜像闸门：
+     *   ① 必须有任务快照且 status=waiting_item（其他状态不接受批，防止拿批乱推状态）；
+     *   ② 消息必须是 architect_batch 且身份对上（协议只管形状，这里管投递合法性）；
+     *   ③ **严格在序**：itemId 必须等于首个未达项——乱序 / 跳批 / 已到重投全部拒绝。
+     *     （前缀闭合由此闸维护，路由里"已到 pending 与未达不会打架"的前提靠它。）
+     * 通过后与测试恢复同一个重注入形状：消息进 messages、从 acceptBatch 节点复活，
+     * 不重跑已完成阶段；判据合并与 hash 重算全在图内 acceptBatch 节点做。
+     */
+    const resumeWithBatch = async (msg: InboundMessage): Promise<DeveloperState | "rejected"> => {
+        const prior = ledger.loadState();
+        if (!prior) {
+            ledger.appendEvent("batch_rejected", { reason: "没有任务快照" });
+            return "rejected";
+        }
+        if (prior.status !== "waiting_item") {
+            // 特别地，waiting_test 之后不接受批：送过检 acceptanceHash 必须冻结
+            ledger.appendEvent("batch_rejected", {
+                reason: `当前状态 ${prior.status} 不接受批次`, itemId: "itemId" in msg ? msg.itemId : null,
+            });
+            return "rejected";
+        }
+        if (msg.type !== "architect_batch") {
+            ledger.appendEvent("batch_rejected", { reason: `不是架构师批次消息：${msg.type}` });
+            return "rejected";
+        }
+        if (msg.projectId !== o.projectId || msg.taskId !== o.taskId) {
+            ledger.appendEvent("batch_rejected", {
+                reason: `身份不匹配：入口 ${o.projectId}/${o.taskId}，批次 ${msg.projectId}/${msg.taskId}`,
+            });
+            return "rejected";
+        }
+        const expected = nextUnarrivedWorkItem(current);
+        if (msg.itemId !== (expected?.id ?? "")) {
+            ledger.appendEvent("batch_rejected", {
+                reason: `乱序投递拒绝：期望 ${expected?.id ?? "（无未达项）"}，实际 ${msg.itemId}`,
+                itemId: msg.itemId,
+            });
+            return "rejected";
+        }
+        ledger.appendEvent("batch_applied", { itemId: msg.itemId, checks: msg.checks.length });
+        const resumed = initialDeveloperState({
+            ...current,
+            status: "waiting_item",
+            resumeFrom: "acceptBatch",
+            messages: [msg],
+        });
+        current = resumed;
+        try {
+            const finalState = await graph.invoke(resumed, { recursionLimit }) as DeveloperState;
+            current = finalState;
+            persist(finalState);
+            return finalState;
+        } catch (e) {
+            const error = (e as Error).message ?? String(e);
+            ledger.appendEvent("resume_failed", { error, phase: "batch" });
+            const failed: DeveloperState = { ...resumed, status: "failed", error };
+            current = failed;
+            persist(failed);
+            return failed;
+        }
+    };
+
     /** 规格十一：显式取消。任何非终态都可取消；终态幂等返回原状态 */
     const cancelTask = async (reason = "外部取消"): Promise<DeveloperState> => {
         const prior = ledger.loadState();
@@ -504,6 +684,34 @@ export function createDeveloperAgent(o: DeveloperAgentOptions): DeveloperAgentHa
         return blocked;
     };
 
+    /**
+     * 整次作废（9/15 分批，计划拍板"第 i 项 3 次重试全拒 → 整次作废"）：
+     * 驱动方（runner）在批次连拒后停发新批、等当前 invoke 到 END，然后调它收口——
+     * 终态 blocked + developer_blocked 报告 + run_aborted 留痕 + 清进程，全仿 blockUnverified。
+     * 故意做钝：不看 reason 的内容，作废与否是外部权威决定，这里只负责把它落得干干净净。
+     */
+    const abortRun = async (reason: string): Promise<DeveloperState> => {
+        const prior = ledger.loadState();
+        if (prior && (prior.status === "ready" || prior.status === "blocked"
+            || prior.status === "failed" || prior.status === "cancelled")) {
+            ledger.appendEvent("abort_run_ignored_terminal", { status: prior.status });
+            return { ...current, status: prior.status as DeveloperStatus };
+        }
+        const error = `[ABORTED] ${reason}`;
+        ledger.appendEvent("run_aborted", { reason });
+        ledger.clearTestWait();
+        const killed = await workspace.cleanupTaskProcesses(o.taskId, "cleanup");
+        ledger.appendEvent("task_processes_cleaned", { count: killed, phase: "run_aborted" });
+        adapter.send(o.targets?.architect ?? "architect", {
+            type: "developer_blocked", projectId: o.projectId, taskId: o.taskId,
+            reason: error, failureSignature: null,
+        });
+        const blocked: DeveloperState = { ...current, status: "blocked", error };
+        current = blocked;
+        persist(blocked);
+        return blocked;
+    };
+
     /** 规格十一：只读视图。外部 scheduler 用 testWaitOverdue 决定是否判 blocked */
     const inspectTaskState = () => {
         const wait = ledger.getTestWait();
@@ -512,6 +720,7 @@ export function createDeveloperAgent(o: DeveloperAgentOptions): DeveloperAgentHa
         const status = snap?.status ?? current.status;
         const deadlineAt = wait?.deadlineAt ?? current.testDeadlineAt;
         const doneItems = current.completedWorkItems;
+        const arrived = current.arrivedItems;
         return {
             taskId: o.taskId,
             runKey: ledger.runKey,
@@ -529,6 +738,7 @@ export function createDeveloperAgent(o: DeveloperAgentOptions): DeveloperAgentHa
             subagentCalls: ledger.subagentCallCount(),
             workItems: current.workItems.map((w) => ({
                 id: w.id, kind: w.kind, done: doneItems.includes(w.id),
+                arrived: arrived.includes(w.id),   // 分批看板：批到没到（计划风险#2 的廉价补强）
             })),
             lastCheckpoint: cp ? { node: cp.node, phase: cp.phase, resumeNode: cp.resumeNode } : null,
             activeProcesses: workspace.sandbox.activeCount(o.taskId),
@@ -547,8 +757,10 @@ export function createDeveloperAgent(o: DeveloperAgentOptions): DeveloperAgentHa
         acceptArchitectTask,
         serveOnce,
         resumeFromTestMessage,
+        resumeWithBatch,
         cancelTask,
         blockUnverified,
+        abortRun,
         inspectTaskState,
         /** 只读沙箱能力视图：外部（Orchestrator / 看板）据此判断"能不能真的干活" */
         sandboxCapabilities: () => workspace.sandboxCapabilities,

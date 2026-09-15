@@ -4,9 +4,13 @@
 //   节点（固定，顺序即规格）：
 //     receiveTask → inspectProject → loadContext → bootstrapOrImplement
 //     → runLocalChecks → requestTest → handleTestResult → repair → requestTest → developerReady
-//   条件分支（只有这两组真分支）：
-//     runLocalChecks    → requestTest | repair | developerBlocked
-//     handleTestResult  → repair | developerReady | developerBlocked
+//     分批模式（9/15）追加一对暂停/复活节点：
+//     bootstrapOrImplement/runLocalChecks → waitBatch →(END，等 architect_batch)→ acceptBatch → loadContext
+//   条件分支（真分支全列举，任何外部输入都无法增删）：
+//     bootstrapOrImplement → loadContext | runLocalChecks | waitBatch
+//     runLocalChecks       → requestTest | repair | developerBlocked | waitBatch
+//     handleTestResult     → repair | developerReady | developerBlocked
+//     acceptBatch          → loadContext | END（收不到批的防御分支）
 //
 //   硬约束：
 //     · 禁止从数据库/用户输入/配置文件动态添加节点或边；
@@ -21,14 +25,17 @@ import { END, START, StateGraph } from "@langchain/langgraph";
 import {
     DeveloperAnnotation, assertStatusTransition, canGoReady, canReserveLlmCall, hasPendingWorkItem,
     isBudgetExceeded, isRepairExhausted, isRepeatedFailure, isStalled, isTimeoutRepeated,
-    lastInboundType, pickSkillForState,
+    lastInboundType, nextArrivedWorkItem, nextUnarrivedWorkItem, nextWorkItem, pickSkillForState,
 } from "./state";
 import type { DeveloperState, DeveloperStatus } from "./state";
 import {
     acceptanceHashOf, assertNoAuthorityFields, deriveWorkItems, skillForWorkItem,
     validateTestFailure, validateTestPassed,
 } from "./protocol";
-import type { ArchitectTask, OutboundMessage, TestFailure, TestTrustContext, WorkItemKind } from "./protocol";
+import type {
+    AcceptanceCheck, ArchitectBatch, ArchitectTask,
+    OutboundMessage, TestFailure, TestTrustContext, WorkItemKind,
+} from "./protocol";
 import type { ReceiveResult } from "./hubAdapter";
 import { hashOf, type DeveloperLedger } from "./ledger";
 // 脚手架候选（9/15）：stackProfile → 官方脚手架候选清单，空项目初始化加速用
@@ -1054,7 +1061,7 @@ export function renderReviewFindings(f: ReviewInputLike | null): string {
 // 路由（纯函数，零 LLM，可单测）
 // ============================================================
 
-export type LocalCheckRoute = "requestTest" | "repair" | "developerBlocked" | "continueWorkItems";
+export type LocalCheckRoute = "requestTest" | "repair" | "developerBlocked" | "continueWorkItems" | "waitBatch";
 export type TestResultRoute = "repair" | "developerReady" | "developerBlocked";
 
 /** 授权路径的规范化比较形式 */
@@ -1087,6 +1094,12 @@ export function routeAfterLocalChecks(state: DeveloperState, maxLlmCalls = 40): 
     //   （旧 checkpoint 的 resumeNode 可能直接指向 runLocalChecks，带着未完成的工作项）。
     //   预算是硬闸：预占不到额度就不开工，交给下面的 isBudgetExceeded 收口成 blocked。
     if (hasPendingWorkItem(state) && canReserveLlmCall(state, maxLlmCalls)) return "continueWorkItems";
+    // ★ 分批总闸（9/15，计划里点名的头号洞）：判据是**随批到达**的，只要还有未达项，
+    //   现在这份 acceptanceChecks 就是残缺的——"无 error 就 requestTest" 会把半份验收
+    //   送出去（静默欠验收）；带 error 进 repair 也不对（修的不是代码缺陷，是"批没到"）。
+    //   放 :1089 之后：有已到未完项且额度够时照常推进（上面已拦），到这里的都是
+    //   "没活可干但拆解流还开着"的形态 → 等批。budget/timeout 硬闸仍在最前面先收口。
+    if (state.batched && nextUnarrivedWorkItem(state) !== null) return "waitBatch";
     if (!state.error) return "requestTest";
     if (isRepairExhausted(state)) return "developerBlocked";
     // 规格六：上一轮修了但一个文件都没动 → 再修也是原地打转
@@ -1094,7 +1107,7 @@ export function routeAfterLocalChecks(state: DeveloperState, maxLlmCalls = 40): 
     return "repair";
 }
 
-export type ImplementRoute = "continueWorkItems" | "runLocalChecks";
+export type ImplementRoute = "continueWorkItems" | "runLocalChecks" | "waitBatch";
 
 /**
  * 实现节点的**动态**出口（规格七：工作项驱动）。
@@ -1108,10 +1121,24 @@ export type ImplementRoute = "continueWorkItems" | "runLocalChecks";
  * 新语义：**工作项全做完，才跑整站预检**。
  *   · 还有没做完的工作项 + 还有额度 → continueWorkItems（回 loadContext 重挑技能、推进下一项）；
  *   · 预算/超时是硬闸，先拦——此时不推进工作项，交给 runLocalChecks 后的路由收口成 blocked。
+ *
+ * 分批模式（9/15）在此之上加一层"批到没到"的判断，判定序固定为
+ * **budget → timeout → 已到未完项 → 未达项 → 预检**：
+ *   · 有已到批的 pending 项且能预占 → continueWorkItems（与旧链路同义——投递严格有序，
+ *     resumeWithBatch 的在序闸保证已到集前缀闭合，"已到 pending"与"有未达"不会互相抢）；
+ *   · 没批可用但拆解流还开着（存在未达项）→ waitBatch：本项做完≠全站做完，
+ *     既不能拿没 detail 的项裸跑，更不能提前送检；
+ *   · 预占不到额度**也不许**绕过 waitBatch 落到 runLocalChecks——那是判据未齐送检的侧门。
+ * batched=false 时上面这条 if 短路不进，legacy 分支逐字节不变（金标准：tests/graph.test.ts）。
  */
 export function routeAfterImplement(state: DeveloperState, maxLlmCalls = 40): ImplementRoute {
     if (isBudgetExceeded(state, maxLlmCalls)) return "runLocalChecks";
     if (isTimeoutRepeated(state)) return "runLocalChecks";
+    if (state.batched) {
+        if (nextArrivedWorkItem(state) !== null && canReserveLlmCall(state, maxLlmCalls)) return "continueWorkItems";
+        if (nextUnarrivedWorkItem(state) !== null) return "waitBatch";
+        return "runLocalChecks";
+    }
     if (hasPendingWorkItem(state) && canReserveLlmCall(state, maxLlmCalls)) return "continueWorkItems";
     return "runLocalChecks";
 }
@@ -1129,6 +1156,31 @@ export function routeAfterTestResult(state: DeveloperState, maxLlmCalls = 40): T
         return "repair";
     }
     return "developerBlocked";
+}
+
+/**
+ * 批次合并（纯函数，acceptBatch 节点与单测共用）——分批模式的数据面。
+ *
+ *   · detail 只落到目标项（lastWrite 语义：整表返回，别的项一字不动）；
+ *   · checks 按 id 去重、**先到者胜**：蓝图的底线判据在前、批次的竖切判据在后，
+ *     顺序稳定 → acceptanceHash 稳定；崩溃重放同一批两遍 = 合并一遍（幂等）。
+ *   · 这里**不碰** arrivedItems——那是节点的事（reducer 只吃增量）。
+ */
+export function mergeArchitectBatch(
+    state: Pick<DeveloperState, "workItems" | "acceptanceChecks">,
+    msg: ArchitectBatch,
+): { workItems: DeveloperState["workItems"]; acceptanceChecks: AcceptanceCheck[]; acceptanceHash: string } {
+    const workItems = state.workItems.map((w) =>
+        w.id === msg.itemId ? { ...w, detail: msg.detail } : w);
+    const acceptanceChecks: AcceptanceCheck[] = [];
+    const seen = new Set<string>();
+    for (const c of [...state.acceptanceChecks, ...msg.checks]) {
+        const id = String((c as { id?: unknown }).id ?? "");
+        if (seen.has(id)) continue;
+        seen.add(id);
+        acceptanceChecks.push(c);
+    }
+    return { workItems, acceptanceChecks, acceptanceHash: acceptanceHashOf(acceptanceChecks) };
 }
 
 // ============================================================
@@ -1256,10 +1308,16 @@ export function buildDeveloperGraph(deps: DeveloperGraphDeps) {
             stackProfile: JSON.stringify(state.stackProfile ?? null),
             domainModel: JSON.stringify(state.domainModel ?? null),
             contract: JSON.stringify(state.contract ?? null),
-            foundationPlan: JSON.stringify(state.foundationPlan ?? null),
+            // foundationPlan 里的 workItems 也是清单副本 → 同规则剥 detail（防同一份详规重复计费）
+            foundationPlan: JSON.stringify(state.foundationPlan
+                ? { ...state.foundationPlan, workItems: (state.foundationPlan.workItems ?? []).map((w) => ({ ...w, detail: undefined })) }
+                : null),
             // ★ 架构师下发的验收要点必须真的进提示词（此前这里是硬编码的 []）
             acceptanceChecks: JSON.stringify(state.acceptanceChecks ?? []),
-            workItems: JSON.stringify(state.workItems ?? []),
+            // 分批模式（9/15）：清单**剥掉 detail**——每项详规是成百上千字的批次正文，
+            // 清单只需要让模型知道"后面还有哪些项"；详规只在做到该项时随 currentWorkItem
+            // 进提示词（一次一项，防整包时代那面输出体量墙换个位置在输入侧重演）。
+            workItems: JSON.stringify((state.workItems ?? []).map((w) => ({ ...w, detail: undefined }))),
             currentWorkItem: JSON.stringify(item),
             developerInstructions: state.developerInstructions,
             // 官方脚手架候选（9/15）：空项目初始化加速用。栈名只进数据表不进技能；
@@ -1345,6 +1403,9 @@ export function buildDeveloperGraph(deps: DeveloperGraphDeps) {
         runLocalChecks: "requestTest",
         requestTest: "handleTestResult",     // 等测试回复的恢复入口
         handleTestResult: "developerReady",
+        // 分批（9/15）：等批的恢复入口是收批；收批后正常回上下文重渲染
+        waitBatch: "acceptBatch",
+        acceptBatch: "loadContext",
         repair: "runLocalChecks",
         developerReady: "developerReady",
         developerBlocked: "developerBlocked",
@@ -1664,6 +1725,73 @@ export function buildDeveloperGraph(deps: DeveloperGraphDeps) {
         return next(state, "testing", { resumeFrom: null, lastTestFailure: failure, testDeadlineAt: null });
     };
 
+    /**
+     * 分批模式的"等批"出口（9/15）——requestTest→END 的 waiting_test 同型复刻：
+     * 当前项做完了、但架构师还有项没推过来 → 本次 invoke 正常结束，**不睡等、不裸跑、不送检**。
+     * 等批**没有截止时刻**（与测试等待的关键差异）：批次是自家 runner 主动拆的活，
+     * 真到不了批由外部作废路径收口（index.abortRun），图不自己猜超时。
+     * resumeFrom=acceptBatch：批次消息到达后由入口塞进 messages、从这里复活（零重放开发）。
+     */
+    const waitBatch = async (state: DeveloperState): Promise<Partial<DeveloperState>> => {
+        deps.ledger.enterNode("waitBatch", state.status);
+        const waitingFor = nextUnarrivedWorkItem(state)?.id ?? null;
+        deps.ledger.exitNode("waitBatch", "waiting_item", { waitingFor });
+        return next(state, "waiting_item", { resumeFrom: "acceptBatch" });
+    };
+
+    /**
+     * 分批模式的"收批"入口（9/15）：外部驱动把 architect_batch 塞进 state.messages，
+     * 图从本节点复活——handleTestResult 的"收割回 END"同型（倒扫 messages 尾取最新，
+     * 消息本体 reducer 已存过，这里**只收割不再追加**）。三条铁律：
+     *   ① 合并幂等：崩溃重放会把同一批再喂一遍（runner 重播种），arrivedItems 已含即
+     *      no-op 续跑；checks 按 id 去重先到者胜，双保险（mergeArchitectBatch）；
+     *   ② 只回 implementing 轨道：waiting_item→implementing 是迁移表里唯一的续工合法行，
+     *      想直达 testing/ready 在这里就会被 assertStatusTransition 拦死；
+     *   ③ 防御：收不到批次消息就原地回等待态——绝不 failed（错投递不是数据损坏）。
+     */
+    const acceptBatch = async (state: DeveloperState): Promise<Partial<DeveloperState>> => {
+        deps.ledger.enterNode("acceptBatch", state.status);
+        let msg: ArchitectBatch | null = null;
+        for (let i = state.messages.length - 1; i >= 0; i--) {
+            const m = state.messages[i] as { type?: string } | undefined;
+            if (m?.type === "architect_batch") { msg = m as unknown as ArchitectBatch; break; }
+        }
+        if (!msg) {
+            // 没有可收割的批（例如拿错 resumeFrom 重进）：原地回等待态等下一次投递
+            deps.ledger.exitNode("acceptBatch", "waiting_item", { reason: "messages 里没有 architect_batch 可收割" });
+            return next(state, "waiting_item", { resumeFrom: "acceptBatch" });
+        }
+        if (state.arrivedItems.includes(msg.itemId)) {
+            // 重放幂等：这批已收过 → 数据一并不动，只把状态机放回工作轨道
+            const keep = nextArrivedWorkItem(state) ?? nextWorkItem(state);
+            deps.ledger.exitNode("acceptBatch", "implementing", { itemId: msg.itemId, replayed: true });
+            return next(state, "implementing", {
+                resumeFrom: "loadContext", currentWorkItemId: keep?.id ?? null,
+            });
+        }
+        const merged = mergeArchitectBatch(state, msg);
+        // 当前项指向"最早已到未完项"；理论上必有（刚到批的项就是它），nextWorkItem 只是兜底
+        const view = {
+            workItems: merged.workItems,
+            completedWorkItems: state.completedWorkItems,
+            arrivedItems: [...state.arrivedItems, msg.itemId],
+        };
+        const target = nextArrivedWorkItem(view) ?? nextWorkItem(view);
+        deps.ledger.exitNode("acceptBatch", "implementing", {
+            itemId: msg.itemId, checks: merged.acceptanceChecks.length,
+            acceptanceHash: merged.acceptanceHash,
+        });
+        // hash 变动必然发生在任何 test_wait 打开之前（A5 不变量）：waiting_item 到不了 requestTest，
+        // 送检前所有批必须先到齐（routeAfterLocalChecks 的未达闸）。
+        return next(state, "implementing", {
+            ...merged,
+            // appendUnique reducer 只吃增量：重复投递也污染不了（幂等已在上面拦下）
+            arrivedItems: [msg.itemId],
+            currentWorkItemId: target?.id ?? null,
+            resumeFrom: "loadContext",
+        });
+    };
+
     const repair = async (state: DeveloperState): Promise<Partial<DeveloperState>> => {
         deps.ledger.enterNode("repair", state.status);
         const failure: TestFailure | null = state.lastTestFailure;
@@ -1767,18 +1895,23 @@ export function buildDeveloperGraph(deps: DeveloperGraphDeps) {
         .addNode("runLocalChecks", withCheckpoint("runLocalChecks", runLocalChecks))
         .addNode("requestTest", withCheckpoint("requestTest", requestTest))
         .addNode("handleTestResult", withCheckpoint("handleTestResult", handleTestResult))
+        // 分批模式（9/15）的暂停/复活对：waitBatch 出 END 等架构师推批，acceptBatch 收批续跑
+        .addNode("waitBatch", withCheckpoint("waitBatch", waitBatch))
+        .addNode("acceptBatch", withCheckpoint("acceptBatch", acceptBatch))
         .addNode("repair", withCheckpoint("repair", repair))
         .addNode("developerReady", withCheckpoint("developerReady", developerReady))
         .addNode("developerBlocked", withCheckpoint("developerBlocked", developerBlocked))
-        // 入口按状态分派（规格三）：全新任务从 receiveTask 开始；
-        // waiting_test（收到了测试回复）或显式 resumeFrom（崩溃恢复）从指定节点继续。
-        // 允许列表覆盖全部节点——checkpoint 的 resumeNode 可能是其中任何一个。
+        // 入口按状态分派（规格三 + 9/15 分批）：全新任务从 receiveTask 开始；
+        // waiting_test（收到测试回复）、waiting_item（收到架构师批次）或显式 resumeFrom
+        // （崩溃恢复）从指定节点继续。允许列表覆盖全部节点——checkpoint 的 resumeNode
+        // 可能是其中任何一个。
         .addConditionalEdges(START, (s: DeveloperState) =>
-            s.resumeFrom ?? (s.status === "waiting_test" ? "handleTestResult" : "receiveTask"),
+            s.resumeFrom ?? (s.status === "waiting_test" ? "handleTestResult"
+                : s.status === "waiting_item" ? "acceptBatch" : "receiveTask"),
             [
                 "receiveTask", "inspectProject", "loadContext", "bootstrapOrImplement",
                 "runLocalChecks", "requestTest", "handleTestResult", "repair",
-                "developerReady", "developerBlocked",
+                "developerReady", "developerBlocked", "waitBatch", "acceptBatch",
             ])
         .addEdge("receiveTask", "inspectProject")
         .addEdge("inspectProject", "loadContext")
@@ -1788,6 +1921,7 @@ export function buildDeveloperGraph(deps: DeveloperGraphDeps) {
         .addConditionalEdges("bootstrapOrImplement", (s: DeveloperState) => routeAfterImplement(s, maxLlmCalls), {
             continueWorkItems: "loadContext",
             runLocalChecks: "runLocalChecks",
+            waitBatch: "waitBatch",          // 分批：批没到，本项做完就出图（不裸跑下一项）
         })
         // ★ 路径名 → 真实节点：数组型 pathMap 只接受**真实节点名**，
         //   而 "loadContext" 恰好就是真实节点名，所以这里数组写法也能过；
@@ -1797,9 +1931,17 @@ export function buildDeveloperGraph(deps: DeveloperGraphDeps) {
             repair: "repair",
             developerBlocked: "developerBlocked",
             continueWorkItems: "loadContext",
+            waitBatch: "waitBatch",          // ★ 判据未齐绝不送检/绝不 repair——先等批
         })
         // requestTest 发完就退出本次 invoke（不等外部）；下次由 handleTestResult 入口恢复
         .addEdge("requestTest", END)
+        // waitBatch 同理：出图即本次结束，批次到达由入口（index.resumeWithBatch）复活
+        .addEdge("waitBatch", END)
+        // 收批后正常回 loadContext（重渲染含 detail 的任务书）；防御分支（status 仍
+        // waiting_item = 没收到批）直接出图——让它穿 loadContext 会撞上
+        // waiting_item→inspecting 的非法迁移，把"错投递"炸成 failed，违反防御语义。
+        .addConditionalEdges("acceptBatch", (s: DeveloperState) =>
+            s.status === "waiting_item" ? END : "loadContext", [END, "loadContext"])
         .addConditionalEdges("handleTestResult", (s: DeveloperState) => routeAfterTestResult(s, maxLlmCalls), [
             "repair", "developerReady", "developerBlocked",
         ])
