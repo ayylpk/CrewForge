@@ -21,6 +21,7 @@ export type DeveloperStatus =
     | "implementing"  // 搭基础 / 写业务 / 本地检查
     | "testing"       // 已发出 test_request
     | "waiting_test"  // 已落库、等外部 TestAgent 消息恢复（**不在节点里阻塞**）
+    | "waiting_item"  // 分批模式：等架构师推送下一个工作项批次（同样**不阻塞**，END 后由外部复活）
     | "repairing"     // 按失败证据修复
     | "ready"         // 唯一入口：受信 TestAgent 的 TestPassed + 真实机器证据
     | "blocked"       // 重复失败 / 修复次数耗尽 / 预算超限 / 环境缺失
@@ -63,6 +64,10 @@ export interface DeveloperState {
     completedWorkItems: string[];
     /** 当前正在做的工作项 id */
     currentWorkItemId: string | null;
+    /** 分批模式（9/15）：蓝图先行、架构师逐工作项推批；false = 存量一步整包链路 */
+    batched: boolean;
+    /** 已到批的工作项 id（工作项**开工**的前置条件——判据/详规随批到达） */
+    arrivedItems: string[];
     /** 已完成的工具调用指纹（= 工具 + command + args + cwd + 当前文件快照） */
     completedToolCalls: string[];
     /** 已批准过超时延长的调用指纹（规格五.7：同一条命令只许延长一次） */
@@ -118,6 +123,8 @@ export const DeveloperAnnotation = Annotation.Root({
     acceptanceHash: Annotation<string>({ reducer: lastWrite, default: () => "" }),
     workItems: Annotation<WorkItem[]>({ reducer: lastWrite, default: () => [] }),
     completedWorkItems: Annotation<string[]>({ reducer: appendUnique, default: () => [] }),
+    batched: Annotation<boolean>({ reducer: lastWrite, default: () => false }),
+    arrivedItems: Annotation<string[]>({ reducer: appendUnique, default: () => [] }),
     completedToolCalls: Annotation<string[]>({ reducer: appendUnique, default: () => [] }),
     timeoutExtensions: Annotation<string[]>({ reducer: appendUnique, default: () => [] }),
     timeoutRepeated: Annotation<boolean>({ reducer: lastWrite, default: () => false }),
@@ -149,6 +156,7 @@ export function initialDeveloperState(patch: Partial<DeveloperState>): Developer
         contract: null, foundationPlan: null, developerInstructions: "",
         acceptanceChecks: [], acceptanceHash: "", workItems: [],
         completedWorkItems: [], completedToolCalls: [], timeoutExtensions: [],
+        batched: false, arrivedItems: [],
         timeoutRepeated: false, timeoutSignature: null,
         currentWorkItemId: null,
         currentFiles: [], activeSkill: null, messages: [], lastTestFailure: null,
@@ -169,9 +177,13 @@ export function initialDeveloperState(patch: Partial<DeveloperState>): Developer
 export const STATUS_TRANSITIONS: Record<DeveloperStatus, DeveloperStatus[]> = {
     received: ["inspecting", "blocked", "failed", "cancelled"],
     inspecting: ["implementing", "blocked", "failed", "cancelled"],
-    implementing: ["implementing", "testing", "waiting_test", "repairing", "blocked", "failed", "cancelled"],
+    implementing: ["implementing", "testing", "waiting_test", "waiting_item", "repairing", "blocked", "failed", "cancelled"],
     testing: ["testing", "waiting_test", "repairing", "ready", "blocked", "failed", "cancelled"],
     waiting_test: ["testing", "repairing", "ready", "blocked", "failed", "cancelled"],
+    // waiting_item 只能回 implementing 继续干活或收口终态；**不得**直达 testing/ready——
+    // 判据没到齐就没有"送检"这回事（routeAfterLocalChecks 的未达闸是同一件事的另一半）。
+    // waiting_test → waiting_item 也被禁：一旦送过检，acceptanceHash 必须冻结。
+    waiting_item: ["implementing", "blocked", "failed", "cancelled"],
     repairing: ["implementing", "testing", "waiting_test", "blocked", "failed", "cancelled"],
     ready: [],
     blocked: [],
@@ -287,6 +299,34 @@ export function hasPendingWorkItem(
     state: Pick<DeveloperState, "workItems" | "completedWorkItems">,
 ): boolean {
     return nextWorkItem(state) !== null;
+}
+
+/**
+ * 分批模式（9/15）：下一个「未完**且**已到批」的工作项。
+ * 顺序仍是架构师给的序——后项先到批也不许提前（"顺序即执行序"是蓝图的立法）；
+ * 全部未完项都没到批 → null，交给路由去 waitBatch 等架构师。
+ */
+export function nextArrivedWorkItem(
+    state: Pick<DeveloperState, "workItems" | "completedWorkItems" | "arrivedItems">,
+): WorkItem | null {
+    for (const item of state.workItems) {
+        if (!state.completedWorkItems.includes(item.id) && state.arrivedItems.includes(item.id)) return item;
+    }
+    return null;
+}
+
+/**
+ * 下一个「未完**且未**到批」的工作项——非 null 即"拆解流还开着"。
+ * 这是分批模式的总闸：所有通往 requestTest 的路（含恢复兜底）都必须先看它一眼，
+ * 否则判据未齐就送检 = 静默欠验收（routeAfterLocalChecks:1090 那个洞的封堵点）。
+ */
+export function nextUnarrivedWorkItem(
+    state: Pick<DeveloperState, "workItems" | "completedWorkItems" | "arrivedItems">,
+): WorkItem | null {
+    for (const item of state.workItems) {
+        if (!state.completedWorkItems.includes(item.id) && !state.arrivedItems.includes(item.id)) return item;
+    }
+    return null;
 }
 
 /**

@@ -144,3 +144,67 @@ describe("protocol / 权威字段禁令", () => {
         expect(() => assertNoAuthorityFields("t", { hello: "world" })).not.toThrow();
     });
 });
+
+// ============================================================
+// 分批拆解（9/15 拍板"拆出一个推送一个"）：architect_batch 入站消息
+//   · 蓝图仍是 architect_task（全局字段一次冻结，contract 全量在蓝图里）；
+//   · 每个工作项的详规与判据走 architect_batch，逐项推送；
+//   · 注意：**没有** architect_close 这类"流关闭"消息——批次到齐的判定是
+//     代码侧 arrivedItems ⊇ workItems ids（协议层不留可被模型伪造的收尾键）。
+// ============================================================
+
+describe("protocol / architect_batch 批次消息", () => {
+    const validBatch = {
+        type: "architect_batch",
+        projectId: "p1",
+        taskId: "t1",
+        itemId: "w2",
+        detail: "实现任务 CRUD：路由→服务→仓储三层，错误统一 {code,msg} 外壳",
+        checks: [
+            { id: "ac-11", kind: "CONTRACT", method: "POST", path: "/api/tasks", expectedStatus: 201, body: { title: "t" } },
+        ],
+    };
+
+    it("合法批次能解析，字段原样保留", () => {
+        const r = parseInbound(JSON.stringify(validBatch));
+        expect(r.ok).toBe(true);
+        if (r.ok) {
+            expect(r.message.type).toBe("architect_batch");
+            const b = r.message as { itemId: string; detail: string; checks: unknown[] };
+            expect(b.itemId).toBe("w2");
+            expect(b.checks.length).toBe(1);
+        }
+    });
+
+    it("缺 itemId / detail 空串 → 拒绝（批次必须指到项、必须带详规）", () => {
+        expect(parseInbound({ ...validBatch, itemId: undefined }).ok).toBe(false);
+        expect(parseInbound({ ...validBatch, detail: "" }).ok).toBe(false);
+    });
+
+    it("checks 里的判据缺 id → 拒绝（AcceptanceCheck 的 id 是唯一锚点，撞车去重靠它）", () => {
+        const r = parseInbound({ ...validBatch, checks: [{ kind: "CONTRACT" }] });
+        expect(r.ok).toBe(false);
+    });
+
+    it("checks 允许为空数组（inspect/foundation/pre-test 这类无外显产物项，业务闸门在 architectAgent 侧按 kind 拦）", () => {
+        expect(parseInbound({ ...validBatch, itemId: "w1", checks: [] }).ok).toBe(true);
+    });
+
+    it("detail 里可以出现 done/status 等字样（权威字段闸扫的是 JSON 键，不是值里的英文单词）", () => {
+        const r = parseInbound({ ...validBatch, detail: "CRUD 完成后前端列表应显示 done=false 的新任务" });
+        expect(r.ok).toBe(true);
+    });
+
+    it("workItems 里的 detail 字段能通过 architect_task（strict z.object 会剥离未知键，必须先入 schema）", () => {
+        const t = {
+            ...architectTask,
+            foundationPlan: { dirs: ["backend"], workItems: [{ id: "w1", kind: "foundation", detail: "搭骨架：目录+工程文件+入口" }] },
+        };
+        const r = parseInbound(t);
+        expect(r.ok).toBe(true);
+        if (r.ok) {
+            const items = (r.message as { foundationPlan: { workItems: { detail?: string }[] } }).foundationPlan.workItems;
+            expect(items[0]?.detail).toBe("搭骨架：目录+工程文件+入口");
+        }
+    });
+});

@@ -217,6 +217,12 @@ export const WorkItemSchema = z.object({
     title: z.string().optional(),
     /** 该工作项涉及的项目内路径，供 Skill 与自检定位 */
     paths: z.array(z.string()).optional(),
+    /**
+     * 该项的详规（分批模式 9/15）：由架构师的展开批次带入，做该项时的**主规格**。
+     * 必须显式入 schema——z.object 默认剥离未知键，不加的话模型给的 detail 会**静默消失**
+     * （"我以为传了、其实没传"是最难查的一类断链）。
+     */
+    detail: z.string().min(1).optional(),
 });
 export type WorkItem = z.infer<typeof WorkItemSchema>;
 
@@ -315,6 +321,29 @@ export const TestPassedSchema = z.object({
 });
 export type TestPassed = z.infer<typeof TestPassedSchema>;
 
+/**
+ * 架构师批次消息（9/15 拍板"拆出一个推送一个"）：一个工作项的详规 + 该竖切判据。
+ *
+ *   分工：蓝图（architect_task）一次冻结**全局**——stackProfile / domainModel /
+ *     contract 全量 / workItems 骨架（顺序即执行序）；批次只做"细化"，禁止增删工作项。
+ *   没有"流关闭"消息：批次到齐由代码侧判（arrivedItems ⊇ 工作项 id），
+ *     收尾键一旦进协议就是模型可伪造的"提前送检"入口——权威判定不在模型侧的铁律同样适用。
+ *   itemId 是否真是蓝图里的项、是否重复推送，属**代码侧**校验（index/runner 把关），
+ *     协议只管形状。
+ */
+export const ArchitectBatchSchema = z.object({
+    type: z.literal("architect_batch"),
+    projectId: z.string().min(1),
+    taskId: z.string().min(1),
+    /** 本批对应的工作项 id（必须已在蓝图中声明） */
+    itemId: z.string().min(1),
+    /** 该项详规：Developer 做该项时的主规格（写入 WorkItem.detail 后进提示词） */
+    detail: z.string().min(1),
+    /** 该竖切功能的验收判据；inspect/pre-test 等无外显产物项可为空数组 */
+    checks: z.array(AcceptanceCheckSchema),
+});
+export type ArchitectBatch = z.infer<typeof ArchitectBatchSchema>;
+
 export const RepairRequestedSchema = z.object({
     type: z.literal("repair_requested"),
     projectId: z.string().min(1),
@@ -339,11 +368,13 @@ export const ResumeTaskSchema = z.object({
 export type ResumeTask = z.infer<typeof ResumeTaskSchema>;
 
 const INBOUND_SCHEMAS = [
-    ArchitectTaskSchema, TestFailureSchema, TestPassedSchema,
+    ArchitectTaskSchema, ArchitectBatchSchema, TestFailureSchema, TestPassedSchema,
     RepairRequestedSchema, CancelTaskSchema, ResumeTaskSchema,
 ] as const;
 
-export type InboundMessage = ArchitectTask | TestFailure | TestPassed | RepairRequested | CancelTask | ResumeTask;
+export type InboundMessage =
+    | ArchitectTask | ArchitectBatch | TestFailure | TestPassed
+    | RepairRequested | CancelTask | ResumeTask;
 
 export type ParseResult =
     | { ok: true; message: InboundMessage }
