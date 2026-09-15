@@ -73,9 +73,21 @@ try {
     // maxTokens 抬到 32768：架构师一次吐**整包**（contract+workItems+验收全字段），
     // 输出量远大于 Developer 的单步决策——8192 实测被 max_tokens 截断（stop=max_tokens
     // → 文本为空 → extractJson 抠不到 → 三次全拒）。截断的决策不可信，只能从源头抬。
-    // timeoutMs 抬到 480s：整包输出实测 ~85s/次（5.5K token），240s 默认太贴地，
-    // 3 次重试链会顶穿外部调用方的等待上限。
-    const agent = createArchitectAgent({ llm: createRealLlm({ maxTokens: 32768, timeoutMs: 480_000 }) });
+    // timeoutMs 抬到 900s：整包输出实测 ~85s/次（5.5K token，小项目 p0）；
+    // p7 中型项目（~22 接口/七表）首跑在 480s 处被自己的 AbortSignal 掐断
+    // （错文"The operation timed out"=Bun 对 AbortSignal.timeout 的措辞，不是网关拒）——
+    // 输出体量大几倍，按 token 生成时间线性外推留 2 倍余量。
+    let seq = 0;
+    const agent = createArchitectAgent({
+        llm: createRealLlm({
+            maxTokens: 32768, timeoutMs: 900_000,
+            onCall: (i) => {
+                seq++;
+                const extra = i.attempts > 1 ? ` [${i.escalated ? "升档" : "重试"}×${i.attempts}]` : "";
+                console.log(`[architect-llm#${seq}] ${i.latencyMs}ms in=${i.inputTokens} out=${i.outputTokens}${extra}`);
+            },
+        }),
+    });
 
     console.log(`[architect-cli] 拆解开始：projectId=${projectId} taskId=${taskId}`);
     console.log(`[architect-cli] 需求文件：${requirementPath}（${requirement.length} 字符）`);

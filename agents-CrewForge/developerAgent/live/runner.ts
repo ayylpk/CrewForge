@@ -25,12 +25,22 @@
 //     · Windows 进程树终止用 taskkill，属于 best-effort；
 //     · 仅用于本机开发与真实 LLM 冒烟，**不得**用于生产运行不受信生成代码。
 //
-//   用法：
-//     bun run developerAgent/live/runner.ts \
-//       --task developerAgent/live/mysite/T1-foundation.json \
-//       --project F:\code\project\CrewForge\.runs\developer-local\live-1 \
-//       --sandbox soft --reset
+//   用法（两种输入，二选一）：
+//     ① 手写任务包（历史形态）：
+//       bun run developerAgent/live/runner.ts \
+//         --task developerAgent/live/mysite/T1-foundation.json \
+//         --project F:\code\project\CrewForge\.runs\developer-local\live-1 \
+//         --sandbox soft --reset
+//     ② ★ 需求原文（9/15 接线：架构师进 runner）：
+//       bun run developerAgent/live/runner.ts \
+//         --requirement developerAgent/live/p7-requirement.md \
+//         --project F:\code\project\CrewForge\.runs\developer-local\p7 \
+//         --run-id p7 --sandbox soft --reset
+//       runner 先调架构师 Agent 现场拆解（需求→ArchitectTask，含校验/重试反馈环），
+//       拆出的包落盘到 .runs/developer-local/_tasks/<runId>.json（审计+可复跑凭据），
+//       然后走与 ① 完全相同的执行链——PM 只给需求，不再手写 JSON。
 //     可选：--run-id <id>（默认取 --project 的末级目录名，或 live-1）
+//           --project-id/--task-id（仅 --requirement 模式；缺省 runId/t1）
 //   退出码：ready=0；blocked/failed/rejected=1。
 // ============================================================
 
@@ -38,6 +48,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { createDeveloperAgent } from "../index";
 import { createRealLlm } from "../realLlm";
+import { createArchitectAgent } from "../architectAgent";
+import type { DecomposeResult } from "../architectAgent";
 // 9/15 实弹补：runner 此前没加载仓库 .env，shell 里若继承着别的 ANTHROPIC_* 值
 // （如 Claude Code 自己的中转站），createRealLlm 的 env 兜底会拿到错误端点——
 // 实测 404 Model "qwen3.8-flash" is not supported。以仓库 .env 为准（CLI 同款做法）。
@@ -60,18 +72,35 @@ function argOf(flag: string): string | null {
 }
 
 const USAGE = [
-    "用法: bun run developerAgent/live/runner.ts --task <architect_task.json> [--project <dir>] [--sandbox soft|strict] [--run-id <id>] [--reset]",
+    "用法（--task 与 --requirement 二选一）:",
+    "  bun run developerAgent/live/runner.ts --task <architect_task.json> [--project <dir>] [--sandbox soft|strict] [--run-id <id>] [--reset]",
+    "  bun run developerAgent/live/runner.ts --requirement <需求.md> [--project <dir>] [--sandbox soft|strict] [--run-id <id>] [--project-id <id>] [--task-id <id>] [--reset]",
     "",
+    "  --task         手写任务包：直接执行（历史形态）",
+    "  --requirement  需求原文：先由架构师 Agent 现场拆解成任务包，再走同一执行链",
     "  --sandbox soft    本机受约束执行（realIsolation=false，仅开发/冒烟）",
     "  --sandbox strict  默认：没有真实隔离后端就不执行命令（blocked）",
 ].join("\n");
 
 const taskFile = argOf("--task");
-if (!taskFile) {
+const requirementFile = argOf("--requirement");
+if (!taskFile && !requirementFile) {
     console.error(USAGE);
     process.exit(2);
 }
-const taskFilePath = path.resolve(taskFile);
+if (taskFile && requirementFile) {
+    console.error(`--task 与 --requirement 只能给一个（两个都给=输入源不明确）\n\n${USAGE}`);
+    process.exit(2);
+}
+let requirementPath: string | null = null;
+if (requirementFile) {
+    requirementPath = path.resolve(requirementFile);
+    if (!fs.existsSync(requirementPath)) {
+        console.error(`需求文件不存在：${requirementPath}\n\n${USAGE}`);
+        process.exit(2);
+    }
+}
+let taskFilePath = taskFile ? path.resolve(taskFile) : "";
 loadDotEnv();   // 进点第一件事：以仓库 .env 为准（覆盖 shell 继承的 ANTHROPIC_*）
 
 const AGENT_DIR = import.meta.dir.replace(/[/\\]live$/, "");          // developerAgent/
@@ -120,15 +149,94 @@ function assertIsolatedProjectDir(dir: string): void {
 }
 assertIsolatedProjectDir(projectDir);
 
-// ---------- 任务包：先过 protocol 校验，架构师手不抖也不行 ----------
+// ---------- 任务包（两种输入源二选一，参数段已校验） ----------
+//
+//   ① --task：手写任务包 JSON——先过 protocol 校验，架构师手不抖也不行；
+//   ② --requirement：需求原文——先由架构师 Agent 现场拆解（五道校验链 +
+//      被拒反馈环 + 重试都在 architectAgent 内完成，产物已过 parseInbound），
+//      包落盘到 _tasks/ 留审计与复跑凭据，再走与 ① 完全相同的执行链。
+//      ★ 9/15 接线：PM 的输入只剩需求原文，机器字段全部由架构师产生。
 
-const raw = JSON.parse(fs.readFileSync(taskFilePath, "utf-8"));
-const parsed = parseInbound(raw);
-if (!parsed.ok || parsed.message.type !== "architect_task") {
-    console.error(`任务包不合法：${(parsed as { error?: string }).error ?? "不是 architect_task"}`);
-    process.exit(2);
+function loadTaskFromFile(filePath: string): ArchitectTask {
+    const raw = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+    const parsed = parseInbound(raw);
+    if (!parsed.ok || parsed.message.type !== "architect_task") {
+        console.error(`任务包不合法：${(parsed as { error?: string }).error ?? "不是 architect_task"}`);
+        process.exit(2);
+    }
+    return parsed.message as ArchitectTask;
 }
-const task = parsed.message as ArchitectTask;
+
+/**
+ * 需求原文 → 架构师拆解 → 任务包（落盘留证）。
+ * LLM 配置与 architect-cli 一致：maxTokens 32768（整包输出 >8192 会被截断）、
+ * timeoutMs 900s（小包 ~85s/次；中型项目 p7 在 480s 处被自掐，留 2 倍余量）。
+ * 这里**不依赖惰性 llm**——要拆解就必须有凭据，拿不到就是 fail fast，不静默降级。
+ */
+async function decomposeRequirement(reqPath: string): Promise<{ task: ArchitectTask; outFile: string }> {
+    const requirement = fs.readFileSync(reqPath, "utf-8").trim();
+    if (!requirement) {
+        console.error(`需求文件是空的：${reqPath}`);
+        process.exit(2);
+    }
+    const projectId = argOf("--project-id") ?? runId;
+    const taskId = argOf("--task-id") ?? "t1";
+
+    console.log("======== 架构师拆解（需求原文 → 任务包） ========");
+    console.log(`[architect] 需求文件：${reqPath}（${requirement.length} 字符）`);
+    console.log(`[architect] 身份：projectId=${projectId} taskId=${taskId}`);
+
+    let architectLlm: ReturnType<typeof createRealLlm>;
+    try {
+        let seq = 0;
+        architectLlm = createRealLlm({
+            maxTokens: 32768,
+            timeoutMs: 900_000,
+            onCall: (i) => {
+                seq++;
+                const extra = i.attempts > 1 ? ` [${i.escalated ? "升档" : "重试"}×${i.attempts}]` : "";
+                console.log(`[architect-llm#${seq}] ${i.latencyMs}ms in=${i.inputTokens} out=${i.outputTokens}${extra}`);
+            },
+        });
+    } catch (e) {
+        console.error(`[architect] LLM 凭据不可用（--requirement 模式必须有可用 LLM）：${(e as Error).message}`);
+        process.exit(2);
+    }
+
+    const t0 = Date.now();
+    let result: DecomposeResult;
+    try {
+        result = await createArchitectAgent({ llm: architectLlm }).decompose({ requirement, projectId, taskId });
+    } catch (e) {
+        // 拆解全败（格式/校验/网络）：原文进 stderr，任务不发车——归因在架构师，不在开发
+        console.error(`[architect] 拆解失败（任务不发车）：${(e as Error).message}`);
+        process.exit(2);
+    }
+    const secs = ((Date.now() - t0) / 1000).toFixed(1);
+
+    // 拆解报告：PM 监视口——拆了什么、几次过、验收几条，一眼能对
+    const items = result.task.foundationPlan.workItems ?? [];
+    console.log(`[architect] ✅ 拆解完成：${secs}s，尝试 ${result.attempts} 次`
+        + (result.rejections.length > 0 ? `（被拒 ${result.rejections.length} 次后自愈）` : "（一次通过）"));
+    console.log(`[architect] 工作项 ${items.length}：${items.map((w) => `${w.id}/${w.kind}`).join(", ")}`);
+    console.log(`[architect] 验收判据 ${result.task.acceptanceChecks.length} 条：${result.task.acceptanceChecks.map((c) => c.id).join(", ")}`);
+    console.log(`[architect] 接口契约 ${result.task.contract.endpoints.length} 条，stack=${result.task.stackProfile.backend ?? "?"}${result.task.stackProfile.frontend && result.task.stackProfile.frontend !== "none" ? "+" + result.task.stackProfile.frontend : ""}`);
+
+    const outFile = path.join(RUNS_ROOT, "_tasks", `${runId}.json`);
+    fs.mkdirSync(path.dirname(outFile), { recursive: true });
+    fs.writeFileSync(outFile, JSON.stringify(result.task, null, 2), "utf-8");
+    console.log(`[architect] 任务包落盘：${outFile}（复跑可用 --task 直喂）`);
+    return { task: result.task, outFile };
+}
+
+let task: ArchitectTask;
+if (requirementPath) {
+    const r = await decomposeRequirement(requirementPath);
+    task = r.task;
+    taskFilePath = r.outFile;
+} else {
+    task = loadTaskFromFile(taskFilePath);
+}
 
 // ---------- TestAgent 身份（代码配置，不来自消息内容） ----------
 
