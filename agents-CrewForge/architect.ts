@@ -31,11 +31,17 @@ import { writeWorkspace, type Pair, type ExecTask, type Plan, type planItem, REQ
 import { currentProjectId, projectDir } from "./runEnv";
 import { ensureTasksForPhase, getTasksByStatus, updateStatusByExt } from "./task";
 import { pickQuestioner } from "./confirm";
+import { dispatchArchitectTaskBatched } from "./architectTaskBuilder";
+import { createRealLlm } from "./developerAgent/realLlm";
 import { buildKnown, checkBatch } from "./checkers";
 import { publishContracts } from "./contracts";
 import { enforceEngineFoundation, tidyExecTasks, bannedDependencyList } from "./foundation";
+import { installSkeleton, missingSkeletonFiles } from "./engine/workspace/skeleton/install";
 import { baselinePromptBlock, resolveProjectBaseline } from "./baseline";
 import { acceptanceFromTasks } from "./engine/ir/contract";
+import type { Acceptance } from "./engine/ir/acceptance";
+import { activeScenarioSpec, acceptanceFromScenarioSpec, resolveAcceptanceCode } from "./engine/ir/scenarioSpec";
+import { getProjectRequirement } from "./Node";
 
 // ---------- 模型 ----------
 
@@ -552,6 +558,25 @@ const bootstrapNode: StateNodeFn = async (state, node) => {
         }
         console.log(`[architect] 地基落地完成：${files.length} 个文件`);
 
+        // ★ 阶段 1 提交 2：**引擎骨架直出**最后一个落盘（覆盖 LLM 同名文件）。
+        //   治的病：s3 前端没有 index.html（vite 直接构建失败）、s1 后端空库启动无表可查、
+        //   p9 全树没有 main.ts/App.vue。这些文件归引擎所有，写盘前已在 ownership 层拒绝任务产出。
+        const pidForSkeleton = currentProjectId();
+        if (pidForSkeleton != null) {
+            try {
+                const sk = installSkeleton({
+                    appName: "crewforge-app",
+                    title: "CrewForge 应用",
+                    ddl: (state?.basePlan as { ddl?: string } | null | undefined)?.ddl ?? null,
+                });
+                console.log(`[architect] 引擎骨架已落盘：${sk.written.length} 个引擎拥有件${sk.markerPatched ? "（补了路由登记缝 {{ROUTES}}）" : ""}${sk.skipped.length ? `；写盘失败 ${sk.skipped.length} 个：${sk.skipped.join("；")}` : ""}`);
+                const missing = missingSkeletonFiles(pidForSkeleton);
+                if (missing.length > 0) console.warn(`[architect] ⚠️ 骨架仍缺件：${missing.join("、")}（缺件 = 前端/后端起不来的直接来源）`);
+            } catch (e) {
+                console.error("[architect] ❌ 引擎骨架落盘失败:", (e as Error).message);
+            }
+        }
+
         // 状态落盘（含地基就绪标记）：阶段 2+ 的 runPhaseSplit 读回 → 条件边短路跳过技术栈/确认门/地基
         const pid = currentProjectId();
         if (pid != null) {
@@ -589,6 +614,19 @@ const confirmNode: StateNodeFn = async (state, node) => {
     return { human: { questionId: randomUUID(), prompt: node?.systemPrompt?.trim() || "技术方案如上，确认开工？(y / n)", options: ["y", "n"] } };
 };
 
+/**
+ * 派发模式（**新路径为默认**）：
+ *   hub（默认）—— 两阶段派发（9/15）：需求原文 → architectAgent 拆蓝图
+ *                 （architect_task 先发）→ 按工作项顺序逐批 architect_batch；
+ *                 经 Hub 直派 developer，全程经 architectTaskBuilder.dispatchArchitectTaskBatched
+ *                 校验/落盘/幂等记账；任一批 3 连拒=整次作废（cancel_task + manager 报告）。
+ *   legacy      —— 旧的"按层拆 ExecTask → 发 backendEngineer / frontendEngineer"路径，
+ *                 代码保留，但要显式 CF_ARCHITECT_DISPATCH=legacy 才走。
+ */
+export function architectDispatchMode(): "hub" | "legacy" {
+    return (process.env.CF_ARCHITECT_DISPATCH ?? "hub").trim().toLowerCase() === "legacy" ? "legacy" : "hub";
+}
+
 /** 接口拆分 + 任务构建 + 下发（station 副作用）。返回 exeTasks。 */
 function makeDispatchNode(station: TransferStation): StateNodeFn {
     return async (state) => {
@@ -598,6 +636,69 @@ function makeDispatchNode(station: TransferStation): StateNodeFn {
         if (!plan || !detailed || !stack) throw new Error("接口拆分缺少前置输入（plan/detailedPlan/stack）");
 
         const phaseNo = plan.phases[0]?.phase ?? 1;
+
+        // ★ 两阶段派发（9/15 解耦测试第二项）：hub 模式下**蓝图先行 + 按工作项逐批发
+        //   architect_batch**（architectTaskBuilder.dispatchArchitectTaskBatched →
+        //   developerAgent/architectAgent 拆解，需求原文取 sys_project.description +
+        //   clarified_req）。放在接口拆分 LLM 之前：蓝图/批次自带拆解，旧的
+        //   "api_prompt 拆分 → architectSemanticsFromPlan → 整包"链在 hub 模式
+        //   零调用（连这次拆分 LLM 都省了）；代码保留只为 legacy 模式继续可用。
+        if (architectDispatchMode() === "hub") {
+            const pidNum = currentProjectId();
+            const projectIdStr = String(pidNum ?? plan.project ?? "project");
+            const taskIdStr = `${projectIdStr}-p${phaseNo}`;
+            // 需求原文：DB 读失败/为空都显式炸（不猜需求把空包派出去）
+            let requirement = "";
+            try {
+                if (pidNum != null) requirement = await getProjectRequirement(pidNum);
+            } catch (e) {
+                throw new Error(`两阶段派发：需求原文读取失败（sys_project）：${(e as Error).message}`);
+            }
+            // ★ 声明先于派发（9/15 新链，maintainer 收敛闸的家法——lane D 报告 #2）：
+            //   ① sys_task 登记本阶段"开发流任务"一行——taskId 与 developer 三终态消息
+            //     （developer_ready/blocked/failed 的 taskId）同一 id 空间，maintainer 的
+            //     updateStatusByExt 才找得到行；桥=可观测层，写库异常只 warn 不拦派发。
+            //   ② tasks_declared {pairIds:[taskId], final:true}——新链路一个阶段=一个
+            //     开发任务包，终态一次定论，收敛条件即"这一行定论"。旧 pairIds(T 形) 作废。
+            if (pidNum != null) {
+                const flowTask: ExecTask = {
+                    id: taskIdStr, phase: phaseNo, layer: "backend", method: "", path: "",
+                    title: `developer 流水（阶段 ${phaseNo}：蓝图+分批任务包）`,
+                    description: `两阶段派发 architect_task/architect_batch；taskId=${taskIdStr}`,
+                    files: [], parameters: [], acceptance: "",
+                };
+                try { await ensureTasksForPhase([flowTask], pidNum, phaseNo); }
+                catch (e) { console.warn(`[architect] sys_task 流水行登记失败（桥层不阻塞）：${(e as Error).message}`); }
+                station.sendMessage("architect", "maintainer", JSON.stringify({
+                    type: "tasks_declared", phase: phaseNo, pairIds: [taskIdStr], final: true,
+                }));
+            }
+            // 真机 LLM 档位照抄 live/architect-cli.ts：maxTokens 32768 / timeoutMs 900s
+            // （8192 实测被截断；p7 一步整包 480s 自掐的标定还在）
+            const outcome = await dispatchArchitectTaskBatched({
+                station,
+                requirement,
+                projectId: projectIdStr,
+                taskId: taskIdStr,
+                llm: createRealLlm({ maxTokens: 32768, timeoutMs: 900_000 }),
+                // 断点重放目录：RUNS_ROOT/p{N}/_tasks/{taskId}/（runEnv.projectDir 定根）
+                ...(pidNum != null ? { taskDir: `${projectDir(pidNum)}/_tasks/${taskIdStr}` } : {}),
+                onEvent: (ev) => console.log(`[architect] ${ev.type}`
+                    + (ev.taskId ? ` ${ev.taskId}` : "")
+                    + (ev.detail ? ` ${JSON.stringify(ev.detail).slice(0, 300)}` : "")),
+            });
+            if (!outcome.ok) {
+                // 拆解/派发失败=这一阶段没有下发（不静默回退旧路径）；
+                // 半途作废时 builder 已发 cancel_task 并向 manager 显式报告。
+                throw new Error(`architect_task 两阶段派发失败（stage=${outcome.stage}`
+                    + (outcome.failedItemId ? ` failedItem=${outcome.failedItemId}` : "")
+                    + `，已作废=${outcome.cancelled}）：${outcome.issues.join("；")}`);
+            }
+            console.log(`[architect] 两阶段派发完成：蓝图 + ${outcome.batches.length} 批 → developer`
+                + `（taskId=${taskIdStr}，账本去重 ${outcome.deduped.length} 条`
+                + (outcome.deduped.length ? `：${outcome.deduped.join("、")}` : "") + "）");
+            return { exeTasks: [], architectTaskDispatched: true, llmCalls: 1 };
+        }
 
         // 1. LLM 接口拆分（api_prompt + 业务模块 + 技术绑定；重试 ≤3 带反馈）
         const modulesContent = detailed.modules
@@ -620,6 +721,10 @@ function makeDispatchNode(station: TransferStation): StateNodeFn {
         if (!parsed || parsed.tasks.length === 0) throw new Error("接口拆分返回空任务（tasks 为空数组）");
         backfillSliceFiles(parsed);   // p4 血案补丁：漏 files 键=回填不死
 
+        // （9/15）原"hub 模式装整包"分支已上移到接口拆分之前，升级为**两阶段派发**
+        //   （蓝图 + 逐批 architect_batch，见 dispatchArchitectTaskBatched）；
+        //   走到这里只剩 legacy 路径：旧的按层拆 ExecTask → backendEngineer/frontendEngineer。
+
         // 2. 机械构建 ExecTasks（T4 竖切版：抽成纯函数 buildExecTasks，redesignTask 共用、t4-smoke 直测）
         const tasks: ExecTask[] = buildExecTasks(parsed, detailed, stack, plan);
 
@@ -635,15 +740,37 @@ function makeDispatchNode(station: TransferStation): StateNodeFn {
         try {
             const pid = currentProjectId();
             if (pid != null) {
-                const { cases, skipped } = acceptanceFromTasks(
-                    tasks.map(t => ({ id: t.id, layer: t.layer, method: t.method, path: t.path, title: t.title })),
-                    { apiPrefix: stack?.apiPrefix ?? "/api", successCode: 1 },
-                );
+                // ★ 阶段 1 提交 3：验收来源优先级 = 冻结场景规格 > 需求原文解析 > （都没有则不发明判据）
+                //   旧实现在这里硬编码 successCode: 1，与冻结需求的 code=200 直接冲突。
+                const active = activeScenarioSpec();
+                let cases: Acceptance[];
+                let skipped: string[];
+                let sourceNote: string;
+                if (active) {
+                    const built = acceptanceFromScenarioSpec(active.spec);
+                    cases = built.cases;
+                    skipped = built.skipped;
+                    sourceNote = `来源=场景规格 ${active.spec.id}（${active.file}）`;
+                } else {
+                    let requirementText: string | null = null;
+                    try { requirementText = await getProjectRequirement(pid); } catch { requirementText = null; }
+                    const code = resolveAcceptanceCode(requirementText);
+                    const built = acceptanceFromTasks(
+                        tasks.map(t => ({ id: t.id, layer: t.layer, method: t.method, path: t.path, title: t.title })),
+                        { apiPrefix: stack?.apiPrefix ?? "/api", ...(code.successCode != null ? { successCode: code.successCode } : {}) },
+                    );
+                    cases = built.cases;
+                    skipped = built.skipped;
+                    sourceNote = `来源=任务字段 + ${code.source}（${code.evidence}）`;
+                    if (code.successCode == null) {
+                        console.warn(`[architect] ⚠️ openQuestion：需求未写明统一响应成功码——**不发明判据**，本次验收不含 $.code 断言`);
+                    }
+                }
                 const dir = projectDir(pid) + "/_verify";
                 fs.mkdirSync(dir, { recursive: true });
                 fs.writeFileSync(`${dir}/acceptance-p${phaseNo}.json`,
-                    JSON.stringify({ phase: phaseNo, generatedAt: new Date().toISOString(), cases, skipped }, null, 2), "utf-8");
-                console.log(`[architect] 交付关输入已落盘：_verify/acceptance-p${phaseNo}.json（${cases.length} 条可执行验收${skipped.length ? `，跳过 ${skipped.length} 个缺 method/path 的任务` : ""}）`);
+                    JSON.stringify({ phase: phaseNo, generatedAt: new Date().toISOString(), source: sourceNote, cases, skipped }, null, 2), "utf-8");
+                console.log(`[architect] 交付关输入已落盘：_verify/acceptance-p${phaseNo}.json（${cases.length} 条可执行验收${skipped.length ? `，跳过 ${skipped.length} 个缺 method/path 的任务` : ""}；${sourceNote}）`);
             }
         } catch (e) { console.warn("[architect] 验收 IR 落盘失败（旁路）:", (e as Error).message); }
 
@@ -815,6 +942,9 @@ export class Architect extends BaseAgent {
                 exeTasks: Annotation<any[]>({ default: () => [], reducer: (_: any[], u: any[]) => u }),
                 confirmMode: Annotation<number>({ default: () => 0, reducer: (_: number, u: number) => u }),
                 bootstrapDone: Annotation<boolean>({ default: () => false, reducer: (_: boolean, u: boolean) => u }),
+                // 新默认派发路径标记：dispatch 节点走了 architectTaskBuilder → developer。
+                // 有了它，runPhaseSplit 才不会把"exeTasks 为空"误读成"拆分失败，声明 0 对完成"。
+                architectTaskDispatched: Annotation<boolean>({ default: () => false, reducer: (_: boolean, u: boolean) => u }),
             },
         });
     }
@@ -861,6 +991,12 @@ export class Architect extends BaseAgent {
             }
         }
         const tasks: ExecTask[] = state?.exeTasks ?? [];
+        // 新默认路径：任务包已直接派给 developer（无分层 ExecTask）——
+        // 这里**不能**再走"声明 0 对完成"，否则维护会把刚派出去的阶段直接判完。
+        if (state?.architectTaskDispatched === true) {
+            console.log(`[architect] 阶段 ${phase.phase} 已按新路径派发 architect_task 给 developer（旧分层工位路径未启用）`);
+            return;
+        }
         // 任务登记和 doing 状态必须在阶段处理器结束前落库，避免进程边界丢写。
         await this.bridgeTasks(tasks, phase.phase, projectId ?? pid ?? undefined);
         if (tasks.length > 0) {

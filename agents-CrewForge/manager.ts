@@ -22,7 +22,7 @@
 // ============================================================
 
 import { z } from "zod";
-import { HumanMessage, SystemMessage, type BaseMessage } from "@langchain/core/messages";
+import { AIMessage, HumanMessage, SystemMessage, type BaseMessage } from "@langchain/core/messages";
 import { Annotation, MemorySaver, messagesStateReducer } from "@langchain/langgraph";
 import { type Node, type Edge, getNodes, getEdges, getProjectNodes, saveClarifiedReq, saveDevPlan } from "./Node";
 import {
@@ -316,6 +316,12 @@ export function requiresFeatureRepair(done: boolean, newFeatureCount: number, ex
     return done && newFeatureCount === 0 && existingFeatureCount === 0;
 }
 
+/** "定稿零功能"补齐指令的用户消息文案（pmNode 与内容产面共用一份，防两处漂移） */
+export const PM_FEATURES_REPAIR_PROMPT = "你的上一轮回复只有 done，无法下发实现任务。请根据已确认需求，只输出包含至少一个 features 条目和 done:true 的合法 JSON。";
+
+/** "定稿缺 UI 决策"补写指令的用户消息文案（T5；pmNode 与内容产面共用一份） */
+export const PM_UI_REPAIR_PROMPT = "上一轮定稿没有携带 ui 决策，无法进入规划。若 UI 三问（①要不要 Web 前端②页面清单③风格愿望）在对话里已问过并得到回答，从用户原话提炼；若没问过，本轮只负责提问、不要输出 done。提炼时最后一段必须输出：{\"ui\":{\"web\":true,\"pages\":[\"登录\",\"主页\"],\"style\":\"深蓝科技感\"},\"done\":true}（本轮如仍有新确认功能，features 一并带上）。";
+
 // ---------- 节点实现（codeRegistry，DB 的 code_key 引用） ----------
 // 三个节点都是"无 output"的 code 节点：直接返回整份 partial state（一次产出多个通道）。
 
@@ -338,7 +344,7 @@ const pmNode: StateNodeFn = async (state, node) => {
             new SystemMessage(pmPrompt),
             ...history,
             response,
-            new HumanMessage("你的上一轮回复只有 done，无法下发实现任务。请根据已确认需求，只输出包含至少一个 features 条目和 done:true 的合法 JSON。"),
+            new HumanMessage(PM_FEATURES_REPAIR_PROMPT),
         ], { signal: sig }));
         parsed = { ...parsePMResponse(response), done: true };
         if (parsed.newFunctions.length === 0) {
@@ -359,7 +365,7 @@ const pmNode: StateNodeFn = async (state, node) => {
                 new SystemMessage(pmPrompt),
                 ...history,
                 response,
-                new HumanMessage("上一轮定稿没有携带 ui 决策，无法进入规划。若 UI 三问（①要不要 Web 前端②页面清单③风格愿望）在对话里已问过并得到回答，从用户原话提炼；若没问过，本轮只负责提问、不要输出 done。提炼时最后一段必须输出：{\"ui\":{\"web\":true,\"pages\":[\"登录\",\"主页\"],\"style\":\"深蓝科技感\"},\"done\":true}（本轮如仍有新确认功能，features 一并带上）。"),
+                new HumanMessage(PM_UI_REPAIR_PROMPT),
             ], { signal: sig }));
             const reparsed = parsePMResponse(repair);
             calls = 2;
@@ -400,12 +406,20 @@ const pmNode: StateNodeFn = async (state, node) => {
     };
 };
 
+/** 功能清单 → 细化 prompt 的输入文本（disposeNode 与 createLlmPmDeps 共用一份） */
+export function functionsToPromptContent(functions: FunctionItem[]): string {
+    return functions.map((fn, index) => `${index + 1}. ${fn.name}: ${fn.description}`).join("\n");
+}
+
+/** 详细 tasks → 规划 prompt 的输入文本（plannerNode 与 createLlmPmDeps 共用一份） */
+export function tasksToPromptContent(tasks: typeOfTasks[]): string {
+    return tasks.map((t, i) => `${i + 1}. ${t.name}（${t.priority}）：${t.description} | 验收：${t.acceptance}`).join("\n");
+}
+
 /** 功能细化：已确认功能 → 详细 tasks；清空 functions（细化完的功能不再重复处理） */
 const disposeNode: StateNodeFn = async (state, node) => {
     const detailPrompt = node?.systemPrompt?.trim() || detail_system_prompt;
-    const functionsContent = (state.functions ?? [])
-        .map((fn: FunctionItem, index: number) => `${index + 1}. ${fn.name}: ${fn.description}`)
-        .join("\n");
+    const functionsContent = functionsToPromptContent(state.functions ?? []);
 
     const parsed = await retryStructured<{ tasks: typeOfTasks[] }>(
         "功能细化",
@@ -425,9 +439,7 @@ const disposeNode: StateNodeFn = async (state, node) => {
 /** 阶段规划：详细 tasks → 轻量 plan；features 程序化继承（模型只管阶段，不碰功能清单） */
 const plannerNode: StateNodeFn = async (state, node) => {
     const planPrompt = node?.systemPrompt?.trim() || plan_system_prompt;
-    const tasksContent = (state.tasks ?? [])
-        .map((t: typeOfTasks, i: number) => `${i + 1}. ${t.name}（${t.priority}）：${t.description} | 验收：${t.acceptance}`)
-        .join("\n");
+    const tasksContent = tasksToPromptContent(state.tasks ?? []);
 
     const parsed = await retryStructured<{ project: string; phases: planItem[]; mvp_scope: string[]; risks: string[] }>(
         "阶段规划",
@@ -441,17 +453,9 @@ const plannerNode: StateNodeFn = async (state, node) => {
     );
 
     // T5 机械注入（不经 LLM）：uiProfile 随 plan 落库/传递，阶段1 挂 uiStyle 一行——看板/契约/续跑读回全可见
+    //（装配逻辑与 generatePmContent 产面共用 assemblePmPlan，见文件底部"PM 内容产面"）
     const uiProfile = (state.uiProfile as UiProfile | null) ?? null;
-    const planOut: Plan = { ...parsed, features: state.tasks ?? [], ...(uiProfile ? { uiProfile } : {}) };
-    if (uiProfile && planOut.phases.length > 0) {
-        const first = planOut.phases[0];
-        if (first) {
-            first.uiStyle =
-                (uiProfile.web ? `Web 前端：${uiProfile.pages.join("、") || "（页面由架构师按功能推断）"}` : "无前端，仅后端/API")
-                + `｜风格：${uiProfile.style}`
-                + (uiProfile.defaulted ? "【默认值：UI 三问未获用户亲答】" : "");
-        }
-    }
+    const planOut = assemblePmPlan(parsed, state.tasks ?? [], uiProfile);
 
     // 落库：定稿计划写 dev_plan + status=planning（T5 后 planOut 含 uiProfile，续跑读回不丢）
     const projectId = state.projectId as number | undefined;
@@ -574,4 +578,322 @@ export class Manager {
         const [nodes, edges] = await Promise.all([getProjectNodes(projectId, agentId), getEdges(agentId)]);
         return new Manager(nodes, edges);
     }
+}
+
+// ============================================================
+// PM 内容产面（9/15 解耦测试第一项："PM 是否会产出项目内容"）
+//
+//   把「需求原文 + 对话答案 → 澄清需求(clarified_req) + 阶段计划(dev_plan/phase_plan 载荷)」
+//   收敛成一个**不依赖 DB、不依赖 Hub、不依赖 LangGraph** 的纯调用面 generatePmContent：
+//     - 三个 LLM 能力（chat/refine/plan）与提问（askUser）全部走 PmContentDeps 注入，
+//       测试给 fake 即零网络零库；不传 deps 时用 createLlmPmDeps()（真实 DeepSeek 链）。
+//     - DB 落库（saveClarifiedReq/saveDevPlan）与 Hub 下发（station.sendMessage）是**调用方**的事
+//       （pm-cli.ts / 将来的 projectRunner 都照此接线），本面一行都不碰。
+//   对话规则与上面图版 pmNode 同源（补齐轮、UI 回炉+机械兜底、plan 机械装配都复用同一份实现）；
+//   唯一差异：细化+规划只在定稿后跑一遍（图版是每轮有新功能就重跑，最终产物等价、还省 LLM 调用）。
+// ============================================================
+
+/** 阶段规划的裸骨架（LLM 结构化面只出这四个字段；features/uiProfile 由 assemblePmPlan 机械补齐） */
+export interface PlanCore {
+    project: string;
+    phases: planItem[];
+    mvp_scope: string[];
+    risks: string[];
+}
+
+/** 架构师一条 phase_plan 消息的载荷（形状 = projectRunner.ts drivePhases 的 sendMessage 序列化体；
+ *  消费端 architect.ts:866 on("phase_plan", {fromNames:["manager"]}) 吃 plan/phase/projectId 三字段） */
+export interface PhasePlanPayload {
+    type: "phase_plan";
+    plan: Plan;
+    phase: planItem;
+    projectId: number;
+}
+
+/** 内容产面的外部能力注入面：测试全 fake（零 LLM 零 DB），生产用 createLlmPmDeps()。 */
+export interface PmContentDeps {
+    /** PM 对话：吃完整消息（含系统提示词），回文本回复（机读 JSON 由产面解析） */
+    chat: (messages: BaseMessage[]) => Promise<string>;
+    /** 功能细化：已确认功能 → 详细 tasks（生产=disposeSchema 结构化输出） */
+    refine: (functions: FunctionItem[]) => Promise<typeOfTasks[]>;
+    /** 阶段规划：详细 tasks → 计划骨架（生产=planSchema 结构化输出） */
+    plan: (tasks: typeOfTasks[]) => Promise<PlanCore>;
+    /** 未定稿时向用户提问（生产=CLI/Http questioner；不给=未定稿直接显式报错） */
+    askUser?: (question: string, turn: number) => Promise<string>;
+    /** 日志钩子（默认 console.log；测试静音） */
+    log?: (line: string) => void;
+}
+
+export interface PmContentInput {
+    /** 需求原文（sys_project.description / pm-cli --requirement 文件内容） */
+    requirement: string;
+    /** 正整数（架构师 PhasePlanMessageSchema 硬约束；纯试跑可给 1） */
+    projectId: number;
+    /** DB 可配 prompt 覆盖（空=内置默认，与 pmNode 的 node.systemPrompt 优先级同构） */
+    prompts?: { pm?: string; detail?: string; plan?: string };
+    /** 对话轮次上限（默认 30，与 projectRunner PM 对话口径一致） */
+    maxTurns?: number;
+    /** 模型 JSON（仅走默认 deps 时生效，默认 PLANNING_MODEL_JSON） */
+    model?: string;
+}
+
+export interface PmContentResult {
+    projectId: number;
+    /** 成功返回必为 true（未定稿/缺功能都走显式异常） */
+    done: boolean;
+    turns: number;
+    /** 全对话记录（需求种子 + 用户答案 + PM 回复，含补齐轮）——试跑留档/调试用 */
+    messages: BaseMessage[];
+    /** 定稿时必非空（缺则走回炉→机械兜底 defaulted=true） */
+    uiProfile: UiProfile;
+    /** DB clarified_req 列同构（saveClarifiedReq 的入参形态） */
+    clarifiedReq: { features: FunctionItem[] };
+    /** DB dev_plan 列同构（saveDevPlan 的入参形态；features=细化后 tasks，机械继承非 LLM 输出） */
+    plan: Plan;
+    /** 架构师逐阶段消费载荷（顺序=plan.phases 顺序，逐阶段下发用） */
+    phasePlans: PhasePlanPayload[];
+}
+
+/** 机械装配 plan：LLM 只出阶段骨架，features 程序化继承 + uiProfile/阶段1 uiStyle 注入
+ *  （plannerNode 与 generatePmContent 共用一份，防两处漂移；T5 语义与图版逐字一致） */
+export function assemblePmPlan(core: PlanCore, tasks: typeOfTasks[], uiProfile: UiProfile | null): Plan {
+    const planOut: Plan = { ...core, features: tasks, ...(uiProfile ? { uiProfile } : {}) };
+    if (uiProfile && planOut.phases.length > 0) {
+        const first = planOut.phases[0];
+        if (first) {
+            first.uiStyle =
+                (uiProfile.web ? `Web 前端：${uiProfile.pages.join("、") || "（页面由架构师按功能推断）"}` : "无前端，仅后端/API")
+                + `｜风格：${uiProfile.style}`
+                + (uiProfile.defaulted ? "【默认值：UI 三问未获用户亲答】" : "");
+        }
+    }
+    return planOut;
+}
+
+/** plan → 逐阶段 phase_plan 载荷数组（确定性拆包：drivePhases 每阶段发一条，这里只是把消息体先摆出来） */
+export function toPhasePlanPayloads(plan: Plan, projectId: number): PhasePlanPayload[] {
+    return plan.phases.map((phase) => ({ type: "phase_plan" as const, plan, phase, projectId }));
+}
+
+/** 内容产面 → 人类可读的澄清需求文档（pm-cli 产物 clarified-req.md；纯函数、无时间戳，可机器断言结构） */
+export function renderClarifiedReqMarkdown(result: PmContentResult): string {
+    const { projectId, plan, clarifiedReq, uiProfile } = result;
+    const lines: string[] = [];
+    lines.push(`# 澄清需求 — ${plan.project}`);
+    lines.push("");
+    lines.push(`- 项目 ID：p${projectId}`);
+    lines.push(`- 定稿状态：${result.done ? "已确认" : "未确认"}（PM 对话 ${result.turns} 轮）`);
+    lines.push(`- 确认功能：${clarifiedReq.features.length} 项 → 细化 ${plan.features.length} 条详细说明`);
+    lines.push("");
+    lines.push("## UI 决策");
+    lines.push(`- Web 前端：${uiProfile.web ? "要" : "不要"}`);
+    lines.push(`- 页面：${uiProfile.pages.length ? uiProfile.pages.join("、") : "（页面由架构师按功能推断）"}`);
+    lines.push(`- 风格愿望：${uiProfile.style}`);
+    if (uiProfile.defaulted) lines.push("- 注：默认值——UI 三问未获用户亲答，机械回填（有异议在开工前提出）");
+    lines.push("");
+    lines.push("## 功能清单（细化）");
+    const featureList: (typeOfTasks | FunctionItem)[] = plan.features.length > 0 ? plan.features : clarifiedReq.features;
+    featureList.forEach((f, i) => {
+        const priority = "priority" in f && f.priority ? `（优先级：${f.priority}）` : "";
+        lines.push("");
+        lines.push(`### ${i + 1}. ${f.name}${priority}`);
+        lines.push(`- 描述：${f.description}`);
+        if ("acceptance" in f && f.acceptance) lines.push(`- 验收：${f.acceptance}`);
+    });
+    lines.push("");
+    lines.push(`## 阶段规划（${plan.phases.length} 个阶段，按执行顺序）`);
+    plan.phases.forEach((p) => {
+        lines.push("");
+        lines.push(`### 阶段 ${p.phase}：${p.name}`);
+        lines.push(`- 目标：${p.goal}`);
+        lines.push(`- 功能：${p.features.length ? p.features.join("、") : "（无）"}`);
+        lines.push(`- 依赖：${p.dependencies.length ? p.dependencies.join("、") : "无"}`);
+        lines.push(`- 相对工作量：${p.relative_effort || "未评估"}｜风险：${p.risk || "未评估"}`);
+        if (p.uiStyle) lines.push(`- UI：${p.uiStyle}`);
+    });
+    lines.push("");
+    lines.push("## MVP 范围");
+    (plan.mvp_scope.length > 0 ? plan.mvp_scope : ["（PM 未给出）"]).forEach((m) => lines.push(`- ${m}`));
+    lines.push("");
+    lines.push("## 风险");
+    (plan.risks.length > 0 ? plan.risks : ["（无显式风险）"]).forEach((r) => lines.push(`- ${r}`));
+    return lines.join("\n") + "\n";
+}
+
+/** 生产 LLM 三件套（models.ts DeepSeek 链，同 pmNode/disposeNode/plannerNode 的调用姿势）。
+ *  构造不触网不碰库：initModels 在每次调用内才做（DB 设置层读的是 settings 缓存，旁路安全）。 */
+export function createLlmPmDeps(opts?: { model?: string; prompts?: { detail?: string; plan?: string } }): PmContentDeps {
+    const modelJson = opts?.model ?? PLANNING_MODEL_JSON;
+    const detailPrompt = opts?.prompts?.detail?.trim() || detail_system_prompt;
+    const planPrompt = opts?.prompts?.plan?.trim() || plan_system_prompt;
+    return {
+        chat: async (msgs) => {
+            const model = initModels(modelJson, "manager");
+            const response = await invokeWithTimeout<BaseMessage>("PM 对话", 120_000, sig => model.invoke(msgs, { signal: sig }));
+            return typeof response.content === "string" ? response.content : JSON.stringify(response.content);
+        },
+        refine: async (functions) => {
+            const parsed = await retryStructured<{ tasks: typeOfTasks[] }>(
+                "功能细化",
+                async (feedback, sig) => {
+                    const model = initModels(modelJson, "manager");
+                    const result = await model
+                        .withStructuredOutput(disposeSchema, { method: "jsonMode", name: "extract_tasks" })
+                        .invoke([new SystemMessage(detailPrompt + "\n\n## 功能清单\n" + functionsToPromptContent(functions) + feedback)], { signal: sig });
+                    return result as { tasks: typeOfTasks[] };
+                },
+            );
+            return parsed.tasks;
+        },
+        plan: async (tasks) => {
+            const parsed = await retryStructured<PlanCore>(
+                "阶段规划",
+                async (feedback, sig) => {
+                    const model = initModels(modelJson, "manager");
+                    const result = await model
+                        .withStructuredOutput(planSchema, { method: "jsonMode", name: "extract_plan" })
+                        .invoke([new SystemMessage(planPrompt + "\n\n## 已确认的详细功能清单\n" + tasksToPromptContent(tasks) + feedback)], { signal: sig });
+                    return result as PlanCore;
+                },
+            );
+            return parsed;
+        },
+    };
+}
+
+/** BaseMessage.content → 纯文本（PM 提问原文给 askUser 显示用） */
+function messageText(m: BaseMessage | undefined): string {
+    if (!m) return "";
+    return typeof m.content === "string" ? m.content : JSON.stringify(m.content);
+}
+
+/** 规划骨架机器校验：缺哪个字段就点名报错（架构师/续跑读回全靠这些字段，宁早炸不晚炸） */
+function assertPlanCore(raw: unknown): PlanCore {
+    const c = raw as (Partial<PlanCore> & { phases?: Partial<planItem>[] } | null);
+    if (!c || typeof c.project !== "string" || !c.project.trim()) throw new Error("PM 生成失败：阶段规划缺 project 项目名");
+    if (!Array.isArray(c.phases) || c.phases.length === 0) throw new Error("PM 生成失败：阶段规划 phases 为空（架构师只吃带阶段的 phase_plan，空计划下游白跑）");
+    c.phases.forEach((p, i) => {
+        const n = Number(p?.phase);
+        if (!Number.isInteger(n) || typeof p?.name !== "string" || !p.name.trim()) {
+            throw new Error(`PM 生成失败：阶段 #${i + 1} 缺 phase 号或 name（过不了 PhasePlanMessageSchema/usablePhases 校验）`);
+        }
+    });
+    return {
+        project: c.project,
+        phases: c.phases.map((p) => ({
+            phase: Number(p!.phase),
+            name: String(p!.name),
+            goal: String(p!.goal ?? ""),
+            features: Array.isArray(p!.features) ? [...p!.features!] : [],
+            dependencies: Array.isArray(p!.dependencies) ? [...p!.dependencies!] : [],
+            relative_effort: String(p!.relative_effort ?? ""),
+            risk: String(p!.risk ?? ""),
+        })),
+        mvp_scope: Array.isArray(c.mvp_scope) ? c.mvp_scope : [],
+        risks: Array.isArray(c.risks) ? c.risks : [],
+    };
+}
+
+/**
+ * ★ PM 内容产面主函数（解耦测试第一项的验证入口）：
+ *   需求原文 + 对话（askUser/脚本答案）→ 澄清需求 + 阶段计划 + 逐阶段 phase_plan 载荷。
+ *   全程无 DB 无 Hub；缺输入一律点名抛错，绝不静默产出半成品。
+ *   deps 支持**部分覆盖**：只给 askUser 时 chat/refine/plan 落真实 LLM 链（pm-cli 姿势）；
+ *   测试全 fake 即零网络零库。
+ */
+export async function generatePmContent(input: PmContentInput, deps?: Partial<PmContentDeps>): Promise<PmContentResult> {
+    const d: PmContentDeps = { ...createLlmPmDeps({ model: input.model, prompts: input.prompts }), ...deps };
+    const log = d.log ?? ((line: string) => console.log(line));
+    const requirement = (input.requirement ?? "").trim();
+    if (!requirement) throw new Error("PM 生成失败：需求原文为空（--requirement 文件 / sys_project.description 得先有内容）");
+    if (!Number.isInteger(input.projectId) || input.projectId <= 0) {
+        throw new Error(`PM 生成失败：projectId 必须是正整数，实际 ${input.projectId}`);
+    }
+    const pmPrompt = input.prompts?.pm?.trim() || pm_system_prompt;
+    const maxTurns = input.maxTurns ?? 30;
+
+    // 对话转录：种子需求 → PM 回复 → 用户答案 …（图版靠 checkpointer 累积，产面自己拿着数组，语义一致）
+    const messages: BaseMessage[] = [new HumanMessage(`【项目需求】\n${requirement}`)];
+    /** PM 说一轮：系统提示词 + 转录（+ 可选补齐指令）→ chat；指令与回复都进转录（定稿后才有补齐轮，不影响后续提问） */
+    const chat = async (instruction?: string): Promise<string> => {
+        const convo: BaseMessage[] = instruction ? [...messages, new HumanMessage(instruction)] : messages;
+        const text = await d.chat([new SystemMessage(pmPrompt), ...convo]);
+        if (instruction) messages.push(new HumanMessage(instruction));
+        messages.push(new AIMessage(text));
+        return text;
+    };
+
+    const confirmed: FunctionItem[] = [];   // 全对话累积的确认功能（按名去重；= clarified_req 素材）
+    let uiProfile: UiProfile | null = null;
+    let done = false;
+    let turns = 0;
+    const absorb = (parsed: { newFunctions: FunctionItem[]; done: boolean; ui: UiProfile | null }): void => {
+        for (const f of parsed.newFunctions) if (!confirmed.some((m) => m.name === f.name)) confirmed.push(f);
+        if (parsed.ui) uiProfile = parsed.ui;
+        if (parsed.done) done = true;
+    };
+
+    // ---------- 1. 对话直到定稿 ----------
+    while (!done && turns < maxTurns) {
+        turns += 1;
+        absorb(parsePMResponseText(await chat()));
+        if (done) break;
+        if (!d.askUser) {
+            throw new Error(`PM 对话第 ${turns} 轮未定稿且未提供提问者（askUser/答案脚本缺失），无法继续`);
+        }
+        const answer = await d.askUser(messageText(messages[messages.length - 1]), turns);
+        messages.push(new HumanMessage(String(answer ?? "")));
+    }
+    if (!done) throw new Error(`PM 对话 ${maxTurns} 轮内未定稿（--auto 末尾补一句"定稿"，或对话中明确确认需求）`);
+
+    // ---------- 2. 定稿硬契约（与 pmNode 同源）：零功能补齐 → 仍零报错；缺 UI 回炉 → 机械兜底 ----------
+    if (confirmed.length === 0) {
+        log("提示：PM 标记定稿但未提供功能清单，正在补齐输出契约。");
+        absorb(parsePMResponseText(await chat(PM_FEATURES_REPAIR_PROMPT)));
+        if (confirmed.length === 0) throw new Error("PM 定稿输出缺少功能清单，补齐请求仍未返回 features");
+    }
+    if (!uiProfile) {
+        log("提示：PM 定稿缺 UI 决策（T5 三问），补写一轮。");
+        try {
+            const reparsed = parsePMResponseText(await chat(PM_UI_REPAIR_PROMPT));
+            for (const f of reparsed.newFunctions) if (!confirmed.some((m) => m.name === f.name)) confirmed.push(f);
+            uiProfile = reparsed.ui;
+        } catch (e) {
+            log(`[manager] UI 决策补写调用失败，走机械兜底: ${(e as Error).message}`);
+        }
+        if (!uiProfile) {
+            uiProfile = { web: true, pages: [], style: "默认：跟随工程地基主题（UI 三问未采集到用户偏好）", defaulted: true };
+            log("[manager] UI 决策仍缺失，机械兜底 web=true/defaulted=true（契约将显著标注；页面由架构师按功能推断）");
+        }
+    }
+    confirmed.forEach((f, i) => {
+        if (!f || typeof f.name !== "string" || !f.name.trim() || typeof f.description !== "string") {
+            throw new Error(`PM 生成失败：确认功能 #${i + 1} 缺 name/description（对话输出契约被破坏，无法细化）`);
+        }
+    });
+
+    // ---------- 3. 细化 + 规划：clarified_req / dev_plan / phase_plan 三件产物 ----------
+    const tasks = await d.refine(confirmed);
+    if (!Array.isArray(tasks) || tasks.length === 0) throw new Error("PM 生成失败：功能细化返回空 tasks，下游无米下锅");
+    tasks.forEach((t, i) => {
+        if (!t || typeof t.name !== "string" || !t.name.trim()) throw new Error(`PM 生成失败：细化任务 #${i + 1} 缺 name`);
+    });
+    const plan = assemblePmPlan(assertPlanCore(await d.plan(tasks)), tasks, uiProfile);
+
+    // 阶段引用的功能名必须来自细化清单（架构师按名过滤 plan.features，名字对不上=该功能静默丢失）——只提醒不拦停
+    const taskNames = new Set(tasks.map((t) => t.name));
+    plan.phases.forEach((p) => p.features.forEach((f) => {
+        if (!taskNames.has(f)) log(`[manager] 提示：阶段「${p.name}」引用了不在细化清单中的功能名「${f}」（架构师按名过滤，这项不会下发）`);
+    }));
+
+    return {
+        projectId: input.projectId,
+        done: true,
+        turns,
+        messages,
+        uiProfile,
+        clarifiedReq: { features: confirmed },
+        plan,
+        phasePlans: toPhasePlanPayloads(plan, input.projectId),
+    };
 }

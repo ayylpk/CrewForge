@@ -5,28 +5,30 @@
 //   → 按角色分派构造（图版读项目节点拼图；消息版读节点 prompt）
 //   → 启动消息版团队 → Manager 对话确认需求 → 桥接 phase_plan 逐阶段下发架构师
 //
-//   角色（中文 label）→ 类：
+//   角色（中文 label）→ 类（9/15 名册换代）：
 //     项目经理 → Manager（图版：项目节点 + 池边 → stitch → runWithInteraction）
-//     架构师   → Architect（消息版 + 拆分图，收 phase_plan）
-//     后端开发 → BackendEngineer（流水线：节点「伪代码/代码实现」prompt）
-//     前端开发 → FrontendEngineer（流水线：节点「页面设计/代码实现」prompt）
-//     测试     → TestEngineer（判定：节点「测试判定」prompt）
-//     维护     → Maintainer（纯逻辑收敛，无 LLM 无节点）
-//   Merger/Maintainer 是系统内置单例，无论项目成员如何配置都注册（流水线必需）。
+//     架构师   → Architect（消息版 + 拆分图，收 phase_plan；hub 模式两阶段派发
+//                architect_task 蓝图 + 逐批 architect_batch 直派 developer）
+//     开发     → developerAgent（"developer"，单开发流分批消费；替换原
+//                后端开发/前端开发/Merger 三工位，装配见 developerTeamRunner.ts）
+//     测试     → TestEngineer（"test-core"：吃 developer 的 test_request，
+//                经外部 TestAgent --verify 出机器证据，回 test_passed/test_failure）
+//     维护     → Maintainer（纯逻辑收敛，无 LLM 无节点；收 developer 三终态记 sys_task）
+//   Maintainer 是系统内置单例，无论项目成员如何配置都注册（流水线必需）。
 // ============================================================
 
 import { HumanMessage, type BaseMessage } from "@langchain/core/messages";
 import fs from "node:fs";
 import { finalGate, type FinalGateResult } from "./engine/run/finalGate";
+import { finalizeProject } from "./engine/run/completion";
+import { StructuredOutputFailure } from "./llm";
 import { TransferStation, roles } from "./Hub";
 import type { BaseAgent } from "./BaseAgent";
 import { Manager } from "./manager";
 import { Architect } from "./architect";
-import { Merger } from "./merger";
-import { BackendEngineer } from "./backendEngineer";
-import { FrontendEngineer } from "./frontendEngineer";
-import { TestEngineer } from "./testEngineer";
+import { TestEngineer, TEST_CORE_NAME } from "./testEngineer";
 import { Maintainer } from "./maintainer";
+import { startDeveloperLine, makeTesterDeps } from "./developerTeamRunner";
 import { getProjectAgents, getProjectNodes, getEdges, getProjectConfirmMode, getProjectRequirement, getProjectPlan, updateProjectField } from "./Node";
 import { type Questioner } from "./GraphFactory";
 import { pickQuestioner } from "./confirm";
@@ -44,19 +46,25 @@ export interface TeamBundle {
     managers: Manager[];
 }
 
-/** 固定核心团队；数据库成员只提供配置，不再决定核心角色是否存在或复制实例。 */
+/**
+ * 固定核心团队；数据库成员只提供配置，不再决定核心角色是否存在或复制实例。
+ * ★ 9/15 名册换代：后端开发+前端开发+Merger 三个工位被 developerAgent **整体替换**
+ *   （单开发流分批消费蓝图，见 developerTeamRunner.ts 头注释）。
+ *   projectId 用于 test-core 的验收依赖注入（判据从 _tasks 落盘读回）；
+ *   不传 = 纯装配测试场景（无注入，test-core 收到 test_request 会大声缺配置）。
+ *   developer 座位不在 messageAgents 里（它不是 BaseAgent），由 startDeveloperLine 占。
+ */
 export function createCoreTeam(
     station: TransferStation = new TransferStation({}, {}),
-    configured?: { manager?: Manager; architect?: Architect; backend?: BackendEngineer; frontend?: FrontendEngineer; test?: TestEngineer },
+    projectId?: number,
+    configured?: { manager?: Manager; architect?: Architect; test?: TestEngineer },
 ): TeamBundle {
     const managers = [configured?.manager ?? new Manager()];
     const messageAgents: BaseAgent[] = [
-        new Merger(station),
         new Maintainer(station),
         configured?.architect ?? new Architect(station),
-        configured?.backend ?? new BackendEngineer("backend-core", station),
-        configured?.frontend ?? new FrontendEngineer("frontend-core", station),
-        configured?.test ?? new TestEngineer("test-core", station),
+        configured?.test ?? new TestEngineer(TEST_CORE_NAME, station, [],
+            projectId != null ? makeTesterDeps(projectId) : {}),
     ];
     return { station, messageAgents, managers };
 }
@@ -69,8 +77,6 @@ export async function buildTeam(
     const members = await getProjectAgents(projectId);
     let manager: Manager | undefined;
     let architect: Architect | undefined;
-    let backend: BackendEngineer | undefined;
-    let frontend: FrontendEngineer | undefined;
     let test: TestEngineer | undefined;
 
     for (const m of members) {
@@ -92,16 +98,14 @@ export async function buildTeam(
                 console.log(`[runner] 架构师 ${m.name}：消息+拆分图，${nodes.length > 0 ? `DB 配置（节点 ${nodes.length} 个）` : "内置默认图"}`);
                 break;
             case "后端开发":
-                if (!backend) backend = new BackendEngineer("backend-core", station, nodes);
-                console.log(`[runner] 后端开发 ${m.name}：流水线，节点 ${nodes.length} 个`);
-                break;
             case "前端开发":
-                if (!frontend) frontend = new FrontendEngineer("frontend-core", station, nodes);
-                console.log(`[runner] 前端开发 ${m.name}：流水线，节点 ${nodes.length} 个`);
+                // 9/15 换代：这两个工位由 developerAgent（"developer"）整体替换，
+                // 成员的 DB 节点配置不再有人消费（看板数据留着无妨，等 DB 侧一并定夺）
+                console.log(`[runner] ${m.role} ${m.name}：已由 developerAgent 取代，本进程不构造`);
                 break;
             case "测试":
-                if (!test) test = new TestEngineer("test-core", station, nodes);
-                console.log(`[runner] 测试 ${m.name}：判定，节点 ${nodes.length} 个`);
+                if (!test) test = new TestEngineer(TEST_CORE_NAME, station, nodes, makeTesterDeps(projectId));
+                console.log(`[runner] 测试 ${m.name}：判定（developer 线：吃 test_request 回 test_*），节点 ${nodes.length} 个`);
                 break;
             case "维护":
                 // Maintainer 已作为系统内置注册，成员里的"维护"不重复实例化
@@ -111,7 +115,7 @@ export async function buildTeam(
                 console.log(`[runner] 角色「${m.role}」无实现类，跳过：${m.name}`);
         }
     }
-    return createCoreTeam(station, { manager, architect, backend, frontend, test });
+    return createCoreTeam(station, projectId, { manager, architect, test });
 }
 
 /** plan 形状校验（阶段 2 续跑用）：网页手填的 dev_plan 可能不对版，phases 非空且每阶段有数字 phase+name 才可用 */
@@ -192,6 +196,44 @@ async function drivePhases(
 
 /** 项目级主流程：建团队 → 有 plan 直接开工（续跑），没有才 PM 对话 → 逐阶段下发 → 终态落库 */
 export async function runProject(projectId: number, questioner: Questioner): Promise<void> {
+    // ★ engine2 feature flag（阶段 2 定稿）：权威 = sys_project.pipeline_version（逐项目 DB 字段）。
+    //   · 默认 legacy——未改字段的项目行为与从前逐字节一致；
+    //   · engine2 项目只能启动 Engine2（env 不允许静默回退，CF_ENGINE=legacy 直接拒绝启动）；
+    //   · legacy 项目可用 CF_ENGINE=engine2 显式手工启用（测试用）。
+    {
+        const { decidePipelineForProject, runProjectWithEngine2, Engine2StartRejected } = await import("./engine2/projectAdapter");
+        let decision;
+        try {
+            decision = await decidePipelineForProject(projectId);
+        } catch (e) {
+            if (e instanceof Engine2StartRejected) {
+                console.error(`[runner] engine2 拒绝启动：${e.message}`);
+                await updateProjectField(projectId, { status: "failed" }).catch(() => {});
+                return;
+            }
+            throw e;
+        }
+        console.log(`[runner] pipeline 判定：${decision.version}（${decision.why}）`);
+        if (decision.use) {
+            try {
+                const outcome = await runProjectWithEngine2(projectId);
+                // 落库只写**程序判定出来的真实结论**（绝不为了让看板好看而改状态）
+                console.log(`[runner] engine2 结束：runId=${outcome.runId}（${outcome.resumed ? "续跑" : "新跑"}） 终态=${outcome.status} done=${outcome.done}`);
+                for (const u of outcome.unmet) console.log(`[runner]   · 未满足：${u}`);
+                console.log(`[runner] 运行报告：${outcome.stateFile}`);
+                return;
+            } catch (e) {
+                if (e instanceof Engine2StartRejected) {
+                    console.error(`[runner] engine2 拒绝启动：${e.message}`);
+                    await updateProjectField(projectId, { status: "failed" }).catch(() => {});
+                    return;
+                }
+                throw e;
+            }
+        }
+        // decision.use === false → 继续走旧系统（legacy 项目默认路径）
+    }
+
     // 按阶段起进程模式（Java spawn 注入；手工跑默认关=旧行为单进程跑完全部阶段）
     const exitAtBoundary = process.env.EXIT_AT_PHASE_BOUNDARY === "1";
     const { station, messageAgents, managers } = await buildTeam(projectId);
@@ -202,13 +244,18 @@ export async function runProject(projectId: number, questioner: Questioner): Pro
         void a.start().catch((e) => console.error("[runner] agent 消息循环异常退出:", e));
     }
 
+    // ★ developerAgent 装配线（9/15 替换前后端开发）：占 "developer" 座位 + 永动消费
+    //   architect_task/批（消息全走 Hub 原语，见 developerTeamRunner.ts 头注释）
+    startDeveloperLine(station, projectId);
+
     // ★ fail-fast：必需角色缺席=消息投进 Hub 惰性空箱、无人消费，waitForMessage 死等
     //   （9/2 阶段1验收血泪：项目1 没配架构师成员，流水线静默挂死零日志）
     const need: { label: string; ok: () => boolean }[] = [
         { label: "架构师", ok: () => !!station.status["architect"] },
         { label: "测试", ok: () => Object.values(station.status).some((s) => s.role === roles.testEngineer) },
-        { label: "后端开发", ok: () => Object.values(station.status).some((s) => s.role === roles.backendEngineer) },
-        { label: "前端开发", ok: () => Object.values(station.status).some((s) => s.role === roles.frontendEngineer) },
+        { label: "维护", ok: () => !!station.status["maintainer"] },
+        // developer 座位由 startDeveloperLine 预占（9/15 替换前后端开发）；缺席=派发进空箱死等
+        { label: "开发(developerAgent)", ok: () => !!station.status["developer"] },
     ];
     const missing = need.filter((n) => !n.ok()).map((n) => n.label);
     if (missing.length > 0) {
@@ -287,8 +334,9 @@ export async function runProject(projectId: number, questioner: Questioner): Pro
         if (moved) console.log(`[runner] 全新开工，旧产物树已归档 → ${moved}`);
     }
     if (startIdx >= phases.length) {
-        console.log("[runner] 全部阶段均已完成（无待办任务），直接收尾 status=done");
-        await updateProjectField(projectId, { status: "done" });
+        console.log("[runner] 全部阶段均无待办任务——**不直接落 done**，仍要过交付关与终态判据");
+        const gate = await runFinalGate(projectId, plan);
+        await settleProject(projectId, gate);
         return;
     }
     if (startIdx > 0) console.log(`[runner] 断点续跑：跳过已完成阶段前 ${startIdx} 个，从阶段 ${phases[startIdx]!.phase}「${phases[startIdx]!.name}」继续`);
@@ -296,21 +344,60 @@ export async function runProject(projectId: number, questioner: Questioner): Pro
     // 4. 逐阶段下发（边界行为见 drivePhases）
     const outcome = await drivePhases(station, projectId, plan, phases, startIdx, exitAtBoundary);
     if (outcome === "done") {
-        // ★ 交付关（9/10）：项目"完成"必须等于"验证通过"——全阶段跑完不再直接落 done。
-        //   runs/p9 的教训：阶段全过、落 done，产物却根本编译不过（3 处幻觉 API）。
+        // ★ 交付关（9/10）+ 终态判据（阶段 1 提交 1）：项目"完成"必须等于"验证通过"，
+        //   且 done 还要求任务数>0、产物数>0、无 failed 任务（阶段 0 的 s3 就是 6/8 failed 仍落 done）。
         const gate = await runFinalGate(projectId, plan);
-        await updateProjectField(projectId, { status: gate.status });
-        if (gate.status === "done" && gate.verified) {
-            console.log(`[runner] ✅ 全阶段完成且执行式验证通过 → status=done（${gate.summary}）`);
-        } else if (gate.status === "done") {
-            console.warn(`[runner] ⚠️ 全阶段完成但**未验证** → status=done：${gate.summary}`);
-            console.warn(`[runner]    报告：${gate.reportFile ?? "（无）"}；对外不得宣称"已验证"`);
-        } else {
-            console.error(`[runner] ❌ 全阶段完成但执行式验证未通过 → status=failed：${gate.summary}`);
-            console.error(`[runner]    报告：${gate.reportFile ?? "（无）"}`);
-        }
+        await settleProject(projectId, gate);
     }
     console.log("[runner] 流程结束");
+}
+
+/**
+ * 唯一收尾：交付关结论 → decideProjectStatus → 落库 + 完成报告。
+ * 历史病：skipped_unverified 仍写 done；交付关异常返回 done；无待办阶段直接 done。
+ */
+async function settleProject(projectId: number, gate: FinalGateResult): Promise<void> {
+    const fin = await finalizeProject({
+        projectId,
+        projectDir: projectDir(projectId),
+        finalGateStatus: gate.status,
+        verified: gate.verified,
+        requiredAssertionsPassed: gate.verified,
+    });
+    console.log(`[runner] 终态判定：status=${fin.status}（任务 ${fin.input.taskCount} / 产物 ${fin.input.artifactCount} / failed 任务 ${fin.input.failedTaskCount} / 交付关 ${gate.status} / verified=${gate.verified}）`);
+    for (const r of fin.reasons) console.log(`[runner]   · ${r}`);
+    if (gate.reportFile) console.log(`[runner]   验证报告：${gate.reportFile}`);
+    if (fin.reportFile) console.log(`[runner]   完成报告：${fin.reportFile}`);
+    if (fin.status === "done") console.log(`[runner] ✅ 项目完成且已验证：${gate.summary}`);
+    else if (fin.status === "blocked") console.warn(`[runner] ⛔ 未验证完成 → status=blocked（未验证 ≠ 通过）：${gate.summary}`);
+    else console.error(`[runner] ❌ 未通过 → status=failed：${gate.summary}`);
+}
+
+/**
+ * 异常收尾：任何未捕获异常都必须在**进程退出前**把项目收敛到显式终态。
+ * 阶段 0 的 s2：architectPlan 解析失败 → 异常冒泡 → 进程退出 → 项目永远停在 planning。
+ */
+async function settleOnFailure(projectId: number, e: unknown): Promise<void> {
+    const err = e as (Error & { failure?: { category?: string; error?: string; attempts?: number; raw?: string } });
+    const isStructured = e instanceof StructuredOutputFailure || err?.name === "StructuredOutputFailure" || err?.failure != null;
+    const detail = isStructured && err.failure
+        ? { kind: `LLM_${err.failure.category ?? "OUTPUT_PARSE"}`, message: err.failure.error ?? err.message, attempts: err.failure.attempts, raw: err.failure.raw }
+        : { kind: "RUN_EXCEPTION", message: String(err?.message ?? e) };
+    try {
+        const fin = await finalizeProject({
+            projectId,
+            projectDir: projectDir(projectId),
+            finalGateStatus: "failed",
+            verified: false,
+            requiredAssertionsPassed: false,
+            failureDetail: detail,
+        });
+        console.error(`[runner] 异常收尾：status=${fin.status}（${fin.reasons.join("；")}）`);
+        if (fin.reportFile) console.error(`[runner] 失败报告：${fin.reportFile}`);
+    } catch (e2) {
+        console.error("[runner] 异常收尾失败，兜底写 failed:", (e2 as Error).message);
+        await updateProjectField(projectId, { status: "failed" }).catch(() => { /* 已尽力 */ });
+    }
 }
 
 /**
@@ -350,12 +437,14 @@ async function runFinalGate(projectId: number, plan: unknown): Promise<FinalGate
             acceptanceFiles,
             stack,
             skip: process.env.SKIP_RUN_VERIFY === "1",
+            // ★ 阶段 1：Docker 不可用时用宿主 MySQL + 本机 JVM 验证（报告会如实标注"宿主验证"）
+            dbMode: (process.env.CF_VERIFY_DB_MODE as "docker" | "host" | "auto" | undefined) ?? "auto",
         });
         console.log(`[runner] 交付关：验收 IR ${acceptanceFiles.length} 份 / 任务 ${tasks.length} 条 → ${result.summary}`);
         return result;
     } catch (e) {
-        console.warn("[runner] 交付关异常（按未验证处理）:", (e as Error).message);
-        return { status: "done", verified: false, summary: `交付关异常：${(e as Error).message.slice(0, 120)}`, reportFile: null };
+        console.warn("[runner] 交付关异常（按**失败**处理，绝不返回 done）:", (e as Error).message);
+        return { status: "failed", verified: false, summary: `交付关异常：${(e as Error).message.slice(0, 120)}`, reportFile: null };
     }
 }
 
@@ -390,6 +479,8 @@ if (import.meta.main) {
     })
     .catch(async (e) => {
       console.error("[runner] 进程异常退出:", e);
+      // ★ 阶段 1 提交 1：退出前必须把项目收敛到显式终态（阶段 0 的 s2 停在 planning 的根因）
+      await settleOnFailure(projectId, e);
       await closeTaskBridge().catch(() => {});
       await closeRenderGates().catch(() => {});
       process.exit(1);

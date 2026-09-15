@@ -1,43 +1,328 @@
 // ============================================================
-// testEngineer.ts —— 测试（多实例 "test1"/"test2"...）· T6 强化版（9/8）
+// testEngineer.ts —— 测试工程师 "test-core" · 改线版（9/15）
 //
-//   pair_ready → 机械预检（文件缺失） → **机械三查（T6 新增，零 LLM）**：
-//     ① 编译复核（T1 checkFile 同引擎复用——纸审再也糊弄不过编译级事故）
-//     ② 硬编码色扫描（契约铁律「≤5 处」的机械化）
-//     ③ 渲染审（renderGate：vite+headless Edge 真开页面，白屏当场毙+截图存 _shots/）
-//   任一机械项红 → 直接判 fail 进返工链（不烧 LLM，同"文件缺失"预检姿势）；
-//   全绿 → LLM 按六项硬清单纸审（机器已做的不重复劳动，但保留加码权）→ 一致性强制：
-//   checks 里有 fail 而 pass=true → 机器改判。判定报告落 runs/pN/_test-report/（证据留档）。
+//   【改线日期与原因】9/15：旧线（吃 merger 的 pair_ready → 机械预检/机械三查/
+//   LLM 六项硬清单纸审 → 发 task_passed/task_failed/task_rejected/revision）整体作废。
+//   原因：developer 线（developerAgent）自带修复循环（repair），测试方唯一职责
+//   变成「用独立 TestAgent 出真话报告」——旧升级返工链（1/2 次 revision、
+//   3 次回炉 architect、6 次上报 maintainer）不再存在，计数护栏一并撤销。
 //
-//   判定轮次上限不变：≥3 次回炉架构师、≥6 真放弃（护栏没动——T6 只加眼睛不加额度）。
-//   计数按 阶段:pairId 键控（任务 id 每阶段从 T1 重新编号，跨阶段不得累加）。
+//   【新线】消息形状逐字对齐 developerAgent/protocol.ts（冻结契约，我方是生产方）：
+//     developer ──test_request──▶ test-core（本类，register("test-core", roles.testEngineer)）
+//     test-core ──注入的 verifier（默认走 testAgentAdapter → 外部 testAgent --verify）──▶
+//     test-core ──test_passed / test_failure──▶ developer（唯一消费者）
+//
+//   【三道自我校验（回错包/超窗 = 不发并留痕）】
+//     ① correlationId：结果必须原样回带本轮请求的身份五字段，对不上 = verifier 回错包，拒发；
+//     ② acceptanceHash：从注入的任务包判据（taskChecks，与 developer 端同一份数组）本地
+//        算 acceptanceHashOf 对请求——不同源的结果发过去也必被信任链拒，宁可不发只留痕；
+//     ③ deadlineAt：到达即超窗 → 连 verify 都不烧；verify 回来才超窗 → 主动弃发
+//        （developer 对超窗到达的结果一律拒，硬发只会污染它的 Ledger）。
+//        过期语义与 developer 端 isTestWaitExpired 同口径（now > deadlineAt 才算过期）。
+//
+//   【幂等】同轮票（correlationId|acceptanceHash|deadlineAt 三元组）只处理一次——
+//   Hub 重投/双发不会重复烧 verify、不会重复发结果。新一轮送检的 deadlineAt/hash 必变，
+//   不会被这里的去重误杀。
+//
+//   【unverified / needs_human】不冒充 pass/fail（testAgentAdapter 三铁律的下游）：
+//   不给 developer 发结果；配了 deps.orchestrator 就按 v2_verdict 形状通知编排站
+//   （与 hub-runner stationLoop 同款语义），没配则只在本机日志留痕。
+//
+//   【主线要注入什么】见 TestEngineerDeps 逐字段注释 + 报告。merger/maintainer/
+//   projectRunner 旧线适配归 lane D，不在本文件职责内。
+//
+//   文件末尾保留一段【旧线遗留导出】：render-smoke / role-prompt-smoke 还在引用
+//   （纯函数零副作用），lane D 拆旧线时一并删。
 // ============================================================
 
-import fs from "node:fs";
-import path from "node:path";
-import { z } from "zod";
-import { SystemMessage } from "@langchain/core/messages";
 import { BaseAgent } from "./BaseAgent";
 import { roles, type TransferStation } from "./Hub";
-import { initModels } from "./models";
-import { retryStructured } from "./llm";
-import { type Pair, type ExecTask } from "./common";
-import { nodePrompt, type Node } from "./Node";
-import { currentProjectId, safePath, safeExists, projectDir } from "./runEnv";
-import { contractPromptBlock, loadContracts, parseBannedImports } from "./contracts";
-import { buildKnown, checkFile } from "./checkers";
-import { renderCheckFrontend, type RenderOutcome } from "./renderGate";
-import { evidenceForTask } from "./artifactValidation";
+import type { Node } from "./Node";
+import {
+    acceptanceHashOf, TestFailureSchema, TestPassedSchema,
+    type TestFailure, type TestPassed, type TestRequest,
+} from "./developerAgent/protocol";
+import { DEVELOPER_NAME } from "./developerAgent/hubAdapter";
+import {
+    runTestAgentVerify,
+    type AdapterVerifyCheck, type TestAgentAdapterOptions, type VerifyAdapterOutcome,
+} from "./testAgentAdapter";
 
-const TEST_MODEL_JSON = JSON.stringify({
-    provider: "deepseek",
-    model: "deepseek-v4-flash",
-    temperature: 0.2,
-    thinking: false,
-});
+/** developer 端 trustedTestAgents 将配成 ["test-core"]——注册名是信任链的一部分，不许改 */
+export const TEST_CORE_NAME = "test-core";
 
-// ---------- 类型 ----------
+// ============================================================
+// 注入缝：验收执行面（测试注 fake，主线注真身）
+// ============================================================
 
+/** 一轮送检的全量输入——agent 把三道闸都过了才交到 verifier 手上 */
+export interface VerifyRoundRequest {
+    projectId: string;
+    taskId: string;
+    /** 与 createDeveloperAgent 的 runId 一致（缺省同 taskId，与 hub-runner 现行默认一致） */
+    runId: string;
+    correlationId: string;
+    acceptanceHash: string;
+    /** 本轮截止时刻（epoch ms）——agent 已按它做过超窗判定，verifier 可参考但不必自校 */
+    deadlineAt: number;
+    /** 请求圈定的被测面（developer 现在固定给 ["frontend","backend"]，透传） */
+    targets: string[];
+    reason: string;
+    /** 被测项目目录（来自 deps.projectDirOf） */
+    projectDir: string;
+    /** verify 能跑的显式命令判据（来自 deps.resolveChecks，hub-runner resolveChecks 同款翻译规则） */
+    checks: AdapterVerifyCheck[];
+}
+
+/** 验收执行面：产 testAgentAdapter 同款结构化结局，永不要求它「保过」 */
+export type TestVerifier = (req: VerifyRoundRequest) => Promise<VerifyAdapterOutcome>;
+
+export interface TestEngineerDeps {
+    /**
+     * 验收执行面注入。缺省 = 真实现：runTestAgentVerify → 外部 testAgent --verify。
+     * 抛异常 = 装配层问题（缺 projectDir/resolveChecks 时真实现会大声抛），
+     * agent 只留痕不代发——绝不伪造任何结论。
+     */
+    verifier?: TestVerifier;
+    /**
+     * 判据来源①（给 verify 跑）：任务包 → 显式命令判据数组。
+     * 主线喂 hub-runner 里那个 resolveChecks()（architect_task.acceptanceChecks 的
+     * COMPILE/CONTRACT 意图翻译 + cfg.serve/cfg.extraChecks），逐字可搬。
+     */
+    resolveChecks?: (req: TestRequest) => AdapterVerifyCheck[] | Promise<AdapterVerifyCheck[]>;
+    /**
+     * 判据来源②（给 hash 自检）：**developer 端算 acceptanceHash 的同一份原始数组**
+     * （整包 = task.acceptanceChecks；分批模式 = 蓝图+已到批合并后的那份，见 index.ts
+     * acceptanceHashOf(runTask.acceptanceChecks)）。不是 resolveChecks 的产物——形状不同。
+     * 不提供则 hash 自检跳过（developer 端信任链仍是兜底，但本地早停的意义就没了）。
+     */
+    taskChecks?: (req: TestRequest) => unknown[] | null | Promise<unknown[] | null>;
+    /** 被测项目绝对路径（主线 = RUNS_ROOT/<projectId>-1 那套） */
+    projectDirOf?: (req: TestRequest) => string;
+    /** runId 解析器；缺省 = req.taskId */
+    runIdOf?: (req: TestRequest) => string;
+    /** 时钟（测试缝）；缺省 = Date.now */
+    now?: () => number;
+    /** 留痕回调（主线接 Ledger/运行报告）；缺省 = console.log */
+    log?: (line: string) => void;
+    /** 结果回送目标；缺省 = DEVELOPER_NAME("developer") */
+    developerName?: string;
+    /** unverified/needs_human 的通知站（如 "v2-orchestrator"）；缺省 = 不通知只留痕 */
+    orchestrator?: string;
+    /** 真实现透传给 runTestAgentVerify 的选项（testAgentDir/env/reviewMode/timeoutMs…） */
+    adapterOptions?: TestAgentAdapterOptions;
+}
+
+/** 默认真实现：薄适配器在外跑 testAgent --verify（崩溃/超时/身份不符都会落成结构化 ENV 失败） */
+function buildDefaultVerifier(adapterOptions?: TestAgentAdapterOptions, log?: (line: string) => void): TestVerifier {
+    return (r) => runTestAgentVerify({
+        projectId: r.projectId, taskId: r.taskId, runId: r.runId,
+        correlationId: r.correlationId, acceptanceHash: r.acceptanceHash,
+        projectDir: r.projectDir, acceptanceChecks: r.checks,
+    }, { ...(adapterOptions ?? {}), ...(log ? { log } : {}) });
+}
+
+// ============================================================
+// TestEngineer —— test-core（消息驱动，无 LLM：判定权在独立 TestAgent，本类只搬运+核验+发报）
+// ============================================================
+
+/** 身份五字段（与 testAgentAdapter 的 IDENTITY_FIELDS 同口径）——回包核对用 */
+const IDENTITY_FIELDS = ["projectId", "taskId", "runId", "correlationId", "acceptanceHash"] as const;
+
+export class TestEngineer extends BaseAgent {
+    private readonly deps: TestEngineerDeps;
+    private readonly developerName: string;
+    private readonly now: () => number;
+    /** 已处理过的轮票（correlationId|acceptanceHash|deadlineAt）→ 幂等去重 */
+    private readonly seen = new Set<string>();
+
+    /**
+     * @param name 注册名——必须是 "test-core"（信任链约定，见 TEST_CORE_NAME）
+     * @param _nodes 旧线「测试判定」prompt 节点参数；新线判定权在独立 TestAgent，仅保构造签名兼容
+     * @param deps   注入面（verifier/判据来源/时钟/留痕回调），主线与测试都从这里进来
+     */
+    constructor(name: string, station: TransferStation, _nodes: Node[] = [], deps: TestEngineerDeps = {}) {
+        super(name, roles.testEngineer, station);
+        this.deps = deps;
+        this.developerName = deps.developerName ?? DEVELOPER_NAME;
+        this.now = deps.now ?? Date.now;
+        this.on("test_request", { fromNames: [this.developerName] }, (ctx) => this.handleTestRequest(ctx.data));
+    }
+
+    private log(line: string): void {
+        const text = `[${this.name}] ${line}`;
+        if (this.deps.log) this.deps.log(text); else console.log(text);
+    }
+
+    // ---------- 入站：test_request ----------
+
+    /** 收口所有闸后的一轮验收。永不抛：闸不过 = 留痕不发，verifier 出错 = 留痕不发。 */
+    private async handleTestRequest(raw: Record<string, any>): Promise<void> {
+        const req = this.parseRequest(raw);
+        if (!req) return;
+        this.log(`收到 test_request：${req.projectId}/${req.taskId} corr=${req.correlationId.slice(0, 12)}… hash=${req.acceptanceHash.slice(0, 8)}…（reason: ${req.reason.slice(0, 80) || "未给"}）`);
+
+        // 幂等：同轮票只处理一次（Hub 重投/双发不重复烧 verify、不重复发结果）
+        const ticket = `${req.correlationId}|${req.acceptanceHash}|${req.deadlineAt}`;
+        if (this.seen.has(ticket)) {
+            this.log(`重复 test_request（corr=${req.correlationId.slice(0, 12)}…）→ 幂等忽略，不重验不重发`);
+            return;
+        }
+        this.seen.add(ticket);
+
+        // 闸①（到达即超窗）：连 verify 都不烧——结果到 developer 手上也只剩一个「拒」字
+        if (this.now() > req.deadlineAt) {
+            this.log(`⛔ test_request 到达即超窗（now=${this.now()} > deadlineAt=${req.deadlineAt}）→ 主动放弃，不送检`);
+            return;
+        }
+
+        // 闸②（hash 同源自检）：本地从任务包算一遍，对不上 = 两边判据不是同一份，发了也白发
+        if (this.deps.taskChecks) {
+            let localHash: string | null = null;
+            try {
+                const taskChecks = await this.deps.taskChecks(req);
+                if (taskChecks != null) localHash = acceptanceHashOf(taskChecks);
+            } catch (e) {
+                this.log(`⛔ 读取任务包判据失败：${(e as Error).message} → 判据不可信，拒发`);
+                return;
+            }
+            if (localHash != null && localHash !== req.acceptanceHash) {
+                this.log(`⛔ acceptanceHash 不符（本地任务包=${localHash}… ≠ 请求=${req.acceptanceHash}…）→ 判据不同源，拒发`);
+                return;
+            }
+        } else {
+            this.log("提示：未注入 deps.taskChecks，acceptanceHash 本地自检跳过（兜底只剩 developer 端信任链）");
+        }
+
+        // 组装轮请求（resolveChecks/projectDirOf 缺失 → 真实现会在适配器内大声抛，落下方 catch）
+        let round: VerifyRoundRequest;
+        try {
+            round = {
+                projectId: req.projectId, taskId: req.taskId,
+                runId: this.deps.runIdOf ? this.deps.runIdOf(req) : req.taskId,
+                correlationId: req.correlationId, acceptanceHash: req.acceptanceHash,
+                deadlineAt: req.deadlineAt, targets: req.targets, reason: req.reason,
+                projectDir: this.deps.projectDirOf ? this.deps.projectDirOf(req) : "",
+                checks: this.deps.resolveChecks ? await this.deps.resolveChecks(req) : [],
+            };
+        } catch (e) {
+            this.log(`⛔ 组装验收输入失败（大概率 resolveChecks/projectDirOf 未注入）：${(e as Error).message} → 不送检`);
+            return;
+        }
+
+        // 执行面（注入缝）：默认真实现 = testAgentAdapter → 外部 testAgent --verify
+        const verifier = this.deps.verifier ?? buildDefaultVerifier(this.deps.adapterOptions, (l) => this.log(l));
+        let out: VerifyAdapterOutcome;
+        try {
+            out = await verifier(round);
+        } catch (e) {
+            this.log(`⛔ verifier 抛错：${(e as Error).message} → 本轮没有可信结果，不发（developer 端超窗止损自然收口）`);
+            return;
+        }
+
+        // 闸③（回来才超窗）：主动放弃并留痕，别硬发
+        if (this.now() > req.deadlineAt) {
+            this.log(`⛔ 验收结果回来时已超窗（kind=${out.kind}，now=${this.now()} > deadlineAt=${req.deadlineAt}）→ 弃发留痕`);
+            return;
+        }
+
+        switch (out.kind) {
+            case "test_passed":
+                this.deliver(out.message, req, round.runId);
+                break;
+            case "test_failure":
+                this.deliver(out.message, req, round.runId);
+                break;
+            case "unverified":
+                // 不伪装成失败也不伪装成通过：developer 端 blockUnverified 的语义归编排层落
+                this.log(`⏸ ${out.result.skipped.length} 项判据未执行 → 不发结果，交编排层定 blocked_unverified`);
+                this.notifyOrchestrator(out.kind, req, { skipped: out.result.skipped });
+                break;
+            case "needs_human":
+                this.log(`🙋 需要人工确认（不是 developer 能修的代码问题）：${out.reasons.join("；").slice(0, 300)}`);
+                this.notifyOrchestrator(out.kind, req, {
+                    reasons: out.reasons,
+                    reviewStatus: out.result.reviewStatus ?? "disabled",
+                    reviewReason: out.result.reviewReason ?? null,
+                    llmReview: out.result.llmReview ?? null,
+                    reviewSignals: out.result.reviewSignals ?? [],
+                    mechanicalVerdict: out.result.mechanicalVerdict ?? out.result.verdict,
+                });
+                break;
+        }
+    }
+
+    /** 入站结构收口：test_request 的必填身份字段缺一律丢（correlationId 都没有时无从回话） */
+    private parseRequest(raw: Record<string, any>): TestRequest | null {
+        const s = (v: unknown): string => (typeof v === "string" ? v : "");
+        const missing: string[] = [];
+        const projectId = s(raw.projectId); if (!projectId) missing.push("projectId");
+        const taskId = s(raw.taskId); if (!taskId) missing.push("taskId");
+        const correlationId = s(raw.correlationId); if (!correlationId) missing.push("correlationId");
+        const acceptanceHash = s(raw.acceptanceHash); if (!acceptanceHash) missing.push("acceptanceHash");
+        const deadlineAt = typeof raw.deadlineAt === "number" && Number.isFinite(raw.deadlineAt) ? raw.deadlineAt as number : NaN;
+        if (!Number.isFinite(deadlineAt)) missing.push("deadlineAt");
+        if (missing.length > 0) {
+            this.log(`⛔ 入站 test_request 必填字段缺失（${missing.join("、")}）→ 丢弃（无从回话，developer 端超窗止损自然收口）`);
+            return null;
+        }
+        return {
+            type: "test_request", projectId, taskId, correlationId, acceptanceHash, deadlineAt,
+            targets: Array.isArray(raw.targets) ? (raw.targets as unknown[]).map(String) : [],
+            reason: s(raw.reason),
+        };
+    }
+
+    // ---------- 出站：test_passed / test_failure ----------
+
+    /** 闸①的发送侧半段（回错包核对）+ 形状核对（逐字过 developer 的 schema），全过才发 */
+    private deliver(message: TestPassed | TestFailure, req: TestRequest, runId: string): void {
+        const want: Record<(typeof IDENTITY_FIELDS)[number], string> = {
+            projectId: req.projectId, taskId: req.taskId, runId,
+            correlationId: req.correlationId, acceptanceHash: req.acceptanceHash,
+        };
+        const mismatches = IDENTITY_FIELDS.filter((f) => (message[f] as string) !== want[f]);
+        if (mismatches.length > 0) {
+            this.log(`⛔ verifier 回错包：${mismatches.map((f) => `${f}(${String(message[f])}≠${want[f]})`).join("；")} → 拒发`);
+            return;
+        }
+        // verifiedBy 改成本机注册名：developer 信任链按 Hub sender 实名核（["test-core"]），
+        // 消息里再自报一个别的名字只会误导审计。
+        const payload: TestPassed | TestFailure =
+            message.type === "test_passed" ? { ...message, verifiedBy: this.name } : message;
+        const schema = payload.type === "test_passed" ? TestPassedSchema : TestFailureSchema;
+        const parsed = schema.safeParse(payload);
+        if (!parsed.success) {
+            const why = parsed.error.issues.map((i) => `${i.path.join(".") || "$"}: ${i.message}`).join("; ");
+            this.log(`⛔ ${payload.type} 不过 developer 契约 schema → 拒发：${why.slice(0, 300)}`);
+            return;
+        }
+        this.send(this.developerName, payload as Record<string, any>);
+        const extra = payload.type === "test_passed"
+            ? `机器证据 ${(payload as TestPassed).evidence.length} 项`
+            : `${payload.category} exit=${String((payload as TestFailure).exitCode)} 红单 ${(payload as TestFailure).allFailures?.length ?? 0} 条`;
+        this.log(`→ ${this.developerName} ${payload.type}（corr=${req.correlationId.slice(0, 12)}…，${extra}）`);
+    }
+
+    /** 非结果类结局的通知位（v2_verdict 形状与 hub-runner stationLoop 同款，归编排层消费） */
+    private notifyOrchestrator(kind: "unverified" | "needs_human", req: TestRequest, detail: Record<string, any>): void {
+        const orch = this.deps.orchestrator;
+        if (!orch) {
+            this.log(`（未注入 deps.orchestrator，${kind} 通知仅本机留痕）`);
+            return;
+        }
+        this.send(orch, { type: "v2_verdict", kind, correlationId: req.correlationId, ...detail });
+        this.log(`v2_verdict(${kind}) → ${orch}`);
+    }
+}
+
+// ============================================================
+// 【旧线遗留导出】—— T6 机械三查/纸审时代的纯函数与类型。
+//   新线（test-core）不引用；render-smoke.ts / role-prompt-smoke.ts 还在 import，
+//   lane D 拆 merger↔测试旧线时连同这两个 smoke 一并移除。在此之前保持逐字不变。
+// ============================================================
+
+/** 旧线判定结论（归责制） */
 export interface Verdict {
     pass: boolean;
     blame: "backend" | "frontend" | "both";
@@ -45,18 +330,17 @@ export interface Verdict {
     frontendIssues: string[];
 }
 
-/** 清单条目（LLM 纸审六项 + 机器三项同构合并，全量进测试报告） */
+/** 旧线清单条目（LLM 纸审六项 + 机器三项同构合并） */
 export interface CheckItem {
     item: string;
     verdict: "pass" | "fail" | "skip";
     evidence: string;
 }
 
-/** LLM 必须逐项交代的六件事（缺项机器补记 skip——"清单化"不靠模型自觉） */
+/** 旧线 LLM 必须逐项交代的六件事 */
 export const CHECKLIST_ITEMS = ["路由指向存在", "import 可解析", "三态覆盖", "契约遵从", "接口联通", "验收落实"] as const;
 
-// ---------- 提示词（T6 硬清单版） ----------
-
+/** 旧线纸审提示词（role-prompt-smoke 引用） */
 export const test_prompt: string = `
 # 角色
 你是 CrewForge 项目的测试-清单判定 Agent。你只通过阅读任务契约和代码判断实现是否满足要求，不执行代码，也不替开发者做设计。
@@ -94,22 +378,6 @@ export const test_prompt: string = `
 - pass=true 时 issues 留空数组、blame 填 "backend" 占位、checks 六项全 pass。
 - pass=false 时每条 issue 写清位置/期望/实际，具体到开发 Agent 可直接修改。
 `;
-
-// ---------- 结构化 schema ----------
-
-const verdictSchema = z.object({
-    pass: z.boolean(),
-    blame: z.enum(["backend", "frontend", "both"]),
-    backendIssues: z.array(z.string()),
-    frontendIssues: z.array(z.string()),
-    checks: z.array(z.object({
-        item: z.string(),
-        verdict: z.enum(["pass", "fail", "skip"]),
-        evidence: z.string(),
-    })).optional(),
-});
-
-// ---------- 机械项（导出供 render-smoke 狗考） ----------
 
 /** 契约铁律「硬编码色 ≤5」机械化：数 .vue/.css 里的 hex 色值（td-theme.css 是 token 本体，豁免） */
 export function scanHardcodedHex(files: { filePath: string; content: string }[]): CheckItem {
@@ -152,7 +420,7 @@ export function enforceChecklistConsistency(verdict: Verdict, llmChecks: CheckIt
     return { verdict: out, checks: merged };
 }
 
-/** 测试报告 md（留档 runs/pN/_test-report/，看板回显归阶段 6） */
+/** 旧线测试报告 md（留档 runs/pN/_test-report/） */
 export function renderTestReport(label: string, phase: number, verdict: Verdict, checks: CheckItem[], mech: CheckItem[]): string {
     const all = [...mech, ...checks];
     return [
@@ -165,220 +433,4 @@ export function renderTestReport(label: string, phase: number, verdict: Verdict,
         ...all.map(c => `- [${c.verdict === "pass" ? "x" : c.verdict === "fail" ? " " : "~"}] ${c.item}：${c.evidence}`),
         "",
     ].join("\n");
-}
-
-// ---------- 工具：读任务产出文件（T6 输入纪律：单文件截 20k，防上下文炸误判 both——§5 P4 并入本卡） ----------
-
-function readTaskFiles(t: ExecTask): { filePath: string; content: string }[] {
-    return t.files.map(fp => {
-        const full = safePath(currentProjectId()!, fp);
-        if (!fs.existsSync(full)) return { filePath: fp, content: "（文件缺失：未产出）" };
-        const raw = fs.readFileSync(full, "utf-8");
-        return { filePath: fp, content: raw.length > 20_000 ? raw.slice(0, 20_000) + "\n…（超长截断，全文见产物树）" : raw };
-    });
-}
-
-// ============================================================
-// TestEngineer —— 测试（固定类，消息驱动）
-// ============================================================
-
-export class TestEngineer extends BaseAgent {
-    private readonly judgements = new Map<string, number>();
-    /** 判定提示词（节点「测试判定」优先，空回退内置默认） */
-    private readonly judgePrompt: string;
-
-    constructor(name: string, station: TransferStation, nodes: Node[] = []) {
-        super(name, roles.testEngineer, station);
-        this.judgePrompt = nodePrompt(nodes, "测试判定", test_prompt);
-        this.on("pair_ready", { fromNames: ["merger"] }, ({ data }) => {
-            void this.judge(data.pair as Pair, data.phase as number);
-        });
-    }
-
-    private async judge(pair: Pair, phase: number): Promise<void> {
-        const pairKey = pair.back.id;
-        const label = `${pairKey}${pair.front ? `+${pair.front.id}` : ""} ${pair.back.method} ${pair.back.path}`;
-        console.log(`[${this.name}] 收到接口对：${label}`);
-
-        // 1. 机械预检：文件缺失直接 fail（省 LLM 调用；归责按缺哪侧定）
-        const missingBack = pair.back.files.filter(fp => !safeExists(currentProjectId()!, fp));
-        const missingFront = pair.front ? pair.front.files.filter(fp => !safeExists(currentProjectId()!, fp)) : [];
-        if (missingBack.length > 0 || missingFront.length > 0) {
-            const blame: "backend" | "frontend" | "both" =
-                missingBack.length > 0 && missingFront.length > 0 ? "both"
-                    : missingBack.length > 0 ? "backend" : "frontend";
-            await this.fail(pair, phase, pairKey, blame,
-                missingBack.map(fp => `文件未产出：${fp}`),
-                missingFront.map(fp => `文件未产出：${fp}`),
-                label, [{ item: "机械-文件存在", verdict: "fail", evidence: "存在缺件" }]);
-            return;
-        }
-
-        const backFiles = readTaskFiles(pair.back);
-        const frontFiles = pair.front ? readTaskFiles(pair.front) : [];
-        const pid = currentProjectId();
-
-        // 2. T6 机械三查（零 LLM）：编译复核 / 硬编码色 / 渲染审。任一红=直接判负进返工链（不吃纸审名额之外——计数护栏原样）
-        const mech: CheckItem[] = [];
-        const mechIssuesBack: string[] = [];
-        const mechIssuesFront: string[] = [];
-
-        const compileKnown = buildKnown(pid != null ? projectDir(pid) : null,
-            new Map([...backFiles, ...frontFiles].map(f => [f.filePath, f.content])), []);
-        // p3 修④（9/9）：判定侧编译复核与写盘闸同执法口径——契约技术基线的禁用包这里也拦
-        const banned = parseBannedImports(await loadContracts());
-        const redFiles: string[] = [];
-        for (const f of [...backFiles, ...frontFiles]) {
-            const problems = await checkFile(f.filePath, f.content, compileKnown, banned);
-            if (problems.length > 0) {
-                redFiles.push(`${f.filePath}：${problems.join("；").slice(0, 200)}`);
-                (pair.back.files.includes(f.filePath) ? mechIssuesBack : mechIssuesFront).push(`编译未过 ${f.filePath}：${problems.join("；").slice(0, 200)}`);
-            }
-        }
-        mech.push({ item: "机械-编译复核", verdict: redFiles.length ? "fail" : "pass", evidence: redFiles.length ? redFiles.join(" ｜ ") : "全部文件过编译（T1 引擎同规格）" });
-
-        if (frontFiles.length > 0) {
-            const hex = scanHardcodedHex(frontFiles);
-            mech.push(hex);
-            if (hex.verdict === "fail") mechIssuesFront.push(hex.evidence);
-        }
-
-        if (pid != null && pair.front && frontFiles.some(f => /\.(vue|html|js|ts)$/i.test(f.filePath))) {
-            const render: RenderOutcome = await renderCheckFrontend(pid, `${phase}-${pairKey}`);
-            mech.push({
-                item: "机械-渲染审",
-                verdict: render.status === "skip" ? "skip" : render.status === "pass" ? "pass" : "fail",
-                evidence: render.reason ?? "渲染审完成",
-            });
-            if (render.status === "fail") mechIssuesFront.push(`渲染白屏/空 DOM（${render.elCount ?? 0} 元素/${render.textLen ?? 0} 字）${render.shot ? `，截图 ${render.shot}` : ""}`);
-        }
-
-        if (mechIssuesBack.length > 0 || mechIssuesFront.length > 0) {
-            const blame: Verdict["blame"] = mechIssuesBack.length > 0 && mechIssuesFront.length > 0 ? "both" : mechIssuesBack.length > 0 ? "backend" : "frontend";
-            console.log(`[${this.name}] ${label} 机械三查拦截，不烧 LLM 直接判负`);
-            await this.fail(pair, phase, pairKey, blame, mechIssuesBack, mechIssuesFront, label, mech);
-            return;
-        }
-
-        // 3. LLM 六项硬清单纸审（失败带反馈重试；LLM 调用失败按 fail 处理，不崩流水线）
-        const contract = contractPromptBlock(await loadContracts());   // T2：判定的"全局真相"参照
-        const mechEvidence = `\n\n## 机器证据（已完成并通过，你不必重复核对）\n${mech.map(c => `- ${c.item}：${c.evidence}`).join("\n")}`;
-        let verdict: Verdict;
-        let checks: CheckItem[];
-        try {
-            const raw = await retryStructured<z.infer<typeof verdictSchema>>(
-                `测试判定 ${pairKey}`,
-                async (feedback, sig) => {
-                    const model = initModels(TEST_MODEL_JSON, "test");
-                    const result = await model
-                        .withStructuredOutput(verdictSchema, { method: "jsonMode", name: "extract_verdict" })
-                        .invoke([
-                            new SystemMessage(
-                                this.judgePrompt +
-                                contract +
-                                mechEvidence +
-                                `\n\n## 后端任务（契约）\n${JSON.stringify(pair.back, null, 2)}` +
-                                `\n\n## 后端产出代码\n${backFiles.map(f => `--- ${f.filePath} ---\n${f.content}`).join("\n")}` +
-                                (pair.front
-                                    ? `\n\n## 前端任务（契约）\n${JSON.stringify(pair.front, null, 2)}` +
-                                      `\n\n## 前端产出代码\n${frontFiles.map(f => `--- ${f.filePath} ---\n${f.content}`).join("\n")}`
-                                    : "") +
-                                feedback
-                            ),
-                        ], { signal: sig });
-                    return result;
-                },
-            );
-            const forced = enforceChecklistConsistency(
-                { pass: raw.pass, blame: raw.blame, backendIssues: raw.backendIssues, frontendIssues: raw.frontendIssues },
-                raw.checks ?? [],
-            );
-            verdict = forced.verdict;
-            checks = forced.checks;
-        } catch (error) {
-            // LLM 失败无法归责，保守按 both（文案已写明是调用失败而非代码错误）
-            verdict = { pass: false, blame: "both", backendIssues: [`LLM 调用失败：${(error as Error).message.slice(0, 100)}`], frontendIssues: [] };
-            checks = [{ item: "机械-判定兜底", verdict: "skip", evidence: "LLM 失败，机器项全绿仍按 both 打回（保守）" }];
-        }
-
-        // 4. 判定报告留档（fs 直写 _test-report/，不进 sys_project_file——报告是元数据不是产物）
-        if (pid != null) {
-            try {
-                const dir = path.join(projectDir(pid), "_test-report");
-                fs.mkdirSync(dir, { recursive: true });
-                fs.writeFileSync(path.join(dir, `${phase}-${pairKey}.md`),
-                    renderTestReport(label, phase, verdict, checks, mech), "utf-8");
-                const evidenceDir = path.join(projectDir(pid), "_task-evidence");
-                fs.mkdirSync(evidenceDir, { recursive: true });
-                const taskEvidence = evidenceForTask(pair.back,
-                    { passed: verdict.pass, issues: [...verdict.backendIssues, ...verdict.frontendIssues] },
-                    this.judgements.get(`${phase}:${pairKey}`) ?? 0);
-                taskEvidence.checks = [...mech, ...checks];
-                taskEvidence.outputSummary = `test verdict=${verdict.pass ? "pass" : "fail"}; pair=${label}`;
-                fs.writeFileSync(path.join(evidenceDir, `${phase}-${pairKey}.json`), JSON.stringify(taskEvidence, null, 2), "utf-8");
-            } catch (e) { console.warn(`[${this.name}] 测试报告落盘失败（不拦判定）:`, (e as Error).message); }
-        }
-
-        if (verdict.pass) {
-            this.send("maintainer", { type: "task_passed", phase, pair });
-            console.log(`[${this.name}] 发送到维护：${label} 通过（机器三查+六项清单全绿${mech.some(c => c.verdict === "skip") ? "，含 skip 项见报告" : ""}）`);
-            return;
-        }
-        await this.fail(pair, phase, pairKey, verdict.blame, verdict.backendIssues, verdict.frontendIssues, label, [...mech, ...checks]);
-    }
-
-    /** 判失败：按 阶段:pairId 计数；升级式修复（3 次回炉架构师 / 6 次真放弃），否则 revision 发回对应开发 */
-    private async fail(
-        pair: Pair, phase: number, pairKey: string,
-        blame: Verdict["blame"], backendIssues: string[], frontendIssues: string[], label: string,
-        checks: CheckItem[] = [],
-    ): Promise<void> {
-        const countKey = `${phase}:${pairKey}`;
-        const count = (this.judgements.get(countKey) ?? 0) + 1;
-        this.judgements.set(countKey, count);
-
-        // count=1,2   → 打回开发返工（下方分支）
-        // count=3     → 回炉架构师：附需求 + 测试问题，要求优化重新拆分前后端
-        // count=4,5   → 重设计后的新任务继续返工
-        // count=6     → 真放弃（上报维护 + 通知合并器）
-        if (count % 3 === 0 && count / 3 === 1) {
-            this.send("architect", { type: "task_rejected", phase, pair, issues: [...backendIssues, ...frontendIssues] });
-            console.log(`[${this.name}] 提示：${label} 判定 3 次未过，回炉架构师重新拆分（附 ${backendIssues.length + frontendIssues.length} 条问题）`);
-            return;
-        }
-        if (count % 3 === 0 && count / 3 === 2) {
-            // 真放弃：原因（最近一次判定问题）+ 任务概要一起上报，不再静默
-            const issues = [...backendIssues, ...frontendIssues];
-            const taskInfo = { id: pairKey, method: pair.back.method, path: pair.back.path };
-            this.send("maintainer", { type: "task_failed", phase, pairId: pairKey, issues, task: taskInfo, attempts: count });
-            this.send("merger", { type: "task_failed", pairId: pairKey });
-            console.log(`[${this.name}] 提示：${label} 判定 ${count} 次仍未通过，放弃并上报维护`);
-            issues.forEach(i => console.log(`   放弃原因：${i}`));
-            return;
-        }
-
-        const blameText = blame === "both" ? "前后端都错" : blame === "backend" ? "后端错" : "前端错";
-        console.log(`[${this.name}]：${label} 未通过（${blameText}，第 ${count} 次判定）`);
-        checks.filter(c => c.verdict === "fail").forEach(c => console.log(`   清单红项：${c.item} —— ${c.evidence.slice(0, 120)}`));
-        if (blame === "backend" || blame === "both") {
-            const target = this.station.pickLeastBusy(roles.backendEngineer);
-            if (target) {
-                this.send(target, { type: "revision", task: pair.back, issues: backendIssues });
-                backendIssues.forEach(i => console.log(`   后端：${i}`));
-            } else {
-                console.log(`提示：没有后端开发注册，返工发送失败：${pair.back.id}`);
-            }
-        }
-        if (blame === "frontend" || blame === "both") {
-            if (pair.front) {
-                const target = this.station.pickLeastBusy(roles.frontendEngineer);
-                if (target) {
-                    this.send(target, { type: "revision", task: pair.front, issues: frontendIssues });
-                    frontendIssues.forEach(i => console.log(`   前端：${i}`));
-                } else {
-                    console.log(`提示：没有前端开发注册，返工发送失败：${pair.front.id}`);
-                }
-            }
-        }
-    }
 }
