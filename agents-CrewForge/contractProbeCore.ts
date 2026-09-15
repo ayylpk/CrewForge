@@ -226,6 +226,39 @@ export function deepEqual(a: unknown, b: unknown): boolean {
 }
 
 /**
+ * 解析一条 resetPaths 声明到绝对路径（纯函数，可单测）。
+ *
+ *   ★ 为什么要"两个基准都试"（9/15 p1 实弹抓到的真 bug）：
+ *     resetPaths 有两种自然写法，两种都有人用——
+ *       · 相对 serveCwd：写成 "data/ledger.db"（起服务在 backend/，库就在 backend/data/）；
+ *       · 相对项目根：写成 "backend/data/ledger.db"（从项目根一眼看全）。
+ *     实现若只认一种，另一种就会**静默指到不存在的路径**——最坏情况是
+ *     "以为清了库、其实没清"，精确断言在脏数据上跑，模型去追一个幻影 bug。
+ *     p1 实弹现场：工具描述给的例子是项目根相对（backend/data/ledger.db），
+ *     实现却按 serveCwd 解析 → 得到 backend/backend/data/ledger.db（双重 backend）。
+ *
+ *   所以：两个候选都算出来，**谁存在用谁**；都存在时选 serveCwd 那个并标记歧义
+ *   （调用方应打印出来）；都不存在时返回 serveCwd 候选（错误信息里给的是最可能的那个）。
+ */
+export function resolveResetTarget(
+    projectDirAbs: string, cwdAbs: string, rel: string,
+): { abs: string; base: "absolute" | "serveCwd" | "projectRoot"; ambiguous: boolean } {
+    if (isAbsolutePath(rel)) return { abs: rel, base: "absolute", ambiguous: false };
+    // 用 path.join 规范化（Windows 上得到统一的 \ 分隔符）——手拼 "/" 会产出
+    // "…\\backend/data/x.db" 这种混合分隔符路径：fs 能认，但字符串比较、日志、
+    // 断言全都会困惑（这条正是单测逼出来的）。
+    const viaCwd = path.join(cwdAbs, rel);
+    const viaRoot = path.join(projectDirAbs, rel);
+    const cwdExists = fs.existsSync(viaCwd);
+    const rootExists = fs.existsSync(viaRoot);
+    if (rootExists && !cwdExists) return { abs: viaRoot, base: "projectRoot", ambiguous: false };
+    if (cwdExists && rootExists && viaCwd !== viaRoot) {
+        return { abs: viaCwd, base: "serveCwd", ambiguous: true };
+    }
+    return { abs: viaCwd, base: "serveCwd", ambiguous: false };
+}
+
+/**
  * 求值一条结构化断言。返回 null = 通过；返回字符串 = **失败原因**（进现场给模型看）。
  *
  *   纯函数、零 IO——这样它能被单测直接钉住（断言器本身错了比断言不过更危险：
@@ -389,10 +422,12 @@ export async function runContractProbe(o: {
             //     写错了名字。探针只报事实，抓脏数据交给断言（那是它该干的）。
             if (tryIdx === 0 && Array.isArray(o.serve.resetPaths) && o.serve.resetPaths.length > 0) {
                 for (const rel of o.serve.resetPaths) {
-                    // 相对路径基准 = serve.cwd（与起服务同一目录）
-                    const abs = isAbsolutePath(rel)
-                        ? rel
-                        : `${cwdAbs.replace(/[/\\]+$/, "")}/${String(rel).replace(/^[/\\]+/, "")}`;
+                    // 两种基准都试（serveCwd / 项目根），存在的优先——见 resolveResetTarget 注释
+                    const r = resolveResetTarget(o.projectDirAbs, cwdAbs, rel);
+                    const abs = r.abs;
+                    if (r.ambiguous) {
+                        say(`probe: ⚠️ ${rel} 在 serveCwd 与项目根下都存在（${abs} 优先）——如有意外请改用绝对路径`);
+                    }
                     const existed = fs.existsSync(abs);
                     for (const suffix of ["", "-wal", "-shm", "-journal"]) {
                         const target = abs + suffix;

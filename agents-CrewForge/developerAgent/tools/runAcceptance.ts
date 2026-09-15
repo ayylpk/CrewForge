@@ -134,7 +134,7 @@ export const runAcceptanceTool: ToolSpec = {
         portEnv: { type: "string", required: false, description: "端口注入的环境变量名，默认 PORT" },
         healthPath: { type: "string", required: false, description: "健康检查路径，默认 /" },
         bootWaitMs: { type: "number", required: false, description: "等服务启动的上限毫秒数，默认 30000" },
-        resetPaths: { type: "array", required: false, description: "起服务前删除的数据文件（相对项目根，如 [\"backend/data/ledger.db\"]）；用于保证「干净起点」——精确断言（id=1、汇总=某值）依赖它" },
+        resetPaths: { type: "array", required: false, description: "起服务前删除的数据文件；**相对 serveCwd 或相对项目根都认**（如 serveCwd=backend 时写 \"data/ledger.db\"，或从项目根写 \"backend/data/ledger.db\"；两处都存在时优先 serveCwd 并告警）。用于保证「干净起点」——精确断言（id=1、汇总=某值）依赖它。**写错文件名会让本轮判据直接失败**（不会静默跳过）" },
         timeoutMs: { type: "number", required: false, description: "整体超时毫秒数，默认 300000" },
     },
     async run(ctx: ToolContext, args): Promise<ToolResult> {
@@ -251,6 +251,15 @@ export const runAcceptanceTool: ToolSpec = {
             });
             if (r.ok) passed++; else failed++;
             m(`${r.ok ? "✅" : "❌"} ${item.id} ${intent.method} ${intent.path} → ${String(r.meta["actualStatus"] ?? "-")}（期望 ${intent.expectedStatus}）`);
+            // ★ 失败必须带现场（9/15 p1 实弹抓到的真缺口）：
+            //   第一版只打一行 "→ -（期望 201）"，13 条契约全失败时模型看不到**任何**
+            //   原因——服务没起来？断言挂了？它只能靠"再摸摸看"去猜（实测它猜了 2 轮
+            //   才定位到 SQL 保留字）。r5 的 25 次自造验证就是这么烧出来的：
+            //   工具给的现场越薄，模型越要自己造工具。所以失败分支一律附原文
+            //   （与 runCommand 失败同规格：给足 stdout/stderr 尾部）。
+            if (!r.ok) {
+                m(`--- ${item.id} 现场 ---\n${r.output.slice(-2_500)}`);
+            }
             results.push({ id: item.id, kind: "CONTRACT", ok: r.ok, ...r.meta });
         }
 

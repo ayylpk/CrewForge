@@ -12,7 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { budgetText } from "../realLlm";
-import { pickByPath, suggestServeCommand, fillVars, fillVarsDeep, deepEqual, evalAssertion } from "../../contractProbeCore";
+import { pickByPath, suggestServeCommand, fillVars, fillVarsDeep, deepEqual, evalAssertion, resolveResetTarget } from "../../contractProbeCore";
 import type { JsonAssertion } from "../../contractProbeCore";
 import { prepareCheck } from "../live/verifier";
 
@@ -192,6 +192,46 @@ describe("verifier / CONTRACT 判据的翻译（验收通道打通）", () => {
         } as never);
         const intent = JSON.parse(String(p.exec?.args[5]));
         expect(intent.assertJson).toEqual(assertJson);
+    });
+
+    it("assertJson 失败现场必须带原文（否则模型只能靠猜——p1 实弹：13 条全失败只看到「→ -」）", async () => {
+        // 这条钉住的是**工具输出的可用性**：失败不带现场 = 逼模型自造验证（r5 的 25 次就是这么来的）。
+        // 用真探针跑一个必然失败的靶子（不存在的服务），检查 output 里有可读原因。
+        const proj = mk("vproj-fail", { "backend/package.json": JSON.stringify({ scripts: { dev: "node src/nope.js" } }) });
+        const { runAcceptanceTool } = await import("../tools/runAcceptance");
+        const ctx = {
+            workspace: { exec: async () => ({ exitCode: 1, stdout: "", stderr: "", timedOut: false }) },
+            projectDirAbs: proj,
+            acceptanceChecks: [{ id: "ac-x", kind: "CONTRACT", method: "GET", path: "/api/x", expectedStatus: 200 }],
+            owner: "developer", taskId: "t",
+        } as never;
+        const r = await runAcceptanceTool.run(ctx, { serveCommand: "node", serveArgs: ["src/nope.js"], bootWaitMs: 4_000, timeoutMs: 30_000 });
+        expect(r.ok).toBe(false);
+        // 现场必须在（不是只有一行 "→ -"）
+        expect(r.output).toContain("ac-x");
+        expect(r.output.length).toBeGreaterThan(80);
+        expect(/服务启动失败|boot_failed|启动|现场|Cannot find/.test(r.output)).toBe(true);
+    }, 60_000);
+
+    it("resetPaths 双基准解析：serveCwd 相对与项目根相对都认（p1 实弹：描述与实现不一致导致 backend/backend/…）", () => {
+        const proj = mk("vproj-reset", { "backend/data/ledger.db": "x", "backend/package.json": JSON.stringify({ scripts: { dev: "node x.js" } }) });
+        const cwdAbs = path.join(proj, "backend");
+        // ① serveCwd 相对（backend/data/ledger.db 真实存在）
+        const a = resolveResetTarget(proj, cwdAbs, "data/ledger.db");
+        expect(a.base).toBe("serveCwd");
+        expect(a.abs).toBe(path.join(cwdAbs, "data", "ledger.db"));
+        expect(a.ambiguous).toBe(false);
+        // ② 项目根相对（同一文件，从项目根写）
+        const b = resolveResetTarget(proj, cwdAbs, "backend/data/ledger.db");
+        expect(b.abs).toBe(path.join(cwdAbs, "data", "ledger.db"));   // serveCwd 下不存在 backend/backend/... → 回退项目根
+        expect(b.base).toBe("projectRoot");
+        // ③ 绝对路径原样
+        const abs = path.join(proj, "backend", "data", "ledger.db");
+        expect(resolveResetTarget(proj, cwdAbs, abs)).toEqual({ abs, base: "absolute", ambiguous: false });
+        // ④ 都不存在 → 给 serveCwd 候选（错误信息里是最可能的那个）
+        const missing = resolveResetTarget(proj, cwdAbs, "data/nope.db");
+        expect(missing.base).toBe("serveCwd");
+        expect(missing.abs.endsWith("nope.db")).toBe(true);
     });
 
     it("干净起点（resetPaths）透传进 serve 规格——「测试前清空数据库」从此是机械动作", () => {
