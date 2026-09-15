@@ -1,4 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
+import { ElMessageBox } from 'element-plus'
 import LoginView from '../views/LoginView.vue'
 import ProjectsView from '../views/ProjectsView.vue'
 
@@ -7,7 +8,7 @@ const router = createRouter({
   routes: [
     { path: '/login', name: 'login', component: LoginView },
     { path: '/projects', name: 'projects', component: ProjectsView },
-    // Agent 仓库（自定义 Agent 池管理）
+    // Agent 仓库（自定义 Agent 池管理）—— 9/15 封存：被底部守卫拦成弹窗
     { path: '/agents', name: 'agent-repo', component: () => import('../views/AgentRepositoryView.vue') },
     // Agent 表单（新建仓库 Agent）
     { path: '/agents/new', name: 'agent-new', component: () => import('../views/AgentFormView.vue') },
@@ -27,7 +28,7 @@ const router = createRouter({
       name: 'architect',
       component: () => import('../views/ArchitectView.vue'),
     },
-    // 团队配置页（AI Agent 团队 — 成员/模型/提示词）
+    // 团队配置页（AI Agent 团队 — 成员/模型/提示词）—— 9/15 封存：被底部守卫拦成弹窗
     {
       path: '/projects/:id/team',
       name: 'team',
@@ -56,14 +57,29 @@ const router = createRouter({
   },
 })
 
+// 封存的入口（团队配置 + Agent 仓库）：功能未开发，点击只弹窗不放行
+// 页面源码保留（TeamView / AgentRepositoryView / AgentFormView），恢复时删掉本闸门即可
+const SEALED_PATHS: RegExp[] = [
+  /^\/agents(\/|$)/, // Agent 仓库 + 仓库表单（/agents、/agents/new、/agents/:id）
+  /^\/projects\/\d+\/team$/, // 团队配置页
+]
+
 // 路由守卫：未登录跳转登录页（开发阶段检查假 token）
-router.beforeEach((to) => {
+router.beforeEach((to, from) => {
   const token = localStorage.getItem('cf_token')
   if (to.path !== '/login' && !token) {
     return '/login'
   }
   if (to.path === '/login' && token) {
     return '/projects'
+  }
+  if (SEALED_PATHS.some((re) => re.test(to.path))) {
+    ElMessageBox.alert('该功能还未开发，现已暂时关闭。', '功能未开放', {
+      type: 'warning',
+      confirmButtonText: '知道了',
+    }).catch(() => {}) // ESC/右上角关闭会 reject，吞掉防未处理拒绝
+    // 地址栏直敲/刷新封存页 → 弹完落回项目列表；站内点击 → 原地不动只弹窗
+    return from.name ? false : '/projects'
   }
 })
 
