@@ -40,7 +40,15 @@ export function resolveShell(command: string, kind: ShellKind = "auto"): ShellIn
 
 export const shellTool: ToolSpec = {
     name: "shell",
-    description: "在生成项目内执行完整 shell 命令字符串（支持管道/重定向/串联；Windows 用 cmd /c 或 PowerShell，Unix 用 sh -lc）。命令自由，但环境受隔离边界约束。",
+    description: "在生成项目内执行完整 shell 命令字符串（支持管道/重定向/串联；Windows 用 cmd /c 或 PowerShell，Unix 用 sh -lc）。命令自由，但环境受隔离边界约束。"
+        + (IS_WIN
+            // 9/15 r5 实测：模型在 findstr 的引号/冒号参数上连撞 6 次（3 种写法全失败才改 PowerShell）。
+            // 这些坑写进描述里，模型每轮都能看到——比等它撞墙再从错误里学便宜得多。
+            ? "⚠️ 本机是 Windows：`findstr` 会把以 `:` 开头的参数当文件名（`netstat | findstr \":3000\"` 会报 "
+              + "\"Cannot open :3000\"）——请改用 `powershell -Command \"Get-NetTCPConnection -LocalPort 3000\"`，"
+              + "或去掉冒号写成 `findstr \"3000\"`。另：`grep -r` 在本机是 Git Bash 的 grep、与命令提示符参数不通用；"
+              + "`&&` 串联在 cmd 下可用但 `||` 语义不同，复杂逻辑建议直接用 powershell。"
+            : ""),
     parameters: {
         command: { type: "string", required: true, description: "完整 shell 命令字符串，如 `npm run build 2>&1 | tail -50`" },
         cwd: { type: "string", required: false, description: "工作目录（相对项目根），默认项目根" },

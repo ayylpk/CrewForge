@@ -23,6 +23,17 @@ export interface ToolContext {
      *   · 执行/进程工具只接受 developer —— PM / Architect / Test / Document 一律拒绝。
      */
     role?: string;
+    /**
+     * 生成项目的绝对路径（项目根）。runAcceptance 用它定位工程文件 / 起服务目录。
+     * 由 graph.ts 的 ctxOf 从 state.projectDir 注入；子 Agent 的 ctx 里没有它。
+     */
+    projectDirAbs?: string;
+    /**
+     * 任务包的验收判据（原样，不翻译）。runAcceptance 用它做"验收预演"：
+     * 只有**引擎**知道任务声明的判据是什么，模型不该从 history 里回忆。
+     * 由 graph.ts 的 ctxOf 从 state.acceptanceChecks 注入。
+     */
+    acceptanceChecks?: readonly unknown[];
     /** 只读子 Agent（旧通道）：能分析、能解释，**不能写盘**。未注入时 delegateReadonly 直接拒绝 */
     analyzer?: (req: { question: string; paths?: string[] }) => Promise<string>;
     /**
@@ -40,8 +51,13 @@ export const DEVELOPER_ROLE_NAME = "developer";
 /** 会改动生成项目的工具（调用前必须过角色检查） */
 export const WRITE_TOOLS: ReadonlySet<string> = new Set(["mkdir", "writeFile", "editFile"]);
 
-/** 会在隔离环境里跑东西的工具（调用前必须过角色检查） */
-export const EXEC_TOOLS: ReadonlySet<string> = new Set(["runCommand", "runBuild", "shell", "httpRequest"]);
+/**
+ * 会在隔离环境里跑东西的工具（调用前必须过角色检查）。
+ * runAcceptance 也在这里：它会真跑构建命令、真起服务打 HTTP——不是只读工具。
+ */
+export const EXEC_TOOLS: ReadonlySet<string> = new Set([
+    "runCommand", "runBuild", "shell", "httpRequest", "runAcceptance",
+]);
 
 /** 会起/读/停长驻进程的工具（同样只属于 Developer） */
 export const PROCESS_TOOLS: ReadonlySet<string> = new Set(["startProcess", "readProcess", "stopProcess"]);
@@ -193,6 +209,7 @@ import { delegateReadonlyTool } from "./delegateReadonly";
 import { shellTool } from "./shell";
 import { httpRequestTool } from "./httpRequest";
 import { startProcessTool, readProcessTool, stopProcessTool } from "./processTools";
+import { runAcceptanceTool } from "./runAcceptance";
 
 /**
  * 核心工具集：文件读写 + 基础构建。
@@ -223,7 +240,10 @@ export function createDeveloperProcessRegistry(): ToolRegistry {
         .register(httpRequestTool)
         .register(startProcessTool)
         .register(readProcessTool)
-        .register(stopProcessTool);
+        .register(stopProcessTool)
+        // 验收预演（9/15 下沉）：一条调用跑完 COMPILE + CONTRACT 判据，
+        // 替掉 r5 里"模型手写 selftest-*.mjs 自证"的 25 次自造验证。
+        .register(runAcceptanceTool);
 }
 
 /** 合并多个注册表（同名后者覆盖前者，冲突可见） */

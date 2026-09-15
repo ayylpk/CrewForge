@@ -406,7 +406,16 @@ function sleep(ms: number): Promise<void> {
  * 显式标记可能更优——但**我们不发任何缓存字段**，所以换网关也不会变差，只是可能少省。
  */
 export function renderUserMessage(
-    input: { task: string; skill: string | null; history: unknown[] },
+    input: {
+        task: string;
+        skill: string | null;
+        history: unknown[];
+        /**
+         * 预算可见性（9/15 批 E）。可缺省（旧测试/fixture 零感知），
+         * 缺省时不渲染该节——行为与从前逐字节一致。
+         */
+        budget?: { used: number; total: number };
+    },
     native: boolean,
     tools: ToolDescriptorLike[],
 ): string {
@@ -421,11 +430,46 @@ export function renderUserMessage(
     // ↓ 变化段：history 每轮都在追加，必须垫在稳定段之后
     const varying = `## 已执行步骤（按时间顺序，最后一条是上一步结果）\n${JSON.stringify(input.history)}`;
 
+    // ↓ 预算条也在变化段（每轮数字都变），但**垫在 history 之后**：
+    //   稳定段不受任何影响，前缀缓存的最长公共前缀照旧命中。
+    const budgetLine = budgetText(input.budget);
+
     const tail = native
         ? `请根据以上信息，给出下一步动作（要动手就调用工具；全部完成就直接说明）。`
         : `请根据以上信息，给出下一步动作。只输出一个 JSON 对象。`;
 
-    return `${stable}\n\n${varying}\n\n${tail}`;
+    return [stable, varying, budgetLine, tail].filter(Boolean).join("\n\n");
+}
+
+/**
+ * 预算条的文案（纯函数，方便测试钉住）。
+ *
+ *   为什么要给模型看这个：r5 的 145 次调用里**没有一次** test_request——
+ *   模型完全不知道预算要见底，一路自检到死。把"还剩几步"摆在眼前，
+ *   它才有机会自己决定"该收尾送检了"。
+ *
+ *   三档语气递进（不制造恐慌，也不假装宽裕）：
+ *     · 充足（剩余 > 30%）→ 平铺直叙；
+ *     · 偏紧（≤ 30%）→ 提醒收尾；
+ *     · 告急（≤ 10% 或 ≤ 5 步）→ 明确要求立即收敛：把当前工作项做完就送检。
+ */
+export function budgetText(b?: { used: number; total: number }): string {
+    if (!b || !Number.isFinite(b.total) || b.total <= 0) return "";
+    const used = Math.max(0, Math.floor(b.used));
+    const total = Math.floor(b.total);
+    const left = Math.max(0, total - used);
+    const pct = left / total;
+    const head = `## 预算\n已用 ${used} / ${total} 次 LLM 调用，剩余 ${left} 次。`;
+    if (left <= 5 || pct <= 0.1) {
+        return `${head}⚠️ 告急：预算即将耗尽。**不要再开启新的探索或验证**——`
+            + `把当前工作项做到可交付状态，然后立即用 runAcceptance 跑一遍验收预演，`
+            + `如无阻塞就结束本轮（模型自然完成信号），让外部验收接管。`;
+    }
+    if (pct <= 0.3) {
+        return `${head}预算偏紧：优先完成当前工作项，不要开启大范围重构；`
+            + `完成一个可交付批次后就用 runAcceptance 预演验收，不要等到全部写完才验。`;
+    }
+    return `${head}预算充足，但**验收时机**仍然重要：完成一个可交付批次（若干工作项）后应尽快预演，而不是只写不验。`;
 }
 
 export function createRealLlm(opts: RealLlmOptions = {}): DeveloperLlm {

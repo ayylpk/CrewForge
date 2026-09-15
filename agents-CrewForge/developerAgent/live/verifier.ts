@@ -25,7 +25,45 @@ import fs from "node:fs";
 import path from "node:path";
 import { hashOf } from "../ledger";
 import type { AcceptanceCheck, TestFailureCategory, VerificationEvidence } from "../protocol";
-import { resolveGenericCommand } from "../../architectTaskBuilder";
+import { resolveProjectCommand as resolveGenericCommand } from "../tools/projectCommands";
+import { suggestServeCommand } from "../../contractProbeCore";
+import type { ServeSpec } from "../../contractProbeCore";
+
+/**
+ * 契约探针 CLI 的绝对路径（本文件在 developerAgent/live/，CLI 在 agents-CrewForge/ 根）。
+ * verifier 与 hub-runner 都指向**同一个**文件——执行逻辑只有一份（contractProbeCore）。
+ */
+const PROBE_CLI = path.resolve(import.meta.dir, "..", "..", "httpContractProbe.ts");
+
+/**
+ * 决定"怎么把被测服务跑起来"。判定顺序（全是机械规则，不猜）：
+ *   ① 判据自己声明的 serveCommand/serveArgs（最可信：任务包 / 架构师知道服务怎么起）；
+ *   ② 工程文件探测：serveCwd/package.json 的 dev → start（suggestServeCommand）；
+ *   ③ 都拿不到 → null（调用方如实 skip，不许编命令）。
+ */
+function resolveServeSpec(
+    projectDir: string,
+    c: { serveCommand?: unknown; serveArgs?: unknown; serveCwd?: unknown; portEnv?: unknown; healthPath?: unknown; bootWaitMs?: unknown },
+): ServeSpec | null {
+    const cwd = typeof c.serveCwd === "string" && c.serveCwd ? c.serveCwd : "backend";
+    const common = {
+        cwd,
+        portEnv: typeof c.portEnv === "string" && c.portEnv ? c.portEnv : "PORT",
+        healthPath: typeof c.healthPath === "string" && c.healthPath ? c.healthPath : "/",
+        bootWaitMs: typeof c.bootWaitMs === "number" ? c.bootWaitMs : 30_000,
+    };
+    if (typeof c.serveCommand === "string" && c.serveCommand) {
+        return {
+            command: c.serveCommand,
+            args: Array.isArray(c.serveArgs) ? (c.serveArgs as unknown[]).map(String) : [],
+            why: "declared-serveCommand",
+            ...common,
+        };
+    }
+    const guessed = suggestServeCommand(path.join(projectDir, cwd));
+    if (guessed) return { command: guessed.command, args: guessed.args, why: guessed.why, ...common };
+    return null;
+}
 
 export interface CheckExec {
     check: AcceptanceCheck & { id: string };
@@ -122,11 +160,46 @@ export function prepareCheck(projectDir: string, check: AcceptanceCheck & { id: 
         };
     }
 
-    // ③ 意图：CONTRACT 需要独立 HTTP 执行器，本仓库暂无 → 登记为 skipped
+    // ③ 意图：CONTRACT → 翻译成契约探针命令（9/15 下沉：执行核已进 contractProbeCore，
+    //    Developer 侧同名工具与这里**同一份执行逻辑**，两条路径从此行为一致）。
+    //
+    //   以前这里登记为 skipped，直接后果是 r5 的 8/10 判据无人执行 →
+    //   verdictKindOf 必然返回 blocked_unverified → 任务**永远拿不到 ready**。
+    //   现在翻译成显式命令，让验收站真跑。
+    //
+    //   serve 规格从哪来：项目里探（package.json 的 dev/start），探不到就**如实 skip**
+    //   （不猜命令是底线）；显式声明了 serveCommand 的优先用它。
     if (skipKind === "CONTRACT") {
+        const p = typeof c.path === "string" && c.path ? c.path : null;
+        if (!p) {
+            return { check, exec: null, skipKind, skipReason: "CONTRACT 判据缺 path，无法翻译成探针命令" };
+        }
+        const serve = resolveServeSpec(projectDir, c);
+        if (!serve) {
+            return {
+                check, exec: null, skipKind,
+                skipReason: `找不到起服务的方式（${String(c.serveCwd ?? "backend")}/package.json 无 dev/start 脚本，`
+                    + `判据也没声明 serveCommand）——不猜命令（${String(c.method ?? "?")} ${p}）`,
+            };
+        }
+        const serveJson = JSON.stringify({ ...serve, cwd: "." });
+        const intentJson = JSON.stringify({
+            method: String(c.method ?? "GET").toUpperCase(),
+            path: p,
+            expectedStatus: typeof c.expectedStatus === "number" ? c.expectedStatus : 200,
+            ...(c.body !== undefined ? { body: c.body } : {}),
+            ...(typeof c.expectBodyContains === "string" ? { expectBodyContains: c.expectBodyContains } : {}),
+            ...(c.auth ? { auth: c.auth } : {}),
+        });
         return {
-            check, exec: null, skipKind,
-            skipReason: `本仓库尚未提供通用 HTTP 执行器，契约验收项只登记不判分（${String(c.method ?? "?")} ${String(c.path ?? "?")}）`,
+            check,
+            exec: {
+                command: "bun",
+                args: ["run", PROBE_CLI, "--serve", serveJson, "--intent", intentJson],
+                cwd: serve.cwd,
+                resolvedBy: `contract-probe(${serve.why})`,
+            },
+            skipKind, skipReason: "",
         };
     }
 

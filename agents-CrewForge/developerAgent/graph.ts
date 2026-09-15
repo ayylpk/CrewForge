@@ -235,6 +235,20 @@ export function clipArgsForModel(args: ToolArgs): ToolArgs {
 
 /** 历史总字符预算；超过就从最老的条目开始折叠 */
 export const HISTORY_BUDGET_CHARS = 96_000;
+
+/**
+ * 折叠目标线（9/15 批 E 修正）：超预算时**折到预算的这个比例**，而不是"降到预算即停"。
+ *
+ *   为什么改：r5 实测 22 次折叠事件，绝大多数只折 1-2 条（"省 662""省 736"）——
+ *   最小干预的代价是**折得又碎又勤**，而每次折叠都改动历史前缀 →
+ *   整个 prompt 的前缀缓存全线重算（铁证：`cache=39936 → 10240`）。
+ *   22 次折叠 = 22 次全量重算，这是 r5 比 r4 慢 5 分钟的直接原因之一。
+ *
+ *   折到 70% 意味着"一次多折一些，换来更长的免折窗口"：
+ *   设每次折叠后距下次触发要再涨 30% 预算（约 2.9 万字符），折叠频率至少减半。
+ *   代价是模型更早失去一些老条目的细节——但它们本来就已经被折过一轮了。
+ */
+export const HISTORY_FOLD_TARGET_RATIO = 0.7;
 /** 最近这段字符数永不折叠（从最新一条往回累计；约 4 条满额工具结果） */
 export const HISTORY_PROTECT_CHARS = 32_768;
 /** 折叠后放在 output 位置的标记文案（模型看得到，明示这里被移除过） */
@@ -285,9 +299,14 @@ function foldArgsDigest(args: unknown): unknown {
 export function pruneHistory(history: unknown[], o?: {
     budgetChars?: number;
     protectChars?: number;
+    /** 折叠目标线比例（缺省 0.7）；显式传 1 即恢复"降到预算即停"的旧行为（测试兼容） */
+    foldTargetRatio?: number;
 }): HistoryPruneResult {
     const budget = o?.budgetChars ?? HISTORY_BUDGET_CHARS;
     const protect = o?.protectChars ?? HISTORY_PROTECT_CHARS;
+    // 折到 target 而不是 budget：一次多折些，换更长的免折窗口（见常量注释）
+    const ratio = o?.foldTargetRatio ?? HISTORY_FOLD_TARGET_RATIO;
+    const target = Math.max(0, Math.floor(budget * Math.min(1, Math.max(0.1, ratio))));
 
     let total = 0;
     for (const e of history) total += historyEntryChars(e);
@@ -304,7 +323,7 @@ export function pruneHistory(history: unknown[], o?: {
 
     let folded = 0;
     let chars = total;
-    for (let i = 0; i < protectedFrom && chars > budget; i++) {
+    for (let i = 0; i < protectedFrom && chars > target; i++) {
         const raw = history[i];
         if (!raw || typeof raw !== "object") continue;
         const entry = raw as Record<string, unknown>;
@@ -524,6 +543,12 @@ export interface DeveloperLlm {
         skill: string | null;
         history: unknown[];
         tools: unknown[];
+        /**
+         * 预算可见性（9/15 批 E）。**必填**：模型必须能看见自己还剩几步，
+         * 否则就会出现 r5 那种"打完 145 调都没发出 test_request"的死法——
+         * 不是它不想收尾，是它根本不知道预算要见底了。
+         */
+        budget: { used: number; total: number };
     }): Promise<unknown>;
 }
 
@@ -686,6 +711,9 @@ export async function runToolLoop(o: {
             raw = await o.llm.next({
                 system: o.system, task: o.task, skill: o.skill,
                 history, tools: toolDefs,
+                // 预算可见性：模型每轮都能看到"已用/总量"，自己决定何时收尾送检。
+                // 放在渲染的最末尾（history 之后）→ 稳定段逐字节不变 → 前缀缓存不受影响。
+                budget: { used: planned - 1, total: budget },
             });
         } catch (e) {
             // 9/13 T3b 实弹修复：一次超时/网络抖动曾把整个任务打死（failed 还会短路重跑）。
@@ -1158,6 +1186,10 @@ export function buildDeveloperGraph(deps: DeveloperGraphDeps) {
         owner: "developerAgent",
         role: DEVELOPER_ROLE_NAME,
         taskId: state.taskId,
+        // 验收预演（runAcceptance）的两块输入：项目根 + 任务包判据。
+        // 只有引擎知道判据原文，模型不该从 history 里回忆——这里如实注入。
+        projectDirAbs: state.projectDir,
+        acceptanceChecks: state.acceptanceChecks ?? [],
         ...(deps.analyzer ? { analyzer: deps.analyzer } : {}),
         // 主 Agent 唯一能调用子 Agent 的通道；子 Agent 拿不到这个 ctx 本身
         subagent: (req) => dispatchSubagent(state.taskId, req, machineEvidenceOf(state)),

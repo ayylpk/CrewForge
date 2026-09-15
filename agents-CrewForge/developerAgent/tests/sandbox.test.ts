@@ -17,7 +17,10 @@ import os from "node:os";
 import path from "node:path";
 import { Workspace } from "../workspace";
 import { DeveloperLedger } from "../ledger";
-import { createFullDeveloperToolRegistry, DEVELOPER_ROLE_NAME } from "../tools/registry";
+import {
+    createFullDeveloperToolRegistry, DEVELOPER_ROLE_NAME,
+    EXEC_TOOLS, PRIVILEGED_TOOLS, READONLY_TOOL_NAMES,
+} from "../tools/registry";
 import type { ToolContext } from "../tools/registry";
 import { createTestAgentToolbox } from "../tools/testAssistant";
 import {
@@ -325,6 +328,20 @@ describe("sandbox / 角色闸门", () => {
         for (const n of ["shell", "httpRequest", "startProcess", "readProcess", "stopProcess", "runCommand", "runBuild"]) {
             expect(names).toContain(n);
         }
+    });
+
+    it("runAcceptance（验收预演）必须始终对 Developer 可用——它是 r5 验证税的靶向补丁", () => {
+        // r5 实测：145 次调用里 116 次（80%）发生在施工结束之后，25 次是模型手写
+        // selftest-*.mjs 自证。这个工具就是拿去替那段流程的；它一旦不在工具集里，
+        // 模型会退回到"自己写脚本"，验证税立刻回来。
+        expect(registry.names()).toContain("runAcceptance");
+    });
+
+    it("runAcceptance 是特权工具：非 Developer 角色一律拒绝（它会真起服务/跑命令）", async () => {
+        expect(EXEC_TOOLS.has("runAcceptance")).toBe(true);
+        expect(PRIVILEGED_TOOLS.has("runAcceptance")).toBe(true);
+        // 只读子 Agent 的工具盒里不该有它
+        expect(READONLY_TOOL_NAMES).not.toContain("runAcceptance");
     });
 });
 
