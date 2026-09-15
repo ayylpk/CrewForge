@@ -400,9 +400,12 @@ for (const sig of ["SIGINT", "SIGTERM"] as const) {
 }
 
 let state = await handle.serveOnce();
-if (!state) {
+// "rejected" 在本线不该出现（首条必是 architect_task，acceptArchitectTask 不返拒绝）——
+// 但类型面存在（9/15 serveOnce 扩了批次/测试结果路由），照无任务一并收口。
+if (!state || state === "rejected") {
     console.error("[hub-runner] ⛔ serveOnce 没吃到 architect_task（Hub 环没通）");
     await finish("no-task", null);
+    throw new Error("unreachable: finish() 已退出进程");   // 不可达；给类型面收口（await 不窄化）
 }
 
 const MAX_TEST_ROUNDS = 8;
@@ -433,7 +436,7 @@ while (state && state.status === "waiting_test") {
                 const resumed = await handle.resumeFromTestMessage(res.message, res.sender);
                 if (resumed === "rejected") {
                     console.error("[hub-runner] 测试消息被信任链拒绝，停");
-                    await finish("rejected", state);
+                    await finish("rejected", handle.inspectTaskState());
                 } else {
                     state = resumed;
                 }
@@ -449,8 +452,7 @@ while (state && state.status === "waiting_test") {
 
 // ---------- ⑤ 终局 ----------
 
-if (!state) await finish("no-state", null);
-if (state === null) throw new Error("unreachable: finish(no-state) exits the process");
+// 走到这里 state 已被上方守卫窄化成 DeveloperState（null/"rejected" 都在那里 finish+throw 退场）。
 const snap = handle.inspectTaskState();
 console.log("\n===== 结果 =====");
 console.log(`status=${state.status} 测试轮数=${rounds} llmCalls=${state.llmCallsCompleted}/${state.llmCallsPlanned} toolCalls=${state.toolCalls} repairs=${state.repairAttempts}`);

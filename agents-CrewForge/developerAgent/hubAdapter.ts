@@ -40,6 +40,13 @@ export interface HubAdapterOptions {
      * 默认空数组 = 谁也不信（安全默认）。
      */
     trustedTestAgents?: readonly string[];
+    /**
+     * 终态兜底抄送站名（9/15 团队线）：developer_blocked/developer_failed 按 targets
+     * 默认只回 architect，但团队线里记账/收敛（sys_task + phase_done）在 maintainer——
+     * 出站口在这**一处**补抄送，8 个发送点零改动。缺省不设 = 完全旧行为
+     * （hub-runner 单机线、存量测试逐字节不变）。ready 本就默认发 maintainer，不抄。
+     */
+    copyTerminalsTo?: string;
 }
 
 export type ReceiveResult =
@@ -54,6 +61,8 @@ export class HubAdapter {
     private readonly ledger: DeveloperLedger | undefined;
     /** 受信 TestAgent 名单：来自代码配置，不来自消息 */
     private readonly trustedTestAgents: readonly string[];
+    /** 终态抄送站（blocked/failed 记账兜底）；undefined = 不抄（旧行为） */
+    private readonly copyTerminalsTo: string | undefined;
     private readonly memorySeen = new Set<string>();
 
     constructor(opts: HubAdapterOptions) {
@@ -62,16 +71,22 @@ export class HubAdapter {
         this.role = opts.role ?? DEVELOPER_ROLE;
         this.ledger = opts.ledger;
         this.trustedTestAgents = opts.trustedTestAgents ?? [];
+        this.copyTerminalsTo = opts.copyTerminalsTo;
         // Hub.register 会 new Hub 并清空 inbox——重复注册会丢掉在途消息，所以先探测
         if (!this.station.status[this.name]) {
             this.station.register(this.name, this.role);
         }
     }
 
-    /** 发消息（自动 JSON 序列化 + 以自己为 sender） */
+    /** 发消息（自动 JSON 序列化 + 以自己为 sender；blocked/failed 按配置抄送记账站） */
     send(target: string, message: OutboundMessage): "wake" | "queued" {
         const state = this.station.sendMessage(this.name, target, JSON.stringify(message));
         this.ledger?.appendEvent("outbound", { to: target, type: message.type, state });
+        if (this.copyTerminalsTo && this.copyTerminalsTo !== target
+            && (message.type === "developer_blocked" || message.type === "developer_failed")) {
+            const copy = this.station.sendMessage(this.name, this.copyTerminalsTo, JSON.stringify(message));
+            this.ledger?.appendEvent("outbound", { to: this.copyTerminalsTo, type: message.type, state: copy, carbonCopy: true });
+        }
         return state;
     }
 

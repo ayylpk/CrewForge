@@ -49,6 +49,12 @@ export interface DeveloperAgentOptions {
     runId?: string;
     /** 受信的独立 TestAgent 名字（**代码配置**）；不传 = 谁也不信 */
     trustedTestAgents?: readonly string[];
+    /**
+     * 终态抄送站（9/15 团队线）：developer_blocked/developer_failed 除按 targets 路由外
+     * 另投此站一份——团队线里 sys_task 记账/收敛在 maintainer，而默认 targets 只回 architect。
+     * 不传 = 旧行为（hub-runner / 存量测试逐字节不变）。
+     */
+    copyTerminalsTo?: string;
     /** 不传则新建一个独立 TransferStation（模块自测用） */
     station?: TransferStation;
     forbiddenPaths?: string[];
@@ -101,8 +107,8 @@ export interface DeveloperAgentHandle {
      * 崩溃重放则把 `_tasks/` 里已落盘的批次全量重喂）。校验不过直接 throw——绝不静默丢。
      */
     acceptArchitectTask(task: ArchitectTask, seedBatches?: ArchitectBatch[]): Promise<DeveloperState>;
-    /** 阻塞从 Hub 收一条消息，是 architect_task 就执行（供接入旧 Hub 时驱动） */
-    serveOnce(): Promise<DeveloperState | null>;
+    /** 阻塞从 Hub 收一条消息并按类型驱动（architect_task / architect_batch / test_*；见 serveOnce 注释） */
+    serveOnce(): Promise<DeveloperState | "rejected" | null>;
     /** 测试消息到达后的恢复入口（校验信任链后从 handleTestResult 继续） */
     resumeFromTestMessage(msg: InboundMessage, sender: string): Promise<DeveloperState | "rejected">;
     /**
@@ -207,7 +213,10 @@ export function createDeveloperAgent(o: DeveloperAgentOptions): DeveloperAgentHa
 
     const tools = createFullDeveloperToolRegistry();
     const station = o.station ?? new TransferStation({}, {});
-    const adapter = new HubAdapter({ station, ledger, trustedTestAgents: o.trustedTestAgents ?? [] });
+    const adapter = new HubAdapter({
+        station, ledger, trustedTestAgents: o.trustedTestAgents ?? [],
+        ...(o.copyTerminalsTo ? { copyTerminalsTo: o.copyTerminalsTo } : {}),
+    });
 
     // 默认接**只读 Test Assistant**：能搜索、能读文件、能分析编译日志，
     // 但写盘工具 / 任意命令 / TestPassed / State 它在代码层就摸不到（tools/testAssistant.ts）。
@@ -464,14 +473,78 @@ export function createDeveloperAgent(o: DeveloperAgentOptions): DeveloperAgentHa
         }
     };
 
-    const serveOnce = async (): Promise<DeveloperState | null> => {
-        const res: ReceiveResult = await adapter.receive();
-        if (res.status !== "message") return null;
-        if (res.message.type !== "architect_task") {
-            ledger.appendEvent("ignored_message", { type: res.message.type });
-            return null;
+    /**
+     * 状态窗口判决（9/15 Hub 流式分发的坑）：架构师连续推批、开发状态在
+     * waiting_item ↔ waiting_test 之间切换——waiting_test 时吃到 architect_batch，
+     * resumeWithBatch 的闸门会拒绝并且**消息被幂等账本烧掉**（重发也算重复），
+     * 流就死了。所以 serveOnce 吃消息前先看当前状态：
+     * "属于以后窗口"的进停车队列（parked），到窗口再取用。
+     * 这里只判状态窗口；itemId 在序性/身份/过期等判决**仍在各 resume 闸门手里**
+     * （单一事实源不搬动，停车不改变任何闸门语义）。
+     */
+    /** 停放队列：形状合法但状态窗口未到的消息（handle 生命周期=一个任务，队列至多几批深） */
+    const parked: { message: InboundMessage; sender: string }[] = [];
+
+    const fitsCurrentStatus = (msg: InboundMessage): boolean => {
+        const st = ledger.loadState()?.status ?? null;
+        if (msg.type === "architect_task") {
+            // 新任务只在没接活或上一任务已定论时可入（本 handle 生命周期=一任务，
+            // 跨任务由驱动方重建 handle；这里放行到闸门去吃明确的拒绝）
+            return st === null || st === "ready" || st === "blocked" || st === "failed";
         }
-        return acceptArchitectTask(res.message);
+        if (msg.type === "architect_batch") return st === "waiting_item";
+        if (msg.type === "test_passed" || msg.type === "test_failure") return st === "waiting_test";
+        if (msg.type === "cancel_task") {
+            // 有在途运行才有可停之物；没接活/已定论直接放行到 ignored 留痕（终态幂等）
+            return st !== null && st !== "ready" && st !== "blocked" && st !== "failed";
+        }
+        return true;   // repair_requested / resume_task：不拦，直接落 ignored_message 留痕
+    };
+
+    /** 路由表（serveOnce 的"到窗即办"半部）：类型 → 驱动入口，判决在各方闸门内部 */
+    const dispatchMessage = async (
+        msg: InboundMessage, sender: string,
+    ): Promise<DeveloperState | "rejected" | null> => {
+        if (msg.type === "architect_task") return acceptArchitectTask(msg);
+        if (msg.type === "architect_batch") return resumeWithBatch(msg);
+        if (msg.type === "test_passed" || msg.type === "test_failure") {
+            return resumeFromTestMessage(msg, sender);
+        }
+        if (msg.type === "cancel_task") {
+            // 架构师作废（批次 3 连拒整次作废时经 Hub 送达）→ 停在半途的运行收口
+            ledger.appendEvent("cancel_accepted", { projectId: msg.projectId, reason: msg.reason ?? null });
+            return abortRun(`ARCHITECT_CANCELLED: ${msg.reason ?? `${msg.projectId} 未给原因`}`);
+        }
+        ledger.appendEvent("ignored_message", { type: msg.type });
+        return null;
+    };
+
+    /**
+     * 从 Hub 收一条消息并驱动图（9/15 分批管线：架构师↔开发**全部过消息总线**）。
+     * 停车队列见 fitsCurrentStatus；返回 "rejected" = 消息形状合法但驱动闸门拒绝
+     * （乱序批、伪造 sender、过期测试结果）——驱动方必须看见它并收口，
+     * 不能吞掉继续等（下一条消息救不了当前停摆）。
+     */
+    const serveOnce = async (): Promise<DeveloperState | "rejected" | null> => {
+        for (; ;) {
+            // 每轮从头扫一遍停放队列找"到窗"的（findIndex 保 FIFO：同类型批次的
+            // 相对序=入队序，前序批未到窗时后面的同样被跳过——顺序判决仍在 resumeWithBatch）
+            const i = parked.findIndex((h) => fitsCurrentStatus(h.message));
+            if (i >= 0) {
+                const held = parked.splice(i, 1)[0]!;   // i 来自 findIndex，必有元素
+                return dispatchMessage(held.message, held.sender);
+            }
+            const res: ReceiveResult = await adapter.receive();
+            if (res.status !== "message") return null;   // invalid/duplicate：不消费内容，等下一条
+            if (!fitsCurrentStatus(res.message)) {
+                // 只进队列不打烧：receive 的幂等键已记 seen——同一条重投本来就该按
+                // duplicate 拦，停放的是**新消息**，不存在"重发救活"的语义损失
+                parked.push({ message: res.message, sender: res.sender });
+                ledger.appendEvent("message_parked", { type: res.message.type, sender: res.sender });
+                continue;   // 新消息入队后重扫一遍（也许正好让别的到窗——成本 O(n)，n≤批数）
+            }
+            return dispatchMessage(res.message, res.sender);
+        }
     };
 
     /**
