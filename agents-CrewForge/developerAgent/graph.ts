@@ -131,12 +131,87 @@ export function execEvidence(meta: Record<string, unknown> | undefined): Record<
     for (const k of ["stdout", "stderr"] as const) {
         const v = meta[k];
         if (typeof v === "string" && v) {
-            out[k] = v.length > 8000
-                ? `${v.slice(0, 8000)}\n…[截断，完整输出见 ${String(meta["rawOutputPath"] ?? "工具原始输出")}]`
-                : v;
+            out[k] = clipForModel({
+                tool: "exec", output: v,
+                meta: { rawOutputPath: meta["rawOutputPath"] },
+            });
         }
     }
     return Object.keys(out).length > 0 ? out : null;
+}
+
+// ============================================================
+// 工具结果进模型上下文的裁剪（9/15 截断改造）
+//
+//   旧行为：`output.slice(0, 4000)` —— **静默砍尾**。编译错误的根因（洋葱芯）常在
+//   输出尾部，模型看不到就只能重读/重跑，这是 r4 里读重复的一个喂料环。
+//
+//   四家参考实现（pi / opencode / dsh / claude-code）的一致做法：
+//     · 保留头（+尾），绝不静默；明示省略了多少字符；
+//     · 给"怎么拿到完整内容"的出路（落盘路径 / offset 续读）。
+//   参数对齐 dsh tool-result-pruner：触发 8192 字符，头 4096 + 尾 1024；
+//   有 rawOutputPath（执行类工具落盘的全文）时优先给路径，读类工具提示 offset 续读。
+// ============================================================
+
+/** 单条工具结果进入模型上下文的上限（字符）；<= 上限原样返回 */
+export const MODEL_OUTPUT_LIMIT = 8192;
+/** 超限时保留的头部字符数 */
+export const MODEL_OUTPUT_HEAD = 4096;
+/** 超限时保留的尾部字符数（编译错误的洋葱芯常在这） */
+export const MODEL_OUTPUT_TAIL = 1024;
+
+export function clipForModel(o: {
+    tool: string;
+    output: string;
+    meta?: Record<string, unknown> | undefined;
+}): string {
+    const text = o.output;
+    if (text.length <= MODEL_OUTPUT_LIMIT) return text;
+    const head = text.slice(0, MODEL_OUTPUT_HEAD);
+    const tail = text.slice(-MODEL_OUTPUT_TAIL);
+    const omitted = text.length - MODEL_OUTPUT_HEAD - MODEL_OUTPUT_TAIL;
+    const raw = typeof o.meta?.["rawOutputPath"] === "string" ? o.meta["rawOutputPath"] : null;
+    const hint = raw
+        ? `完整输出见 ${raw}`
+        : o.tool === "readFile"
+            ? "可用 readFile 加 offset（起始行）/limit（行数）继续读取"
+            : `原文共 ${text.length} 字符`;
+    return `${head}\n\n⋯[中段省略 ${omitted} 字符；${hint}]⋯\n\n${tail}`;
+}
+
+/**
+ * 重复调用提醒（9/15 加，参考 dsh repeat-tool-reminder）。
+ *
+ *   dsh 的语义：参数深度排序后规范化成链、连续计数、命中阈值 [3,5,8] 时注入
+ *   **软提醒**（advisory——只提醒，不拦截）。r3 的"12 步墙死循环"（每 loop 重新
+ *   勘察→没写完被掐→新 loop 重来）就是缺这个软刹车：模型没有"我在原地打转"的信号。
+ *
+ *   实现要点：
+ *     · 键 = 工具名 + 参数（对象键**深度排序**后 stringify——属性顺序不同视为同一次）；
+ *     · 任何一次不同的调用都会重置计数器（连续语义）；
+ *     · 阈值命中时往 history 尾部追加一条 reminder（不进 authorities、不占 LLM 台账）。
+ */
+const REPEAT_REMINDER_THRESHOLDS: readonly number[] = [3, 5, 8];
+
+/** 参数规范化键：对象键递归排序后 JSON（属性顺序不敏感） */
+export function canonicalArgsKey(args: ToolArgs): string {
+    const sort = (v: unknown): unknown => {
+        if (Array.isArray(v)) return v.map(sort);
+        if (v && typeof v === "object") {
+            const o = v as Record<string, unknown>;
+            const out: Record<string, unknown> = {};
+            for (const k of Object.keys(o).sort()) out[k] = sort(o[k]);
+            return out;
+        }
+        return v;
+    };
+    return JSON.stringify(sort(args ?? {}));
+}
+
+export function repeatReminderText(tool: string, args: ToolArgs, streak: number): string {
+    const detail = streak >= 5 ? `（参数：${JSON.stringify(args).slice(0, 500)}）` : "";
+    return `[重复调用提醒] 你已连续 ${streak} 次以相同参数调用「${tool}」${detail}。`
+        + "如果这条路走不通，请换一种做法（改参数 / 换工具 / 先读证据再动手），不要原样重复。";
 }
 
 /**
@@ -189,6 +264,17 @@ export function checkTimeoutExtension(o: {
 /**
  * 带指纹缓存的工具调用（规格五.3）。
  * runToolLoop 与 runLocalChecks 共用这一份实现，免得两处缓存口径不一致。
+ *
+ * ★ 9/15 修（只读缓存快照 bug，r4 实弹立案）：
+ *   指纹缓存干了两件事，对只读工具**第二件有害**：
+ *     ① 崩溃恢复的"已完成的副作用不重放"——对写/执行工具是安全保证，保留；
+ *     ② 同 run 内的"结果复用"——对只读工具省的是毫秒（readFile 实测 0.004s），
+ *        换来的是**模型拿旧快照做决策**：r4 里 103 次 readFile 只有 19 个不同参数，
+ *        84 次命中旧缓存，模型发现内容与磁盘不一致后被迫用 shell/node -e 绕过核实
+ *        （20 次），并自述"readFile 有缓存复用，需要核实"（llm#127/#128）。
+ *   四家参考实现（pi / opencode / dsh / claude-code）的读工具**一律真读**，无结果缓存层。
+ *   所以：只读工具（READONLY_TOOL_NAMES）直接从缓存面摘除——不查表、不写表、真读。
+ *   写/执行工具的缓存语义不变（快照键控保证正确性）。
  */
 export async function invokeWithFingerprintCache(o: {
     tools: ToolRegistry;
@@ -213,7 +299,10 @@ export async function invokeWithFingerprintCache(o: {
         ...(snapshotHash !== undefined ? { snapshotHash } : {}),
     });
 
-    const cacheable = !NEVER_CACHE_TOOLS.has(o.tool);
+    // ★ 只读工具永不复用旧结果：新鲜度 > 毫秒级节省。指纹仍算出来（记账/去重统计用），
+    //   只是不参与缓存命中判定，也不写入 completed_tool_call。
+    const isReadonly = READONLY_TOOL_NAMES.includes(o.tool);
+    const cacheable = !isReadonly && !NEVER_CACHE_TOOLS.has(o.tool);
     if (cacheable) {
         const hit = o.ledger.cachedToolCall(fingerprint);
         if (hit) {
@@ -411,6 +500,24 @@ export async function runToolLoop(o: {
     const timeoutCounts = new Map<string, number>();
     /** 规格六.1：一次工具循环最多调用一个子 Agent */
     let subagentInvokedInLoop = false;
+    /** 重复调用链（9/15 软提醒）：连续相同键的计数，任何不同的调用把它重置为 1 */
+    let repeatKey: string | null = null;
+    let repeatStreak = 0;
+    /**
+     * 记账一次调用并产出（可能的）重复提醒文本。
+     * 口径对齐 dsh repeat-tool-reminder：连续计数、参数规范化、命中阈值 [3,5,8] 时
+     * 返回一条**软提醒**（只提醒不拦截——拦不拦由模型自己判断，引擎不替它决定）。
+     */
+    const noteRepeat = (tool: string, args: ToolArgs): string | null => {
+        const key = `${tool} ${canonicalArgsKey(args)}`;
+        if (key === repeatKey) repeatStreak++;
+        else { repeatKey = key; repeatStreak = 1; }
+        if (!REPEAT_REMINDER_THRESHOLDS.includes(repeatStreak)) return null;
+        o.ledger.appendEvent("repeat_tool_reminder", {
+            taskId: o.ctx.taskId, tool, streak: repeatStreak,
+        });
+        return repeatReminderText(tool, args, repeatStreak);
+    };
 
     while (steps < maxSteps) {
         // ★ 预占额度：先扣再发。崩在请求中途时，planned 已经落账，不会漏计这次调用。
@@ -497,11 +604,14 @@ export async function runToolLoop(o: {
                 });
                 toolCalls++;
                 transcript.push({ tool: c.tool, ok: result.ok, output: result.output.slice(0, 2000) });
+                // ★ 9/15 截断改造：头尾保留+明示省略（不再静默 slice(0,4000)）
                 history.push({
                     tool: c.tool, args: c.args, ok: result.ok,
-                    output: result.output.slice(0, 4000),
+                    output: clipForModel({ tool: c.tool, output: result.output, meta: result.meta }),
                     rejected: result.rejected ?? null,
                 });
+                const batchReminder = noteRepeat(c.tool, c.args);
+                if (batchReminder) history.push({ reminder: batchReminder });
             }
             steps++;
             continue;
@@ -603,12 +713,17 @@ export async function runToolLoop(o: {
 
         transcript.push({ tool: call.tool, ok: result.ok, output: result.output.slice(0, 2000) });
         const evidence = execEvidence(result.meta);
+        // ★ 9/15 截断改造：头尾保留+明示省略（不再静默 slice(0,4000)）。
+        //   有 rawOutputPath（执行类落盘全文）时给路径，readFile 提示 offset 续读。
         history.push({
             tool: call.tool, args: call.args, ok: result.ok,
-            output: result.output.slice(0, 4000),
+            output: clipForModel({ tool: call.tool, output: result.output, meta: result.meta }),
             rejected: result.rejected ?? null,
             ...(evidence ? { evidence } : {}),
         });
+        // ★ 9/15 重复调用软提醒（参考 dsh repeat-tool-reminder）：只提醒，不拦截
+        const reminder = noteRepeat(call.tool, call.args);
+        if (reminder) history.push({ reminder });
         steps++;
     }
 

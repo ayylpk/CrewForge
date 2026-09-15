@@ -365,6 +365,34 @@ export class Workspace {
         return { path: this.displayPath(abs), content: slice.toString("utf-8"), truncated, bytes: buf.byteLength };
     }
 
+    /**
+     * 按行区间读取（9/15 截断改造配套）：模型被裁剪后要能"续读"，而不是整文件重读。
+     * offset = 起始行号（1 起；<=0 或省略 = 从第 1 行），limit = 行数（省略 = 到文件末尾）。
+     * 返回的 content 是**含行号**的文本（"  12| ..."），方便模型引用与再次定位；
+     * startLine/endLine/totalLines 供工具层拼"续读指引"（endLine < totalLines 时给下一段 offset）。
+     */
+    readLines(target: string, offset?: number, limit?: number): {
+        path: string; content: string; startLine: number; endLine: number; totalLines: number;
+    } {
+        const abs = this.resolveRead(target);
+        const text = fs.readFileSync(abs, "utf-8");
+        const lines = text.split(/\r?\n/);
+        const total = lines.length;
+        const start = Math.max(1, Math.floor(offset ?? 1) || 1);
+        // limit 省略 / <=0 都按"读到末尾"处理（limit:0 不表达"读 0 行"这种无意义语义）
+        const count = limit === undefined || limit <= 0 ? total : Math.floor(limit);
+        const end = Math.min(total, start - 1 + count);
+        const width = String(end).length;
+        const body = lines
+            .slice(start - 1, end)
+            .map((l, i) => `${String(start + i).padStart(width, " ")}| ${l}`)
+            .join("\n");
+        return {
+            path: this.displayPath(abs), content: body,
+            startLine: start, endLine: end, totalLines: total,
+        };
+    }
+
     /** 递归遍历（只走 projectDir 内；跳过禁止段与常见重目录） */
     walk(start: string, opts?: { maxEntries?: number }): string[] {
         const root = this.resolveRead(start);

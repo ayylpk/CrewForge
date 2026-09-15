@@ -1,7 +1,22 @@
 // tools/editFile.ts —— 局部修改文件（增量修改的主手段）
 // 先确认 find 确实存在再写，避免"盲改"把文件整段冲掉。
+//
+// ★ 9/15 改（参考 dsh str_replace_editor 的 FS_AMBIGUOUS_EDIT 口径）：
+//   多命中时报**全部命中行号**。旧行为只说"命中 N 处"，模型得自己数行——
+//   多数情况还要再 readFile 一遍才能定位（又一轮往返）。给行号 = 少一轮。
 import { str } from "./registry";
 import type { ToolContext, ToolResult, ToolSpec } from "./registry";
+
+/** find 在 content 中出现的行号列表（1 起，逐个命中都报） */
+export function hitLines(content: string, find: string): number[] {
+    const out: number[] = [];
+    let idx = content.indexOf(find);
+    while (idx >= 0) {
+        out.push(content.slice(0, idx).split("\n").length);
+        idx = content.indexOf(find, idx + Math.max(1, find.length));
+    }
+    return out;
+}
 
 export const editFileTool: ToolSpec = {
     name: "editFile",
@@ -31,11 +46,17 @@ export const editFileTool: ToolSpec = {
             : before.content.replace(find, replace);
         const applied = all ? hits : 1;
 
+        // ★ 多命中且没给 all：报全部命中行号（模型据此决定是 all:true 还是改 find 更具体）
+        const lines = !all && hits > 1 ? hitLines(before.content, find) : [];
+        const detail = lines.length > 0
+            ? `命中 ${hits} 处（行 ${lines.join(", ")}），仅替换第 1 处；要全部替换请加 all:true，或把 find 改得更具体`
+            : `命中 ${hits} 处，替换 ${applied} 处`;
+
         const r = ctx.workspace.writeAtomic(target, after, { owner: ctx.owner, taskId: ctx.taskId });
         return {
             ok: true,
-            output: `已修改 ${r.path}（命中 ${hits} 处，替换 ${applied} 处）`,
-            meta: { hits, applied, ...r },
+            output: `已修改 ${r.path}（${detail}）`,
+            meta: { hits, applied, ...(lines.length > 0 ? { hitLines: lines } : {}), ...r },
         };
     },
 };
