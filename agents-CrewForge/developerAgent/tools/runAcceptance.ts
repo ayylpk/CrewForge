@@ -41,6 +41,9 @@ interface RehearsalItem {
     expectedStatus?: number;
     body?: unknown;
     expectBodyContains?: string;
+    auth?: { method: string; path: string; body?: unknown };
+    /** 前置步骤（播数据 / 取变量）——原样透传给探针 */
+    setup?: unknown[];
 }
 
 /**
@@ -98,6 +101,8 @@ function collectChecks(
                 expectedStatus: typeof c["expectedStatus"] === "number" ? c["expectedStatus"] : 200,
                 ...(c["body"] !== undefined ? { body: c["body"] } : {}),
                 ...(typeof c["expectBodyContains"] === "string" ? { expectBodyContains: c["expectBodyContains"] } : {}),
+                ...(c["auth"] ? { auth: c["auth"] as { method: string; path: string; body?: unknown } } : {}),
+                ...(Array.isArray(c["setup"]) ? { setup: c["setup"] as unknown[] } : {}),
             });
             continue;
         }
@@ -225,6 +230,8 @@ export const runAcceptanceTool: ToolSpec = {
                 expectedStatus: item.expectedStatus ?? 200,
                 ...(item.body !== undefined ? { body: item.body } : {}),
                 ...(item.expectBodyContains ? { expectBodyContains: item.expectBodyContains } : {}),
+                ...(item.auth ? { auth: item.auth } : {}),
+                ...(item.setup ? { setup: item.setup as ContractIntent["setup"] } : {}),
             };
             const r = await runContractProbe({
                 projectDirAbs, serve, intent,

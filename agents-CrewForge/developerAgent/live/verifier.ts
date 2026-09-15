@@ -190,6 +190,8 @@ export function prepareCheck(projectDir: string, check: AcceptanceCheck & { id: 
             ...(c.body !== undefined ? { body: c.body } : {}),
             ...(typeof c.expectBodyContains === "string" ? { expectBodyContains: c.expectBodyContains } : {}),
             ...(c.auth ? { auth: c.auth } : {}),
+            // 前置步骤（播数据/取变量）：与 Developer 侧 runAcceptance 走同一份执行逻辑
+            ...(Array.isArray(c.setup) ? { setup: c.setup } : {}),
         });
         return {
             check,

@@ -12,7 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { budgetText } from "../realLlm";
-import { suggestServeCommand } from "../../contractProbeCore";
+import { pickByPath, suggestServeCommand, fillVars, fillVarsDeep } from "../../contractProbeCore";
 import { prepareCheck } from "../live/verifier";
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cforge-accept-"));
@@ -162,5 +162,50 @@ describe("verifier / CONTRACT 判据的翻译（验收通道打通）", () => {
         expect(def.exec?.cwd).toBe("backend");
         const over = prepareCheck(proj, { id: "c2", kind: "CONTRACT", method: "GET", path: "/x", serveCwd: "frontend" } as never);
         expect(over.exec?.cwd).toBe("frontend");
+    });
+
+    it("多步契约（setup）原样透传：播数据 + 取变量都不能丢", () => {
+        const proj = mk("vproj4", { "backend/package.json": JSON.stringify({ scripts: { dev: "node src/index.js" } }) });
+        const setup = [
+            { method: "POST", path: "/api/todos", body: { title: "A" }, expectedStatus: 201, extract: { name: "id", from: "data.id" } },
+            { method: "PATCH", path: "/api/todos/{id}", body: { completed: true }, expectedStatus: 200 },
+        ];
+        const p = prepareCheck(proj, {
+            id: "ac-9", kind: "CONTRACT", method: "GET", path: "/api/todos?status=completed", expectedStatus: 200, setup,
+        } as never);
+        const intent = JSON.parse(String(p.exec?.args[5]));
+        expect(intent.setup).toEqual(setup);              // 一步不少、字段不变形
+        expect(intent.path).toBe("/api/todos?status=completed");
+    });
+});
+
+// ============================================================
+describe("多步契约的变量机制（真实应用需要「先播数据再断言筛选」）", () => {
+    it("pickByPath 按点路径取值，支持数组下标", () => {
+        const obj = { data: { id: 7, items: [{ key: "k0" }, { key: "k1" }] } };
+        expect(pickByPath(obj, "data.id")).toBe(7);
+        expect(pickByPath(obj, "data.items.1.key")).toBe("k1");
+        expect(pickByPath(obj, "id")).toBeUndefined();          // 没有就是 undefined，不猜
+        expect(pickByPath(obj, "data.missing.deep")).toBeUndefined();
+        expect(pickByPath(null, "a.b")).toBeUndefined();
+    });
+
+    it("fillVars 只替换已定义的占位符；未定义的**原样保留**（让它显式失败而不是悄悄发错请求）", () => {
+        expect(fillVars("/api/todos/{id}", { id: "42" })).toBe("/api/todos/42");
+        expect(fillVars("/api/todos/{nope}", {})).toBe("/api/todos/{nope}");
+        expect(fillVars("/api/{a}/{b}", { a: "x", b: "y" })).toBe("/api/x/y");
+    });
+
+    it("fillVarsDeep 穿透对象与数组（body 里的占位符也能填）", () => {
+        const out = fillVarsDeep({ title: "t-{id}", tags: ["{id}", "fixed"], nested: { ref: "{id}" } }, { id: "9" }) as Record<string, unknown>;
+        expect(out["title"]).toBe("t-9");
+        expect(out["tags"]).toEqual(["9", "fixed"]);
+        expect((out["nested"] as Record<string, unknown>)["ref"]).toBe("9");
+    });
+
+    it("非字符串/非对象原样返回（数字布尔不被字符串化）", () => {
+        expect(fillVarsDeep(7, { })).toBe(7);
+        expect(fillVarsDeep(true, { })).toBe(true);
+        expect(fillVarsDeep(null, { })).toBeNull();
     });
 });

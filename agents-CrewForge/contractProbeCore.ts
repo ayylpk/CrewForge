@@ -29,6 +29,31 @@ export interface ServeSpec {
     healthPath?: string;
 }
 
+/**
+ * 前置请求：主断言之前按序执行的请求（播数据 / 取依赖）。
+ *
+ *   ★ 为什么需要：真实应用的契约大多**不是孤立的一发**——
+ *     "按分类筛选"要先有数据、"删除"要先有可删的对象。
+ *     没有前置步骤时，这类判据只能退化成"打个 200 就算过"（弱到没有意义）。
+ *
+ *   两种用法：
+ *     · 纯播种：{ method:"POST", path:"/api/x", body:{...}, expectedStatus:201 }；
+ *     · 取变量：加 extract，把响应里的字段存进变量池，供后续步骤与主请求
+ *       用 `{name}` 占位符引用（path 与 body 里都能用）。
+ *
+ *   ⚠️ 断言强度不变：任一前置步骤不达预期状态 → 整个检查**立即失败**并如实报现场，
+ *      绝不"跳过前置照打主请求"（那会让"没播上数据"伪装成"筛选正确"）。
+ */
+export interface ContractSetupStep {
+    method: string;
+    path: string;
+    body?: unknown;
+    /** 期望状态码；缺省 = 2xx */
+    expectedStatus?: number;
+    /** 从响应里取值：{ name: "id", from: "data.id" }（点路径，相对 JSON 根） */
+    extract?: { name: string; from: string };
+}
+
 /** 一条契约断言 */
 export interface ContractIntent {
     method: string;
@@ -38,6 +63,8 @@ export interface ContractIntent {
     expectBodyContains?: string;
     /** 登录前置：先打这个接口拿 token，再以 Bearer 发本检查 */
     auth?: { method: string; path: string; body?: unknown };
+    /** 前置请求序列（按序执行；失败即整个检查失败） */
+    setup?: ContractSetupStep[];
 }
 
 export interface ContractProbeResult {
@@ -107,6 +134,44 @@ export function extractToken(text: string): string | null {
         if (typeof cand === "string" && cand) return cand;
     }
     return null;
+}
+
+/**
+ * 按点路径从 JSON 里取值（"data.id" / "id" / "items.0.id"）。
+ * 取不到返回 undefined——调用方据此报"前置步骤没有预期的字段"，不猜测、不兜底。
+ */
+export function pickByPath(root: unknown, dotPath: string): unknown {
+    let cur: unknown = root;
+    for (const seg of dotPath.split(".")) {
+        if (cur === null || cur === undefined) return undefined;
+        if (Array.isArray(cur)) {
+            const idx = Number(seg);
+            if (!Number.isInteger(idx)) return undefined;
+            cur = cur[idx];
+            continue;
+        }
+        if (typeof cur !== "object") return undefined;
+        cur = (cur as Record<string, unknown>)[seg];
+    }
+    return cur;
+}
+
+/** 把 "..." 里的 {name} 占位符换成变量池里的值（未定义的占位符原样保留，让它显式失败） */
+export function fillVars(text: string, vars: Record<string, string>): string {
+    return text.replace(/\{(\w+)\}/g, (m, name: string) =>
+        Object.prototype.hasOwnProperty.call(vars, name) ? vars[name]! : m);
+}
+
+/** 递归替换 body 里字符串中的占位符（对象/数组穿透） */
+export function fillVarsDeep(value: unknown, vars: Record<string, string>): unknown {
+    if (typeof value === "string") return fillVars(value, vars);
+    if (Array.isArray(value)) return value.map((v) => fillVarsDeep(v, vars));
+    if (value && typeof value === "object") {
+        const out: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(value as Record<string, unknown>)) out[k] = fillVarsDeep(v, vars);
+        return out;
+    }
+    return value;
 }
 
 /**
@@ -190,47 +255,109 @@ export async function runContractProbe(o: {
                     authHeader = { authorization: `Bearer ${token}` };
                     say("probe: token 已取得");
                 }
-                // —— 正式契约请求 ——
+                // —— 前置步骤（可选）：按序播数据 / 取变量 ——
+                //   失败即整个检查失败（绝不"跳过前置照打主请求"——
+                //   那会让"没播上数据"伪装成"筛选正确"）。
+                const vars: Record<string, string> = {};
+                const setupLogs: string[] = [];
+                for (const [si, step] of (o.intent.setup ?? []).entries()) {
+                    const setupInit: RequestInit = {
+                        method: step.method.toUpperCase(),
+                        headers: { "content-type": "application/json", ...authHeader },
+                        signal: AbortSignal.timeout(requestTimeoutMs),
+                    };
+                    if (step.body !== undefined && !["GET", "HEAD"].includes(setupInit.method as string)) {
+                        setupInit.body = JSON.stringify(fillVarsDeep(step.body, vars));
+                    }
+                    const setupPath = fillVars(step.path, vars);
+                    const sres = await fetch(`http://127.0.0.1:${port}${setupPath}`, setupInit);
+                    const sbody = await sres.text();
+                    const wantOk = step.expectedStatus !== undefined
+                        ? sres.status === step.expectedStatus
+                        : sres.status >= 200 && sres.status < 300;
+                    const line = `probe: [前置 ${si + 1}/${(o.intent.setup ?? []).length}] ${setupInit.method} ${setupPath} → ${sres.status}（期望 ${step.expectedStatus ?? "2xx"}）`;
+                    say(line);
+                    setupLogs.push(line);
+                    if (!wantOk) {
+                        return {
+                            ok: false,
+                            output: [...setupLogs, `正文片段 ${sbody.replace(/\s+/g, " ").slice(0, 600)}`,
+                                `前置步骤失败：第 ${si + 1} 步 ${setupInit.method} ${setupPath} 返回 ${sres.status}`,
+                                "（前置没成，主契约断言不执行——避免把失败伪装成通过）"].join("\n"),
+                            meta: {
+                                kind: "setup_failed", step: si + 1, method: setupInit.method, path: setupPath,
+                                actualStatus: sres.status, expectedStatus: step.expectedStatus ?? "2xx",
+                                bodyPreview: sbody.slice(0, 1000), exitCode: 1,
+                            },
+                        };
+                    }
+                    if (step.extract) {
+                        let parsed: unknown;
+                        try { parsed = JSON.parse(sbody); } catch { parsed = undefined; }
+                        const got = pickByPath(parsed, step.extract.from);
+                        if (got === undefined || got === null) {
+                            return {
+                                ok: false,
+                                output: [...setupLogs, `正文片段 ${sbody.replace(/\s+/g, " ").slice(0, 600)}`,
+                                    `前置步骤取值失败：第 ${si + 1} 步的响应里找不到 ${step.extract.from}（要存成 {${step.extract.name}}）`,
+                                    "（取值没成，后续步骤的占位符无法填——主契约断言不执行）"].join("\n"),
+                                meta: {
+                                    kind: "setup_extract_failed", step: si + 1, from: step.extract.from,
+                                    bodyPreview: sbody.slice(0, 1000), exitCode: 1,
+                                },
+                            };
+                        }
+                        vars[step.extract.name] = String(got);
+                        const gotLine = `probe: [前置 ${si + 1}] 取值 {${step.extract.name}} = ${String(got).slice(0, 80)}`;
+                        say(gotLine);
+                        setupLogs.push(gotLine);
+                    }
+                }
+
+                // —— 正式契约请求（path/body 里的 {name} 用前置取的变量填） ——
+                const mainPath = fillVars(o.intent.path, vars);
                 const init: RequestInit = {
                     method: o.intent.method.toUpperCase(),
                     headers: { "content-type": "application/json", ...authHeader },
                     signal: AbortSignal.timeout(requestTimeoutMs),
                 };
                 if (o.intent.body !== undefined && !["GET", "HEAD"].includes(init.method as string)) {
-                    init.body = JSON.stringify(o.intent.body);
+                    init.body = JSON.stringify(fillVarsDeep(o.intent.body, vars));
                 }
-                const res = await fetch(`http://127.0.0.1:${port}${o.intent.path}`, init);
+                const res = await fetch(`http://127.0.0.1:${port}${mainPath}`, init);
                 const body = await res.text();
-                const head = `probe: ${init.method} ${o.intent.path} → ${res.status}（期望 ${o.intent.expectedStatus}），正文 ${body.length}B`;
+                const head = `probe: ${init.method} ${mainPath} → ${res.status}（期望 ${o.intent.expectedStatus}），正文 ${body.length}B`;
                 say(head);
                 say(`probe: 正文片段 ${body.replace(/\s+/g, " ").slice(0, 300)}`);
 
                 const meta: Record<string, unknown> = {
-                    port, method: init.method, path: o.intent.path,
+                    port, method: init.method, path: mainPath,
                     expectedStatus: o.intent.expectedStatus, actualStatus: res.status,
                     bodyBytes: body.length, bodyPreview: body.slice(0, 1000),
+                    ...(setupLogs.length > 0 ? { setupLogs, vars: { ...vars } } : {}),
                     exitCode: (res.status === o.intent.expectedStatus ? 0 : 1),
                     durationMs: Date.now() - startedAt,
                 };
+                const pre = setupLogs.length > 0 ? `${setupLogs.join("\n")}\n` : "";
                 if (res.status !== o.intent.expectedStatus) {
                     return {
                         ok: false,
-                        output: `${head}\n正文片段 ${body.replace(/\s+/g, " ").slice(0, 600)}\n`
-                            + `契约断言失败：期望 HTTP ${o.intent.expectedStatus}，实际 ${res.status}（${init.method} ${o.intent.path}）`,
+                        output: `${pre}${head}\n正文片段 ${body.replace(/\s+/g, " ").slice(0, 600)}\n`
+                            + `契约断言失败：期望 HTTP ${o.intent.expectedStatus}，实际 ${res.status}（${init.method} ${mainPath}）`,
                         meta,
                     };
                 }
                 if (o.intent.expectBodyContains && !body.includes(o.intent.expectBodyContains)) {
                     return {
                         ok: false,
-                        output: `${head}\n正文片段 ${body.replace(/\s+/g, " ").slice(0, 600)}\n`
+                        output: `${pre}${head}\n正文片段 ${body.replace(/\s+/g, " ").slice(0, 600)}\n`
                             + `关键字断言失败：正文应包含「${o.intent.expectBodyContains}」`,
                         meta,
                     };
                 }
                 return {
                     ok: true,
-                    output: `${head}\n正文片段 ${body.replace(/\s+/g, " ").slice(0, 600)}\n契约通过。`,
+                    output: `${pre}${head}\n正文片段 ${body.replace(/\s+/g, " ").slice(0, 600)}\n契约通过。`,
                     meta,
                 };
             }
