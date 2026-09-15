@@ -150,7 +150,7 @@ if (PREPLACE) {
 
 // ---------- ② LLM：真模型 or 冒烟脚本假 ----------
 
-const tokenTally = { calls: 0, input: 0, output: 0, maxTokensCuts: 0 };
+const tokenTally = { calls: 0, input: 0, output: 0, maxTokensCuts: 0, retries: 0, escalations: 0, cacheRead: 0 };
 let realLlm: ReturnType<typeof createRealLlm> | null = null;
 const progress = { writes: 0, streak: 0 }; // 止损①：连续 5 次无写盘且无有效工具决策
 
@@ -173,7 +173,15 @@ const llm: DeveloperLlm = FAKE
                     onCall: (i) => {
                         tokenTally.calls++; tokenTally.input += i.inputTokens; tokenTally.output += i.outputTokens;
                         if (i.stopReason === "max_tokens") tokenTally.maxTokensCuts++;
-                        say(`[llm#${tokenTally.calls}] ${i.latencyMs}ms in=${i.inputTokens} out=${i.outputTokens} stop=${i.stopReason}`);
+                        // 9/15 批 C：累计重试/升档次数与缓存命中（进运行报告，r5 复盘用）。
+                        // attempts 是这一步的**首发总数**：没升档时 1 次首发，升档时 2 次
+                        // （截断那次 + 升档那次），余下的才是瞬时故障重试的次数。
+                        const firstSends = i.escalated ? 2 : 1;
+                        tokenTally.retries += Math.max(i.attempts - firstSends, 0);
+                        tokenTally.escalations += i.escalated ? 1 : 0;
+                        tokenTally.cacheRead += i.cacheReadTokens;
+                        const extra = i.attempts > 1 ? ` [${i.escalated ? "升档" : "重试"}×${i.attempts}]` : "";
+                        say(`[llm#${tokenTally.calls}] ${i.latencyMs}ms in=${i.inputTokens} out=${i.outputTokens} stop=${i.stopReason}${extra}`);
                     },
                 });
             }
@@ -446,7 +454,7 @@ if (state === null) throw new Error("unreachable: finish(no-state) exits the pro
 const snap = handle.inspectTaskState();
 console.log("\n===== 结果 =====");
 console.log(`status=${state.status} 测试轮数=${rounds} llmCalls=${state.llmCallsCompleted}/${state.llmCallsPlanned} toolCalls=${state.toolCalls} repairs=${state.repairAttempts}`);
-console.log(`tokens in=${tokenTally.input} out=${tokenTally.output} maxTokens顶格=${tokenTally.maxTokensCuts}`);
+console.log(`tokens in=${tokenTally.input} out=${tokenTally.output} maxTokens顶格=${tokenTally.maxTokensCuts} 重试=${tokenTally.retries} 升档=${tokenTally.escalations} cache命中=${tokenTally.cacheRead}`);
 console.log(`changedFiles(${state.changedFiles.length})`);
 if (state.error) console.log(`error: ${state.error}`);
 await finish("terminal", state);

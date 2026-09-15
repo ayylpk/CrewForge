@@ -170,7 +170,11 @@ const lazyLlm = {
             realLlm = createRealLlm({
                 onCall: (i) => {
                     llmSeq++;
-                    console.log(`[llm#${llmSeq}] ${i.latencyMs}ms in=${i.inputTokens} out=${i.outputTokens} → ${i.rawText.slice(0, 160).replace(/\s+/g, " ")}`);
+                    // 9/15 批 C：attempts>1 时标注是重试还是升档，并附缓存命中——
+                    // 否则 r5 复盘时"这一步为什么贵"没有线索（in/out 只是合计）。
+                    const extra = i.attempts > 1 ? ` [${i.escalated ? "升档" : "重试"}×${i.attempts}]` : "";
+                    const cache = i.cacheReadTokens > 0 ? ` cache=${i.cacheReadTokens}` : "";
+                    console.log(`[llm#${llmSeq}] ${i.latencyMs}ms in=${i.inputTokens} out=${i.outputTokens}${cache}${extra} → ${i.rawText.slice(0, 160).replace(/\s+/g, " ")}`);
                 },
             });
         }

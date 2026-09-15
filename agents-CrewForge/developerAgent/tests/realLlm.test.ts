@@ -6,7 +6,12 @@
 //   ③ 原生 tool_use（缺省）——工具进 tools 字段、tool_use 块出决策、无工具=完成。
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { coerceDecision } from "../graph";
-import { createRealLlm, extractJson, fromAnthropicContent, toAnthropicTools } from "../realLlm";
+import {
+    createRealLlm, extractJson, fromAnthropicContent, toAnthropicTools,
+    ESCALATED_MAX_TOKENS, isRetryableStatus, parseRetryAfterMs,
+    RETRY_AFTER_MAX_MS, RETRY_INITIAL_DELAY_MS, RETRY_MAX_DELAY_MS, RETRY_MAX_RETRIES,
+    retryDelayMs,
+} from "../realLlm";
 
 // ---------- ① extractJson：脏输出抠 JSON ----------
 
@@ -214,7 +219,33 @@ function stubFetch(reply: { status?: number; text?: string; body?: unknown }) {
     return calls;
 }
 
+/** 按序回复的假 fetch：第 N 个请求用 replies[N]（用尽后一直用最后一个） */
+function stubSequence(replies: { status?: number; text?: string; body?: unknown; headers?: Record<string, string> }[]) {
+    const calls: Captured[] = [];
+    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+        const i = calls.length;
+        calls.push({ url: String(url), init: init ?? {} });
+        const reply = replies[Math.min(i, replies.length - 1)]!;
+        if (reply.status !== undefined && reply.status !== 200) {
+            return new Response(reply.text ?? '{"error":"boom"}', {
+                status: reply.status, headers: reply.headers ?? { "content-type": "application/json" },
+            });
+        }
+        const payload = reply.body ?? {
+            content: [{ type: "text", text: reply.text ?? "" }],
+            stop_reason: "end_turn",
+            usage: { input_tokens: 111, output_tokens: 22 },
+        };
+        return new Response(JSON.stringify(payload), {
+            status: 200, headers: reply.headers ?? { "content-type": "application/json" },
+        });
+    }) as typeof fetch;
+    return calls;
+}
+
 const BASE_OPTS = { baseUrl: "https://fake.test/apps/anthropic", authToken: "sk-test-123", model: "qwen3.8-flash" };
+/** 批 C 集成用例统一用它：退避压到 1ms，测试不真等 */
+const FAST_RETRY = { retryInitialDelayMs: 1 };
 
 beforeEach(() => { globalThis.fetch = realFetch; });
 afterEach(() => { globalThis.fetch = realFetch; });
@@ -237,7 +268,9 @@ describe("realLlm / HTTP 契约（公共）", () => {
     it("非 2xx → 抛错并带状态码与响应体片段（网关错误原文可见）", async () => {
         globalThis.fetch = (async () =>
             new Response('{"error":{"message":"throttling: too many requests"}}', { status: 429 })) as unknown as typeof fetch;
-        const llm = createRealLlm(BASE_OPTS);
+        // maxRetries:0 = 关掉 9/15 批 C 的内部重试，专门验"错误原文原样带出"这一条
+        // （重试行为本身在下面「重试退避」一节的用例里验）
+        const llm = createRealLlm({ ...BASE_OPTS, maxRetries: 0 });
         await expect(llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] }))
             .rejects.toThrow(/429.*throttling/s);
     });
@@ -369,5 +402,282 @@ describe("realLlm / 文本协议保底（nativeTools:false，行为与 9/14 前�
             if (saved === undefined) delete process.env.DEVELOPER_LLM_NATIVE_TOOLS;
             else process.env.DEVELOPER_LLM_NATIVE_TOOLS = saved;
         }
+    });
+});
+
+// ---------- 9/15 批 C：重试退避 / max_tokens 升档 / usage 缓存记账 ----------
+
+describe("batchC / retryDelayMs（纯函数：指数 × 对称抖动，双侧有界）", () => {
+    it("random=0 取下界、random=1 取上界，最坏不越 RETRY_MAX_DELAY_MS", () => {
+        const lo = (r: number) => retryDelayMs(r, () => 0);
+        const hi = (r: number) => retryDelayMs(r, () => 1);
+        // 第 1 次：500ms 基准，抖动 ±10% → [450, 550]（对齐 dsh retry-policy.ts:17 的 0.1）
+        expect(lo(1)).toBeCloseTo(450, 5);
+        expect(hi(1)).toBeCloseTo(550, 5);
+        // 第 2 次：×2 → [900, 1100]
+        expect(lo(2)).toBeCloseTo(900, 5);
+        expect(hi(2)).toBeCloseTo(1100, 5);
+        // 第 5 次起基准已顶到 8000，**上限只夹上侧**（dsh index.ts:63 同款：
+        // 先 min 出 exponential，再乘抖动，最后再 min 一次）——所以下界仍随抖动下浮。
+        expect(hi(5)).toBe(RETRY_MAX_DELAY_MS);
+        expect(lo(5)).toBeCloseTo(7200, 5);          // 8000 × 0.9
+        expect(hi(20)).toBe(RETRY_MAX_DELAY_MS);     // 无论第几次，上界永不越顶
+    });
+
+    it("单调不减（同 random 下退避必须逐步拉长，不能倒退）", () => {
+        const seq: number[] = [];
+        for (let r = 1; r <= 6; r++) seq.push(retryDelayMs(r, () => 0.5));
+        for (let i = 1; i < seq.length; i++) expect(seq[i]!).toBeGreaterThanOrEqual(seq[i - 1]!);
+    });
+
+    it("对称抖动确实两侧都有（不是 cc 那种只加不减）", () => {
+        // 取足够多的样本：必须同时出现小于基准和大于基准的取值
+        let below = 0, above = 0;
+        for (let i = 0; i < 200; i++) {
+            const d = retryDelayMs(1, Math.random);
+            if (d < RETRY_INITIAL_DELAY_MS) below++;
+            if (d > RETRY_INITIAL_DELAY_MS) above++;
+        }
+        expect(below).toBeGreaterThan(0);
+        expect(above).toBeGreaterThan(0);
+    });
+});
+
+describe("batchC / 状态码分类（对齐 cc withRetry.ts:696-786 shouldRetry 判定表）", () => {
+    it("429 限流 / 5xx 服务端 / 408 超时 / 409 冲突 → 可重试", () => {
+        for (const s of [408, 409, 429, 500, 502, 503, 504, 529]) {
+            expect(isRetryableStatus(s)).toBe(true);
+        }
+    });
+
+    it("400 / 401 / 403 / 404 → **不重试**（重发一百次还是同一个错，只会拖慢失败）", () => {
+        for (const s of [400, 401, 403, 404, 422]) {
+            expect(isRetryableStatus(s)).toBe(false);
+        }
+    });
+});
+
+describe("batchC / parseRetryAfterMs（读服务端指定等待，带上限）", () => {
+    it("秒数形式：原样换算", () => {
+        expect(parseRetryAfterMs(new Headers({ "retry-after": "3" }))).toBe(3000);
+        expect(parseRetryAfterMs(new Headers({ "retry-after": "0" }))).toBe(0);
+    });
+
+    it("超过 RETRY_AFTER_MAX_MS 被夹住（防服务端给 3600 把任务挂死）", () => {
+        expect(parseRetryAfterMs(new Headers({ "retry-after": "3600" }))).toBe(RETRY_AFTER_MAX_MS);
+    });
+
+    it("HTTP-date 形式可解析；缺失/垃圾值返回 null（落回自己的退避公式）", () => {
+        const at = new Date(Date.now() + 5000).toUTCString();
+        const ms = parseRetryAfterMs(new Headers({ "retry-after": at }));
+        expect(ms).toBeGreaterThan(3000);
+        expect(ms).toBeLessThanOrEqual(5000);
+        expect(parseRetryAfterMs(new Headers())).toBeNull();
+        expect(parseRetryAfterMs(new Headers({ "retry-after": "soon-ish" }))).toBeNull();
+    });
+});
+
+describe("batchC / 重试的接线（mock fetch，零真调用）", () => {
+    it("429 → 自动重试；第 2 次成功即返回，calls() 仍只算 1 步", async () => {
+        const calls = stubSequence([
+            { status: 429, text: "throttling" },
+            { body: { content: [{ type: "tool_use", id: "t", name: "readFile", input: { path: "a.ts" } }], stop_reason: "tool_use", usage: { input_tokens: 7, output_tokens: 3 } } },
+        ]);
+        const infos: { attempts: number; inputTokens: number; outputTokens: number }[] = [];
+        const llm = createRealLlm({ ...BASE_OPTS, ...FAST_RETRY, onCall: (i) => infos.push({ attempts: i.attempts, inputTokens: i.inputTokens, outputTokens: i.outputTokens }) });
+        const raw = await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] });
+
+        expect(calls.length).toBe(2);                  // 真发了 2 次
+        expect(llm.calls()).toBe(1);                   // 但只是"一步"
+        expect(coerceDecision(raw)?.kind).toBe("tool");
+        expect(infos.length).toBe(1);                  // onCall 一步只报一次
+        expect(infos[0]!.attempts).toBe(2);            // 报出背后发了 2 发
+    });
+
+    it("连败超过 RETRY_MAX_RETRIES 才抛错，且错误原文是**最后一次**的", async () => {
+        const calls = stubSequence([
+            { status: 500, text: "first failure" },
+            { status: 503, text: "second failure" },
+            { status: 502, text: "final failure" },
+        ]);
+        const llm = createRealLlm({ ...BASE_OPTS, ...FAST_RETRY });
+        await expect(llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] }))
+            .rejects.toThrow(/502.*final failure/s);
+        expect(calls.length).toBe(1 + RETRY_MAX_RETRIES);   // 1 首发 + 2 重试
+    });
+
+    it("4xx（400 请求不合法）**不重试**：一发即抛，别浪费预算", async () => {
+        const calls = stubSequence([{ status: 400, text: "bad request" }]);
+        const llm = createRealLlm({ ...BASE_OPTS, ...FAST_RETRY });
+        await expect(llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] }))
+            .rejects.toThrow(/400/);
+        expect(calls.length).toBe(1);
+    });
+
+    it("maxRetries:0 → 关掉内部重试（行为退回 9/15 前，交 graph 层按步容错）", async () => {
+        const calls = stubSequence([{ status: 429, text: "throttling" }]);
+        const llm = createRealLlm({ ...BASE_OPTS, maxRetries: 0, ...FAST_RETRY });
+        await expect(llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] }))
+            .rejects.toThrow(/429/);
+        expect(calls.length).toBe(1);
+    });
+
+    it("网络层异常（fetch 直接 reject）也重试——连接重置/抖动是瞬时故障", async () => {
+        let n = 0;
+        globalThis.fetch = (async () => {
+            n++;
+            if (n === 1) throw new TypeError("fetch failed: ECONNRESET");
+            return new Response(JSON.stringify({ content: [{ type: "text", text: "好了" }], stop_reason: "end_turn", usage: {} }), {
+                status: 200, headers: { "content-type": "application/json" },
+            });
+        }) as unknown as typeof fetch;
+        const llm = createRealLlm({ ...BASE_OPTS, ...FAST_RETRY });
+        const d = coerceDecision(await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] }));
+        expect(d?.kind).toBe("done");
+        expect(n).toBe(2);
+    });
+
+    it("超时类失败**不重试**（已烧掉整个 timeoutMs，再试就成十二分钟一步）", async () => {
+        let n = 0;
+        globalThis.fetch = (async (_u: unknown, init?: RequestInit) => {
+            n++;
+            // 模拟"一次请求恰好耗尽超时"：等到 signal 中止，抛出的正是超时错误
+            await new Promise((_r, rej) => {
+                const s = init?.signal as AbortSignal | undefined;
+                const t = setTimeout(() => rej(new Error("模拟：请求超时")), 30);
+                s?.addEventListener("abort", () => { clearTimeout(t); rej(new Error("模拟：请求超时")); });
+            });
+            throw new Error("unreachable");
+        }) as unknown as typeof fetch;
+        // timeoutMs=20 → 第一次必然超时且耗光预算；退避首档 1ms 也救不回来
+        const llm = createRealLlm({ ...BASE_OPTS, timeoutMs: 20, retryInitialDelayMs: 1 });
+        await expect(llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] }))
+            .rejects.toThrow(/超时/);
+        expect(n).toBe(1);                            // 只发了一发
+    });
+
+    it("服务端 Retry-After 优先于自身退避（并受 30s 上限保护）", async () => {
+        const calls = stubSequence([
+            { status: 429, text: "slow down", headers: { "content-type": "application/json", "retry-after": "0" } },
+            { text: "完成" },
+        ]);
+        const startedAt = Date.now();
+        const llm = createRealLlm({ ...BASE_OPTS, ...FAST_RETRY });
+        await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] });
+        expect(calls.length).toBe(2);
+        expect(Date.now() - startedAt).toBeLessThan(1000);   // retry-after:0 → 不该等出自身退避
+    });
+});
+
+describe("batchC / max_tokens 升档（cc utils/context.ts 8000→64000 同款结构）", () => {
+    const truncated = {
+        body: {
+            content: [{ type: "text", text: "我正在创建" }],
+            stop_reason: "max_tokens",
+            usage: { input_tokens: 10, output_tokens: 8192 },
+        },
+    };
+    const done = { text: "完成" };
+
+    it("截断 → 用 ESCALATED_MAX_TOKENS 重发同一份请求，升档后正常返回", async () => {
+        const calls = stubSequence([truncated, done]);
+        const llm = createRealLlm({ ...BASE_OPTS, ...FAST_RETRY });
+        const d = coerceDecision(await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] }));
+
+        expect(calls.length).toBe(2);
+        const first = JSON.parse(String(calls[0]!.init.body));
+        const second = JSON.parse(String(calls[1]!.init.body));
+        expect(first.max_tokens).toBe(8192);
+        expect(second.max_tokens).toBe(ESCALATED_MAX_TOKENS);
+        // 重发的是"同一份请求"：除 max_tokens 外全部一致（缓存前缀不白费）
+        delete first.max_tokens; delete second.max_tokens;
+        expect(second).toEqual(first);
+        expect(d?.kind).toBe("done");
+    });
+
+    it("只升一次：升档后还是截断就不再抬价（不反复烧钱，交上层判失败）", async () => {
+        const calls = stubSequence([truncated]);
+        const llm = createRealLlm({ ...BASE_OPTS, ...FAST_RETRY });
+        const raw = await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] });
+        expect(calls.length).toBe(2);                       // 1 首 + 1 升档，没有第 3 发
+        expect(coerceDecision(raw)).toBeNull();             // 仍是截断 → 按一步失败计费
+    });
+
+    it("调用方显式给了 maxTokens → 守住不被突破（对齐 cc maxOutputTokensOverride 守卫）", async () => {
+        const calls = stubSequence([truncated, done]);
+        const llm = createRealLlm({ ...BASE_OPTS, maxTokens: 4096, ...FAST_RETRY });
+        await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] });
+        expect(calls.length).toBe(1);                       // 一次都没重发
+        expect(JSON.parse(String(calls[0]!.init.body)).max_tokens).toBe(4096);
+    });
+
+    it("escalateOnMaxTokens:false → 一键关掉升档", async () => {
+        const calls = stubSequence([truncated]);
+        const llm = createRealLlm({ ...BASE_OPTS, escalateOnMaxTokens: false, ...FAST_RETRY });
+        await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] });
+        expect(calls.length).toBe(1);
+    });
+});
+
+describe("batchC / usage 缓存记账（只读不发，模型无关）", () => {
+    it("cache_read / cache_creation 读到就报；inputTokens 不做减法（Anthropic 协议是互斥计数）", async () => {
+        stubFetch({
+            body: {
+                content: [{ type: "text", text: "完成" }],
+                stop_reason: "end_turn",
+                usage: {
+                    input_tokens: 100, output_tokens: 20,
+                    cache_read_input_tokens: 900, cache_creation_input_tokens: 50,
+                },
+            },
+        });
+        const seen: { input: number; cacheRead: number; cacheCreation: number }[] = [];
+        const llm = createRealLlm({ ...BASE_OPTS, onCall: (i) => seen.push({ input: i.inputTokens, cacheRead: i.cacheReadTokens, cacheCreation: i.cacheCreationTokens }) });
+        await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] });
+
+        expect(seen[0]!.input).toBe(100);            // 原样，**没有**减去缓存命中
+        expect(seen[0]!.cacheRead).toBe(900);
+        expect(seen[0]!.cacheCreation).toBe(50);
+    });
+
+    it("网关不返回缓存字段 → 记 0（不猜、不估）", async () => {
+        stubFetch({ text: "完成" });
+        const seen: number[] = [];
+        const llm = createRealLlm({ ...BASE_OPTS, onCall: (i) => seen.push(i.cacheReadTokens) });
+        await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] });
+        expect(seen[0]).toBe(0);
+    });
+
+    it("重试/升档时 token 累加（这一步的真实总消耗，计费口径）", async () => {
+        // 第 1 发截断（10+8192）→ 升档第 2 发（30+100）：onCall 应报合计
+        const calls = stubSequence([
+            { body: { content: [{ type: "text", text: "截" }], stop_reason: "max_tokens", usage: { input_tokens: 10, output_tokens: 8192 } } },
+            { body: { content: [{ type: "text", text: "好" }], stop_reason: "end_turn", usage: { input_tokens: 30, output_tokens: 100 } } },
+        ]);
+        const seen: { input: number; output: number; attempts: number }[] = [];
+        const llm = createRealLlm({ ...BASE_OPTS, ...FAST_RETRY, onCall: (i) => seen.push({ input: i.inputTokens, output: i.outputTokens, attempts: i.attempts }) });
+        await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] });
+
+        expect(calls.length).toBe(2);
+        expect(seen[0]!.input).toBe(40);             // 10 + 30
+        expect(seen[0]!.output).toBe(8292);          // 8192 + 100
+        expect(seen[0]!.attempts).toBe(2);
+    });
+
+    it("escalated 标志把「升档」与「重试」区分开（attempts=2 时 r5 才能分清是哪一种）", async () => {
+        const infos: boolean[] = [];
+        // 场景一：瞬时故障重试 → escalated=false
+        stubSequence([{ status: 503, text: "boom" }, { text: "完成" }]);
+        const a = createRealLlm({ ...BASE_OPTS, ...FAST_RETRY, onCall: (i) => infos.push(i.escalated) });
+        await a.next({ system: "s", task: "t", skill: null, history: [], tools: [] });
+        // 场景二：升档重发 → escalated=true
+        stubSequence([
+            { body: { content: [{ type: "text", text: "截" }], stop_reason: "max_tokens", usage: {} } },
+            { text: "完成" },
+        ]);
+        const b = createRealLlm({ ...BASE_OPTS, ...FAST_RETRY, onCall: (i) => infos.push(i.escalated) });
+        await b.next({ system: "s", task: "t", skill: null, history: [], tools: [] });
+
+        expect(infos).toEqual([false, true]);
     });
 });

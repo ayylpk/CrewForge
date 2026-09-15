@@ -39,9 +39,13 @@ function ok(cond: boolean, label: string) {
 }
 
 const llm = createRealLlm({
-    // 每次调用的观测：延迟 + token 用量，肉眼确认计费量级正常
+    // 每次调用的观测：延迟 + token 用量，肉眼确认计费量级正常。
+    // 9/15 批 C：额外打 attempts/escalated/缓存命中——重试与升档都是**内部**多发，
+    // 不打出来就完全看不见（账面上仍是一步）。
     onCall: (i) => console.log(
-        `  [call#${i.seq}] ${i.latencyMs}ms in=${i.inputTokens} out=${i.outputTokens} stop=${i.stopReason}`),
+        `  [call#${i.seq}] ${i.latencyMs}ms in=${i.inputTokens} out=${i.outputTokens} stop=${i.stopReason}`
+        + ` attempts=${i.attempts}${i.escalated ? "(升档)" : ""}`
+        + ` cache=${i.cacheReadTokens}/${i.cacheCreationTokens}`),
 });
 
 console.log(`model=${llm.id}`);

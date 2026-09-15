@@ -17,8 +17,11 @@
 //   · 保底：DEVELOPER_LLM_NATIVE_TOOLS=0 或 nativeTools:false 一键退回旧文本协议。
 //
 // 设计约束（对齐 README 阶段 6）：
-//   · 一次 next() = 一次 HTTP 请求 = 一个决策。不做多轮对话，不做内部重试——
-//     重试/预算由 graph 的 llmBudget + Ledger 预占计数统一管，这里再重试会双记账。
+//   · 一次 next() = 一个决策（= 一条 llm_call_planned 台账）。**不等于**一次 HTTP 请求：
+//     9/15 批 C 起，瞬时故障（429/5xx/网络抖动）在 next() 内部退避重试；max_tokens 截断
+//     会一次性升档重发。两者都不改变"一步一账"的记账语义——预占/对账发生在
+//     runToolLoop 的**步**粒度（graph.ts:671 planned++），同一步内部多发几次请求
+//     只是这一步的真实成本，不会让台账多记一笔。需要防的是**跨步重试**，那才记账错位。
 //   · 解析不了把原文交回，coerceDecision 兜底判定，失败按一步计费（规格九）。
 //
 // 配置来源（env，由 .env 提供）：
@@ -39,13 +42,35 @@ export interface RealLlmOptions {
     model?: string;
     /** 单次回复 token 上限 */
     maxTokens?: number;
-    /** 单次请求超时（毫秒）；超时=抛错，由上层按一步失败处理 */
+    /**
+     * 单次请求超时（毫秒）。9/15 批 C 起它**兼任这一步的重试总预算**：
+     * 退避等待若会让本步总时长越过这个值，就不重试了，直接抛错给上层按步容错。
+     * 效果是"这一步最坏花单次超时的两倍时间"，且超时类失败天然不会被重试（详见 send）。
+     */
     timeoutMs?: number;
     /**
      * 是否使用原生 tool_use（缺省 true，可用 env DEVELOPER_LLM_NATIVE_TOOLS=0 关闭）。
      * 关闭后回到"工具描述进文本、模型吐 JSON"的旧协议，行为与 9/14 前完全一致。
      */
     nativeTools?: boolean;
+    /**
+     * 瞬时故障（429/5xx/网络抖动）在同一次 next() 内的退避重试次数上限。
+     * 缺省 RETRY_MAX_RETRIES；传 0 = 关闭内部重试（行为退回 9/15 前：一次失败即抛，
+     * 由 graph 的 llmErrorStreak 兜底）。**不改记账语义**：重试发生在"一步"内部。
+     */
+    maxRetries?: number;
+    /**
+     * 退避首档（毫秒）。缺省 RETRY_INITIAL_DELAY_MS=500（dsh/cc 同款）。
+     * 做成可配是为了**测试能把它压到 1ms**——集成用例不该真等 1.5 秒；
+     * dsh 的 initialDelayMs 同样是可配置项（`retry-policy.ts:26`）。
+     */
+    retryInitialDelayMs?: number;
+    /**
+     * stop_reason=max_tokens（输出被截断）时是否升档重发一次。
+     * 缺省 true。**仅当调用方没显式传 maxTokens 时生效**——显式给了上限就是明确意图，
+     * 不该被适配器偷偷突破（对齐 cc `query.ts:1199-1201` 的 `maxOutputTokensOverride === undefined` 守卫）。
+     */
+    escalateOnMaxTokens?: boolean;
     /** 每次调用后的观测钩子（trace/统计用，不参与决策） */
     onCall?: (info: {
         seq: number;
@@ -56,6 +81,14 @@ export interface RealLlmOptions {
         rawText: string;
         /** 本次决策来自原生 tool_use 还是文本协议（观测用） */
         mode: "native" | "text";
+        /** 命中提示缓存的输入 token（Anthropic 协议字段，读到就报，读不到为 0） */
+        cacheReadTokens: number;
+        /** 本次写入提示缓存的输入 token（同上） */
+        cacheCreationTokens: number;
+        /** 这一步实际发了几次 HTTP 请求（重试/升档会 >1；调用方 = 1 次 next()） */
+        attempts: number;
+        /** 这一步是否发生过 max_tokens 升档重发（与"瞬时故障重试"区分开，r5 观测要分开看） */
+        escalated: boolean;
     }) => void;
 }
 
@@ -63,7 +96,13 @@ export interface RealLlmOptions {
 interface MessagesResponse {
     content?: { type: string; text?: string; id?: string; name?: string; input?: unknown }[];
     stop_reason?: string;
-    usage?: { input_tokens?: number; output_tokens?: number };
+    usage?: {
+        input_tokens?: number;
+        output_tokens?: number;
+        /** 提示缓存命中/写入的输入 token（9/15 批 C：只读出来记账，不参与请求构造） */
+        cache_read_input_tokens?: number;
+        cache_creation_input_tokens?: number;
+    };
 }
 
 // ============================================================
@@ -237,6 +276,74 @@ export function extractJson(text: string): unknown {
 // 适配器主体
 // ============================================================
 
+// ---------- 9/15 批 C：重试退避 / 升档（纯函数，与模型无关） ----------
+
+/**
+ * 可重试的 HTTP 状态码。
+ * 判定表对齐 cc `claude-code-source/src/services/api/withRetry.ts:696-786`（shouldRetry）：
+ *   408 请求超时 / 409 锁冲突 / 429 限流 / >=500 服务端错误 → 可重试；
+ *   400（请求本身不合法）/ 401 / 403（凭证不对）/ 404（端点或模型名错）→ **不重试**：
+ *   这类错重发一百次还是同一个错，只会把失败拖慢。
+ * 网络层异常（fetch 直接 reject：连接重置 / DNS 失败 / 超时中止）由调用点兜底，一律可重试
+ * （cc 同款：`APIConnectionError → true`）。
+ */
+export function isRetryableStatus(status: number): boolean {
+    return status === 408 || status === 409 || status === 429 || status >= 500;
+}
+
+/** 退避首档（毫秒）；对齐 dsh `llm/llm/src/retry-policy.ts:15` 与 cc `withRetry.ts:55` 的 500 */
+export const RETRY_INITIAL_DELAY_MS = 500;
+/** 单次退避上限；dsh `retry-policy.ts:16` 是 10s，我们取 8s（乘数只有 ×2、档数少，够用且更保守） */
+export const RETRY_MAX_DELAY_MS = 8_000;
+/** 对称抖动比例；对齐 dsh `retry-policy.ts:17`（cc 是只加不减的 25%，dsh 双侧更均匀，我们跟 dsh） */
+export const RETRY_JITTER_RATIO = 0.1;
+/** 瞬时故障重试次数上限（首次之后最多再发 2 次，共 3 次请求）。 */
+export const RETRY_MAX_RETRIES = 2;
+/** 服务端 `Retry-After` 的采纳上限；对齐 opencode `session/retry.ts:29` 的 30_000（防服务端给个 3600 把任务挂死） */
+export const RETRY_AFTER_MAX_MS = 30_000;
+/** max_tokens 截断后的升档值。cc `utils/context.ts:24-25` 是 8000→64000；
+ *  我们 8192→32768，因为 32768 是本仓库真机跑过的档位（`live/architect-cli.ts:78`） */
+export const ESCALATED_MAX_TOKENS = 32_768;
+
+/**
+ * 第 retry 次重试前的等待毫秒数（retry 从 1 起算）。
+ * 公式对齐 dsh `llm/llm-retry/src/index.ts:61-63`：指数退避 × **对称**抖动——
+ *   exponential = min(initial × 2^(retry-1), max)
+ *   jitter      = 1 − r + 2r·random()        → 落在 [1−r, 1+r] 双侧
+ *   return min(exponential × jitter, max)
+ * 对称（可早可晚）避免"同批请求整点重放"；末位再兜一次上限，保证最坏情况可控。
+ * random 可注入 → 测试用固定序列断言边界，生产用 Math.random。
+ */
+export function retryDelayMs(
+    retry: number,
+    random: () => number = Math.random,
+    initialDelayMs: number = RETRY_INITIAL_DELAY_MS,
+): number {
+    const exponent = Math.min(Math.max(retry - 1, 0), 16);   // 防爆指数（dsh 同款 clamp）
+    const exponential = Math.min(initialDelayMs * 2 ** exponent, RETRY_MAX_DELAY_MS);
+    const jitter = 1 - RETRY_JITTER_RATIO + 2 * RETRY_JITTER_RATIO * random();
+    return Math.min(exponential * jitter, RETRY_MAX_DELAY_MS);
+}
+
+/**
+ * 解析 `Retry-After` 响应头（RFC 7231：秒数或 HTTP-date），解析不出返回 null。
+ * 读头不写语义、纯协议层，与模型无关。
+ */
+export function parseRetryAfterMs(headers: Headers): number | null {
+    const raw = headers.get("retry-after");
+    if (!raw) return null;
+    const secs = Number(raw.trim());
+    if (Number.isFinite(secs) && secs >= 0) return Math.min(secs * 1000, RETRY_AFTER_MAX_MS);
+    const at = Date.parse(raw);
+    if (!Number.isNaN(at)) return Math.min(Math.max(at - Date.now(), 0), RETRY_AFTER_MAX_MS);
+    return null;
+}
+
+/** 退避等待（不参与任何超时口径：超时是"单次请求"的，退避是"两次请求之间"的） */
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export function createRealLlm(opts: RealLlmOptions = {}): DeveloperLlm {
     const baseUrl = (opts.baseUrl ?? process.env.ANTHROPIC_BASE_URL ?? "").replace(/\/+$/, "");
     const authToken = opts.authToken ?? process.env.ANTHROPIC_AUTH_TOKEN ?? "";
@@ -249,6 +356,10 @@ export function createRealLlm(opts: RealLlmOptions = {}): DeveloperLlm {
     const timeoutMs = opts.timeoutMs ?? 240_000;
     // 原生 tool_use 开关：显式选项优先，其次 env，缺省开。
     const native = opts.nativeTools ?? (process.env.DEVELOPER_LLM_NATIVE_TOOLS !== "0");
+    // 9/15 批 C：瞬时故障重试次数 / max_tokens 升档开关（可关，缺省开）。
+    const maxRetries = opts.maxRetries ?? RETRY_MAX_RETRIES;
+    const escalateOnMaxTokens = opts.escalateOnMaxTokens ?? true;
+    const retryInitialDelayMs = opts.retryInitialDelayMs ?? RETRY_INITIAL_DELAY_MS;
 
     if (!baseUrl) throw new Error("realLlm：缺 ANTHROPIC_BASE_URL（端点未配置）");
     if (!authToken) throw new Error("realLlm：缺 ANTHROPIC_AUTH_TOKEN（token 未配置）");
@@ -280,40 +391,122 @@ export function createRealLlm(opts: RealLlmOptions = {}): DeveloperLlm {
                     : `请根据以上信息，给出下一步动作。只输出一个 JSON 对象。`,
             ].filter(Boolean).join("\n\n");
 
-            const body: Record<string, unknown> = {
-                model,
-                max_tokens: maxTokens,
-                system: input.system + "\n" + (native ? NATIVE_PROTOCOL : DECISION_PROTOCOL),
-                messages: [{ role: "user", content: user }],
+            const systemText = input.system + "\n" + (native ? NATIVE_PROTOCOL : DECISION_PROTOCOL);
+
+            /**
+             * 单次 HTTP 尝试（不含重试）。不抛错，把"能不能重试"和"服务端要求的等待"
+             * 一并带出来交给重试环决策——分类逻辑与发送逻辑分开，才好单测。
+             */
+            const postOnce = async (cap: number): Promise<
+                | { ok: true; data: MessagesResponse }
+                | { ok: false; error: Error; retryable: boolean; retryAfterMs: number | null }
+            > => {
+                const body: Record<string, unknown> = {
+                    model,
+                    max_tokens: cap,
+                    system: systemText,
+                    messages: [{ role: "user", content: user }],
+                };
+                if (native && tools.length > 0) {
+                    body["tools"] = toAnthropicTools(tools);
+                    // ③并行：放开 disable_parallel_tool_use。记账语义由两道结构保证——
+                    //   · fromAnthropicContent 把"多 tool_use"收窄为【全只读批 or 降级取一】；
+                    //   · graph 的 runToolLoop 把一个 batch 当**一步**记账（1 次 API 调用
+                    //     仍然只对应一条 llm_call_planned 台账），批内并发执行。
+                    // 混入非只读工具的批次会在解析层降级，"写/执行一轮一个"不受影响。
+                    body["tool_choice"] = { type: "auto" };
+                }
+                try {
+                    const res = await fetch(`${baseUrl}/v1/messages`, {
+                        method: "POST",
+                        headers: {
+                            "content-type": "application/json",
+                            "authorization": `Bearer ${authToken}`,
+                            "anthropic-version": "2023-06-01",
+                        },
+                        body: JSON.stringify(body),
+                        signal: AbortSignal.timeout(timeoutMs),
+                    });
+                    if (!res.ok) {
+                        // 抛错前先读 body：把网关错误原文带出来，方便定位（限流/余额/模型名错）
+                        const errBody = await res.text().catch(() => "");
+                        return {
+                            ok: false,
+                            error: new Error(`realLlm：HTTP ${res.status} ${errBody.slice(0, 500)}`),
+                            retryable: isRetryableStatus(res.status),
+                            retryAfterMs: parseRetryAfterMs(res.headers),
+                        };
+                    }
+                    return { ok: true, data: await res.json() as MessagesResponse };
+                } catch (e) {
+                    // 网络层异常（连接重置 / DNS 失败 / 超时中止）和畸形响应体：一律可重试
+                    // （cc 同款：APIConnectionError → true；dsh 同款：TRANSPORT / TIMEOUT 在名单里）。
+                    // 唯一例外由下面的总预算兜住——超时已经烧掉整整一个 timeoutMs，重试没预算了。
+                    return { ok: false, error: e as Error, retryable: true, retryAfterMs: null };
+                }
             };
-            if (native && tools.length > 0) {
-                body["tools"] = toAnthropicTools(tools);
-                // ③并行：放开 disable_parallel_tool_use。记账语义由两道结构保证——
-                //   · fromAnthropicContent 把"多 tool_use"收窄为【全只读批 or 降级取一】；
-                //   · graph 的 runToolLoop 把一个 batch 当**一步**记账（1 次 API 调用
-                //     仍然只对应一条 llm_call_planned 台账），批内并发执行。
-                // 混入非只读工具的批次会在解析层降级，"写/执行一轮一个"不受影响。
-                body["tool_choice"] = { type: "auto" };
+
+            /**
+             * 带退避重试的发送：**同一步内部**最多再发 maxRetries 次。
+             * 总时长预算 = 单次 timeoutMs，即"这一步最多花单次超时的两倍时间"。
+             * 有意为之的推论：**超时类失败不会被重试**——第一次就烧掉 240s 时，
+             * 再等一拍就越预算，立刻把错误交回 graph 层走它的按步容错；
+             * 免得一个步骤卡成十几分钟（T3b 教训：慢 ≠ 死，但慢到底会拖死整个任务）。
+             */
+            const send = async (cap: number): Promise<{ data: MessagesResponse; attempts: number }> => {
+                let lastError = new Error("realLlm：未知失败（没有产生任何错误对象）");
+                let attempts = 0;
+                for (let i = 0; ; i++) {
+                    attempts++;
+                    const r = await postOnce(cap);
+                    if (r.ok) return { data: r.data, attempts };
+                    lastError = r.error;
+                    if (!r.retryable || i >= maxRetries) break;
+                    const waitMs = r.retryAfterMs ?? retryDelayMs(i + 1, Math.random, retryInitialDelayMs);
+                    // 越预算 → 不试了（`>=`：服务端给 retry-after:0 又恰好卡着预算时
+                    // 也不能再试——那一发最多再等一个 timeoutMs，白等）
+                    if (Date.now() - startedAt + waitMs >= timeoutMs) break;
+                    await sleep(waitMs);
+                }
+                throw lastError;
+            };
+
+            // 重试/升档会发多次请求，账要合起来报：onCall 每次 next() **只报一次**，
+            // attempts 说明背后实际发了几发，token 数值是这一步的真实总消耗（计费口径）。
+            let attemptsTotal = 0;
+            let inputTokens = 0;
+            let outputTokens = 0;
+            let cacheReadTokens = 0;
+            let cacheCreationTokens = 0;
+            const accumulate = (d: MessagesResponse): void => {
+                inputTokens += d.usage?.input_tokens ?? 0;
+                outputTokens += d.usage?.output_tokens ?? 0;
+                cacheReadTokens += d.usage?.cache_read_input_tokens ?? 0;
+                cacheCreationTokens += d.usage?.cache_creation_input_tokens ?? 0;
+            };
+
+            let sent = await send(maxTokens);
+            attemptsTotal += sent.attempts;
+            accumulate(sent.data);
+            let escalated = false;
+
+            // 9/15 批 C：max_tokens 截断 → 升档重发同一份请求（cc utils/context.ts:24-25
+            // 的 8000→64000 同款结构；cc 那边只升一次，我们也只升一次，不反复抬价）。
+            // 守卫对齐 cc query.ts:1199-1201 的 maxOutputTokensOverride === undefined：
+            // 调用方**显式**给了 maxTokens 就是明确意图，适配器不擅自突破。
+            //
+            // 注意这里**有意**不走上面的时长预算：它不是"赌这次能成"的重试，而是对
+            // 已知条件的确定性补救——截断说明模型的推理就是塞不进 8192，原样重发一百次
+            // 还是截断（graph 层下一轮也用同一个上限，会一直失败）。不补这一下，
+            // "模型话多"就变成永久性失败；补了最多多花一次请求。
+            if (sent.data.stop_reason === "max_tokens" && escalateOnMaxTokens && opts.maxTokens === undefined) {
+                escalated = true;
+                sent = await send(ESCALATED_MAX_TOKENS);
+                attemptsTotal += sent.attempts;
+                accumulate(sent.data);
             }
 
-            const res = await fetch(`${baseUrl}/v1/messages`, {
-                method: "POST",
-                headers: {
-                    "content-type": "application/json",
-                    "authorization": `Bearer ${authToken}`,
-                    "anthropic-version": "2023-06-01",
-                },
-                body: JSON.stringify(body),
-                signal: AbortSignal.timeout(timeoutMs),
-            });
-
-            if (!res.ok) {
-                // 抛错前先读 body：把网关错误原文带出来，方便定位（限流/余额/模型名错）
-                const errBody = await res.text().catch(() => "");
-                throw new Error(`realLlm：HTTP ${res.status} ${errBody.slice(0, 500)}`);
-            }
-
-            const data = await res.json() as MessagesResponse;
+            const data = sent.data;
             const rawText = (data.content ?? [])
                 .filter((b) => b.type === "text" && b.text)
                 .map((b) => b.text)
@@ -321,12 +514,16 @@ export function createRealLlm(opts: RealLlmOptions = {}): DeveloperLlm {
 
             opts.onCall?.({
                 seq: calls,
-                latencyMs: Date.now() - startedAt,
-                inputTokens: data.usage?.input_tokens ?? 0,
-                outputTokens: data.usage?.output_tokens ?? 0,
+                latencyMs: Date.now() - startedAt,   // 一步的总墙钟（含退避等待与升档重发）
+                inputTokens,
+                outputTokens,
                 stopReason: data.stop_reason ?? "?",
                 rawText,
                 mode: native ? "native" : "text",
+                cacheReadTokens,
+                cacheCreationTokens,
+                attempts: attemptsTotal,
+                escalated,
             });
 
             // 原生模式：tool_use 块直接出决策；旧模式：文本抠 JSON。
