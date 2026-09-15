@@ -179,6 +179,151 @@ export function clipForModel(o: {
     return `${head}\n\n⋯[中段省略 ${omitted} 字符；${hint}]⋯\n\n${tail}`;
 }
 
+/** 单个字符串参数（典型：writeFile 的整文件正文）进模型上下文的上限（字符） */
+export const MODEL_ARG_FIELD_LIMIT = 4096;
+
+/**
+ * 参数字段裁剪（9/15 批 B）。
+ *
+ *   缺口：批 A 只给 **结果**（output）加了护栏，**参数**（args）侧此前是**完全没有上限**的
+ *   上下文入口。一次 writeFile 的 args.content 就是整个文件正文，它会被
+ *   realLlm 的 JSON.stringify(history) 带进**后续每一轮** prompt，而同一轮的
+ *   result 里只有"已写入"几个字——几十 KB 进上下文换不来任何新信息，
+ *   文件就在磁盘上，模型要读随时 readFile。
+ *
+ *   做法与 clipForModel 同口径（头尾保留 + 明示省略，不静默），
+ *   只裁**超长的字符串字段**；路径 / 命令 / 行号这类短参数原样不动。
+ */
+export function clipArgsForModel(args: ToolArgs): ToolArgs {
+    const out: ToolArgs = {};
+    for (const [key, value] of Object.entries(args ?? {})) {
+        if (typeof value !== "string" || value.length <= MODEL_ARG_FIELD_LIMIT) {
+            out[key] = value;
+            continue;
+        }
+        const half = Math.floor(MODEL_ARG_FIELD_LIMIT / 2);
+        const omitted = value.length - half * 2;
+        // 防幻觉的关键一句：**调用本身是按完整参数执行的**，被省略的只是"记录里的一段正文"。
+        // 不写清楚，模型可能以为"文件只写了一半"而重写整个文件（越压越错）。
+        out[key] = `${value.slice(0, half)}\n`
+            + `⋯[该参数中段省略 ${omitted} 字符（仅本条记录省略）；调用已按**完整**参数执行，`
+            + `文件内容以磁盘为准，需要请 readFile]⋯\n${value.slice(-half)}`;
+    }
+    return out;
+}
+
+// ============================================================
+// 历史总量护栏（9/15 批 B）—— 防越窗的确定性压缩，**不是**记忆/摘要
+//
+//   为什么需要：history 单条有 clipForModel 封顶 8192，但**总量无上限**。
+//   条数由 maxSteps 决定（可配，实弹里用到过 30），30 × 8192 ≈ 245K 字符，
+//   足够顶爆任何 128K 窗口的模型。越窗 = API 400 = 这一步白烧，连败几次任务就死了。
+//
+//   口径（对齐四家参考的**确定性层**，零 LLM、零额外请求）：
+//     · 触发看**总量字符**——量的就是 realLlm 真正 stringify 发出去的那一份，不估不猜；
+//     · 最近 HISTORY_PROTECT_CHARS 个字符**永不折叠**（模型手头的工作集不许被抽走，
+//       这是 dsh/opencode/cc 三家共同的红线：cc 原话是"清空全部结果会让模型失去全部工作上下文"）；
+//     · 从**最老**的条目开始折，**一旦降到预算内立刻停手**（最小干预；
+//       opencode 甚至要求"省下的量不够多就不折"，同一个意思——防过度压缩）；
+//     · 被折条目**保留 tool + 参数摘要 + ok**：模型仍知道"我做过什么、成没成"，
+//       只是拿不到旧输出的正文——这样它不会误以为"没查过"而重跑，也不会凭空脑补结果；
+//     · 折叠**幂等**（打 folded 标记，重复扫描不二次切割）且**明示**（绝不静默）。
+//
+//   为什么不上 LLM 摘要：那要多一次 API 调用 + 一段延迟，而墙钟 97.8% 本来就在等 LLM。
+//   确定性折叠零成本零延迟，先把"越窗"这个硬故障堵上；摘要层等真机数据证明不够再谈。
+// ============================================================
+
+/** 历史总字符预算；超过就从最老的条目开始折叠 */
+export const HISTORY_BUDGET_CHARS = 96_000;
+/** 最近这段字符数永不折叠（从最新一条往回累计；约 4 条满额工具结果） */
+export const HISTORY_PROTECT_CHARS = 32_768;
+/** 折叠后放在 output 位置的标记文案（模型看得到，明示这里被移除过） */
+export const HISTORY_FOLDED_NOTE =
+    "[历史折叠] 本条工具结果已从上下文移除（工具名与参数摘要保留）。"
+    + "该调用**已经按原样执行过**，改动已落盘——不要因此重做一遍；"
+    + "需要这条结果的内容请重新调用该工具，或直接读文件核对。";
+
+export interface HistoryPruneResult {
+    /** 本次折叠的条目数 */
+    folded: number;
+    charsBefore: number;
+    charsAfter: number;
+}
+
+/** 一条 history 条目的字符数（= realLlm 真正发出去的 JSON 形态） */
+function historyEntryChars(entry: unknown): number {
+    try { return JSON.stringify(entry)?.length ?? 0; } catch { return 0; }
+}
+
+/** 折叠条目里单个字符串参数的保留上限（比 clipArgsForModel 更狠——这里连"记录"都不留全） */
+const FOLDED_ARG_FIELD_LIMIT = 200;
+
+/**
+ * 折后保留的参数摘要：**逐字段**处理，只压大块字符串。
+ *
+ *   不能把整个 args 换成一个摘要串——`path` 这类**定位信息**必须原样留住，
+ *   否则模型折叠后连"我写过哪个文件 / 在哪个目录跑的"都不知道，
+ *   一知半解比不知道更危险（会去猜、去重做）。压掉的只有正文本身。
+ */
+function foldArgsDigest(args: unknown): unknown {
+    if (!args || typeof args !== "object") return args ?? {};
+    const out: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(args as Record<string, unknown>)) {
+        out[key] = typeof value === "string" && value.length > FOLDED_ARG_FIELD_LIMIT
+            ? `${value.slice(0, FOLDED_ARG_FIELD_LIMIT)}…（原 ${value.length} 字符，已省略）`
+            : value;
+    }
+    return out;
+}
+
+/**
+ * 历史总量护栏：超预算时把**最老**的工具结果条目折成骨架（原地修改 history）。
+ *
+ *   只折"带 tool 字段"的条目——error / reminder 这类小条目承载的是**指令语义**
+ *   （比如重复调用提醒），折掉会把刹车片一起拆了，而且它们本来就不占地方。
+ */
+export function pruneHistory(history: unknown[], o?: {
+    budgetChars?: number;
+    protectChars?: number;
+}): HistoryPruneResult {
+    const budget = o?.budgetChars ?? HISTORY_BUDGET_CHARS;
+    const protect = o?.protectChars ?? HISTORY_PROTECT_CHARS;
+
+    let total = 0;
+    for (const e of history) total += historyEntryChars(e);
+    if (total <= budget) return { folded: 0, charsBefore: total, charsAfter: total };
+
+    // 保护窗：从最新一条往回累计，累计量没超 protect 的条目全部进保护区
+    let protectedFrom = history.length;
+    let acc = 0;
+    for (let i = history.length - 1; i >= 0; i--) {
+        acc += historyEntryChars(history[i]);
+        if (acc > protect) break;
+        protectedFrom = i;
+    }
+
+    let folded = 0;
+    let chars = total;
+    for (let i = 0; i < protectedFrom && chars > budget; i++) {
+        const raw = history[i];
+        if (!raw || typeof raw !== "object") continue;
+        const entry = raw as Record<string, unknown>;
+        if (typeof entry["tool"] !== "string") continue;      // 只折工具结果
+        if (entry["folded"] === true) continue;               // 幂等：已折过的不再动
+        const before = historyEntryChars(entry);
+        history[i] = {
+            tool: entry["tool"],
+            args: foldArgsDigest(entry["args"]),
+            ok: entry["ok"] === true,
+            output: HISTORY_FOLDED_NOTE,
+            folded: true,
+        };
+        chars -= before - historyEntryChars(history[i]);
+        folded++;
+    }
+    return { folded, charsBefore: total, charsAfter: chars };
+}
+
 /**
  * 重复调用提醒（9/15 加，参考 dsh repeat-tool-reminder）。
  *
@@ -525,6 +670,17 @@ export async function runToolLoop(o: {
         planned++;
         o.ledger.appendEvent("llm_call_planned", { taskId: o.ctx.taskId, seq: planned });
 
+        // ★ 9/15 批 B：发车前过一遍总量护栏（纯字符计数、零 LLM、零延迟）。
+        //   放在这里而不是 push 之后，是因为这是 history **唯一**被送出去的地方——
+        //   在这一处设闸，就没有任何路径能绕过它（连错误路径 push 进去的条目也一并受管）。
+        const prune = pruneHistory(history);
+        if (prune.folded > 0) {
+            o.ledger.appendEvent("history_folded", {
+                taskId: o.ctx.taskId, seq: planned + 1, folded: prune.folded,
+                charsBefore: prune.charsBefore, charsAfter: prune.charsAfter,
+            });
+        }
+
         let raw: unknown;
         try {
             raw = await o.llm.next({
@@ -605,8 +761,9 @@ export async function runToolLoop(o: {
                 toolCalls++;
                 transcript.push({ tool: c.tool, ok: result.ok, output: result.output.slice(0, 2000) });
                 // ★ 9/15 截断改造：头尾保留+明示省略（不再静默 slice(0,4000)）
+                // ★ 批 B 补 args 侧护栏：writeFile 的整文件正文以前会随每次 stringify 进上下文
                 history.push({
-                    tool: c.tool, args: c.args, ok: result.ok,
+                    tool: c.tool, args: clipArgsForModel(c.args), ok: result.ok,
                     output: clipForModel({ tool: c.tool, output: result.output, meta: result.meta }),
                     rejected: result.rejected ?? null,
                 });
@@ -716,7 +873,7 @@ export async function runToolLoop(o: {
         // ★ 9/15 截断改造：头尾保留+明示省略（不再静默 slice(0,4000)）。
         //   有 rawOutputPath（执行类落盘全文）时给路径，readFile 提示 offset 续读。
         history.push({
-            tool: call.tool, args: call.args, ok: result.ok,
+            tool: call.tool, args: clipArgsForModel(call.args), ok: result.ok,
             output: clipForModel({ tool: call.tool, output: result.output, meta: result.meta }),
             rejected: result.rejected ?? null,
             ...(evidence ? { evidence } : {}),
