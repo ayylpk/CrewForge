@@ -102,7 +102,44 @@ interface MessagesResponse {
         /** 提示缓存命中/写入的输入 token（9/15 批 C：只读出来记账，不参与请求构造） */
         cache_read_input_tokens?: number;
         cache_creation_input_tokens?: number;
+        /**
+         * 9/15 批 D：同一份缓存数据的**另一套字段名**。
+         * 实测（`live/cache-probe.ts`，本机网关）三个字段同时出现且数值一致：
+         *   cache_read_input_tokens = prompt_tokens_details.cached_tokens = 2824
+         * 这是 OpenAI 风格的写法，网关做协议转换时会一并带上。
+         * 不兜底的话：某个网关只给这套字段 → 我们记成 0 → **误判"缓存没命中"**，
+         * 观测数据骗人比没有观测更糟（dsh `translate.ts:47` 的 `a ?? b` 兜底链同款思路）。
+         * 我们**不发送**任何缓存相关字段，只是把服务端报的数读出来（读不写语义）。
+         */
+        prompt_tokens_details?: { cached_tokens?: number };
+        /** 写入的另一种形状：Anthropic 新协议把它拆成按 TTL 分档的对象 */
+        cache_creation?: { ephemeral_5m_input_tokens?: number; ephemeral_1h_input_tokens?: number };
     };
+}
+
+/**
+ * 从 usage 里读出"命中缓存"的 token 数（读不出来返回 0，**绝不猜**）。
+ * 兜底链的原因见上面 `prompt_tokens_details` 的注释：同一事实的多种字段名，
+ * 挨个试一遍。这是协议层适配，与具体模型无关。
+ */
+export function readCacheReadTokens(u: MessagesResponse["usage"]): number {
+    return u?.cache_read_input_tokens ?? u?.prompt_tokens_details?.cached_tokens ?? 0;
+}
+
+/**
+ * 从 usage 里读出"写入缓存"的 token 数。
+ *
+ * ⚠️ 这里**刻意取较大值而不是求和**：`cache_creation_input_tokens` 与
+ * `cache_creation.ephemeral_*_input_tokens` 是**同一数值的两种编码**（实测三个字段
+ * 数值完全相等，见 cache-probe 输出），加起来会翻倍。
+ * 取 max 而非"优先读第一个"：万一某个网关只填分档对象、把平铺字段留成 0，
+ * 优先读第一个就会**漏记**（0 是合法值，没法用 `??` 区分"没给"和"给了 0"）。
+ */
+export function readCacheCreationTokens(u: MessagesResponse["usage"]): number {
+    const flat = u?.cache_creation_input_tokens ?? 0;
+    const c = u?.cache_creation;
+    const byTtl = (c?.ephemeral_5m_input_tokens ?? 0) + (c?.ephemeral_1h_input_tokens ?? 0);
+    return Math.max(flat, byTtl);
 }
 
 // ============================================================
@@ -344,6 +381,53 @@ function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// ---------- 9/15 批 D：请求前缀的**顺序契约**（实测支撑，别随手改） ----------
+
+/**
+ * 把一轮上下文拼成 user 消息。
+ *
+ * ★ 段的顺序是**性能关键**，不是排版偏好：稳定段必须在前、每轮变化的段必须在后。
+ *
+ * 依据（`live/cache-probe.ts` 三组各 4 轮实测，本机网关）：
+ *   组 A（本形状，无 cache_control）= 命中率 90-93%，命中数**恒定** 6144，写入恒为 0；
+ *   组 B（分块 + 在稳定段末尾打 cache_control）= 命中率掉到 47-50%，
+ *         且**每轮多付一笔写入**（3220→3576，增量正好是新增 history 的体积）。
+ * 即：本网关走**隐式前缀缓存**，命中长短取决于"最长公共前缀"有多长；
+ * 显式 cache_control 在这条链路上不但没有增益，反而把变化段也拉进写入计费。
+ * （dsh 在 DeepSeek 那条线上同样不发标记、靠服务端隐式前缀缓存——`llm-deepseek/src`
+ *   里没有任何 cache_control；它只在 pi-ai 兼容层保留了 `cacheControlFormat` 开关，
+ *   那是给"端点声明自己支持哪种格式"用的适配位，不是默认开启的策略。）
+ *
+ * ⚠️ 因此：**不要把 history 挪到前面，也不要在中间插入每轮变化的内容**。
+ * 那样做不会报错，只会**悄悄变贵**——这是最难受的一类退化。
+ * 顺序由 `tests/realLlm.test.ts` 的"前缀顺序契约"一条钉住。
+ *
+ * 边界：结论只对"走本机网关"这条链路成立；换网关（直连 Anthropic）时
+ * 显式标记可能更优——但**我们不发任何缓存字段**，所以换网关也不会变差，只是可能少省。
+ */
+export function renderUserMessage(
+    input: { task: string; skill: string | null; history: unknown[] },
+    native: boolean,
+    tools: ToolDescriptorLike[],
+): string {
+    const stable = [
+        `## 任务\n${input.task}`,
+        input.skill ? `## 当前技能指引\n${input.skill}` : "",
+        // 旧文本协议下工具清单进文本（每轮相同 → 也算稳定段）；
+        // 原生模式下工具走 tools 字段，不在这里重复（省 token、免二义）
+        !native && tools.length > 0 ? `## 可用工具\n${JSON.stringify(tools, null, 0)}` : "",
+    ].filter(Boolean).join("\n\n");
+
+    // ↓ 变化段：history 每轮都在追加，必须垫在稳定段之后
+    const varying = `## 已执行步骤（按时间顺序，最后一条是上一步结果）\n${JSON.stringify(input.history)}`;
+
+    const tail = native
+        ? `请根据以上信息，给出下一步动作（要动手就调用工具；全部完成就直接说明）。`
+        : `请根据以上信息，给出下一步动作。只输出一个 JSON 对象。`;
+
+    return `${stable}\n\n${varying}\n\n${tail}`;
+}
+
 export function createRealLlm(opts: RealLlmOptions = {}): DeveloperLlm {
     const baseUrl = (opts.baseUrl ?? process.env.ANTHROPIC_BASE_URL ?? "").replace(/\/+$/, "");
     const authToken = opts.authToken ?? process.env.ANTHROPIC_AUTH_TOKEN ?? "";
@@ -377,19 +461,7 @@ export function createRealLlm(opts: RealLlmOptions = {}): DeveloperLlm {
 
             const tools = (input.tools ?? []) as ToolDescriptorLike[];
 
-            // 上下文一律拼进一条 user 消息（不做多轮 messages 回放：
-            // 决策历史以 JSON 形式整体塞给模型，无状态可重放）。
-            // 原生模式下工具走 tools 字段，不再往文本里塞工具清单（省 token、免二义）；
-            // 旧模式保持原样（工具清单进文本）。
-            const user = [
-                `## 任务\n${input.task}`,
-                input.skill ? `## 当前技能指引\n${input.skill}` : "",
-                !native && tools.length > 0 ? `## 可用工具\n${JSON.stringify(tools, null, 0)}` : "",
-                `## 已执行步骤（按时间顺序，最后一条是上一步结果）\n${JSON.stringify(input.history)}`,
-                native
-                    ? `请根据以上信息，给出下一步动作（要动手就调用工具；全部完成就直接说明）。`
-                    : `请根据以上信息，给出下一步动作。只输出一个 JSON 对象。`,
-            ].filter(Boolean).join("\n\n");
+            const user = renderUserMessage(input, native, tools);
 
             const systemText = input.system + "\n" + (native ? NATIVE_PROTOCOL : DECISION_PROTOCOL);
 
@@ -481,8 +553,8 @@ export function createRealLlm(opts: RealLlmOptions = {}): DeveloperLlm {
             const accumulate = (d: MessagesResponse): void => {
                 inputTokens += d.usage?.input_tokens ?? 0;
                 outputTokens += d.usage?.output_tokens ?? 0;
-                cacheReadTokens += d.usage?.cache_read_input_tokens ?? 0;
-                cacheCreationTokens += d.usage?.cache_creation_input_tokens ?? 0;
+                cacheReadTokens += readCacheReadTokens(d.usage);
+                cacheCreationTokens += readCacheCreationTokens(d.usage);
             };
 
             let sent = await send(maxTokens);

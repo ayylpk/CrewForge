@@ -7,10 +7,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { coerceDecision } from "../graph";
 import {
-    createRealLlm, extractJson, fromAnthropicContent, toAnthropicTools,
+    createRealLlm, extractJson, fromAnthropicContent, toAnthropicTools, renderUserMessage,
     ESCALATED_MAX_TOKENS, isRetryableStatus, parseRetryAfterMs,
     RETRY_AFTER_MAX_MS, RETRY_INITIAL_DELAY_MS, RETRY_MAX_DELAY_MS, RETRY_MAX_RETRIES,
-    retryDelayMs,
+    retryDelayMs, readCacheReadTokens, readCacheCreationTokens,
 } from "../realLlm";
 
 // ---------- ① extractJson：脏输出抠 JSON ----------
@@ -679,5 +679,98 @@ describe("batchC / usage 缓存记账（只读不发，模型无关）", () => {
         await b.next({ system: "s", task: "t", skill: null, history: [], tools: [] });
 
         expect(infos).toEqual([false, true]);
+    });
+});
+
+// ---------- 9/15 批 D：前缀顺序契约 + usage 缓存字段兜底 ----------
+//
+// 批 D 的探针（live/cache-probe.ts，三组各 4 轮实测）给出了一个**反直觉**的结论：
+//   · 现状（单 text 块、无 cache_control）= 命中率 90-93%，命中数恒定 6144，写入恒 0；
+//   · 学 cc 打 cache_control（分块 + 稳定段末尾标记）= 命中率腰斩到 47-50%，
+//     且每轮多付一笔写入。
+// 结论：本网关走**隐式前缀缓存**，我们**不发任何缓存字段**才是这条链表上的最优解。
+// 代价是——90% 的命中率**完全依赖"稳定段在前、变化段在后"这个排布**，
+// 一旦有人把 history 挪到前面，不会报错、只会悄悄变贵。下面把它钉死。
+
+describe("batchD / 前缀顺序契约（性能关键路径，改了就悄悄变贵）", () => {
+    const TOOLS = [{ name: "readFile", description: "读文件", parameters: { path: { type: "string", required: true, description: "路径" } } }];
+    const input = (task: string, skill: string | null, history: unknown[]) => ({ task, skill, history });
+
+    it("稳定段（任务/技能）必须整体出现在变化段（history）之前", () => {
+        const msg = renderUserMessage(
+            input("实现搜索分页", "技能指引X", [{ tool: "readFile", output: "第一轮结果" }]),
+            true, TOOLS,
+        );
+        const taskAt = msg.indexOf("## 任务");
+        const skillAt = msg.indexOf("## 当前技能指引");
+        const histAt = msg.indexOf("## 已执行步骤");
+        expect(taskAt).toBeGreaterThanOrEqual(0);
+        expect(skillAt).toBeGreaterThan(taskAt);
+        expect(histAt).toBeGreaterThan(skillAt);          // ← 契约：history 在稳定段之后
+        expect(msg.indexOf("第一轮结果")).toBeGreaterThan(histAt);
+    });
+
+    it("下一轮追加 history 时，稳定段**逐字节不变**（这正是命中 6144 的原因）", () => {
+        const r1 = renderUserMessage(input("实现搜索分页", "技能指引X", [{ tool: "readFile", output: "a" }]), true, TOOLS);
+        const r2 = renderUserMessage(input("实现搜索分页", "技能指引X", [{ tool: "readFile", output: "a" }, { tool: "readFile", output: "b" }]), true, TOOLS);
+        const stableOf = (s: string) => s.slice(0, s.indexOf("## 已执行步骤"));
+        // 前缀逐字节相等 = 服务端能命中"最长公共前缀"的前提
+        expect(stableOf(r2)).toBe(stableOf(r1));
+        expect(r2.startsWith(stableOf(r1))).toBe(true);
+    });
+
+    it("**不发任何缓存字段**（批 D 实测结论：显式标记在本网关反而更差）", async () => {
+        const calls = stubFetch({ text: "完成" });
+        const llm = createRealLlm(BASE_OPTS);
+        await llm.next({ system: "你是 Developer。", task: "做个任务", skill: null, history: [], tools: TOOLS });
+        const body = JSON.parse(String(calls[0]!.init.body));
+        const raw = String(calls[0]!.init.body);
+        expect(raw).not.toContain("cache_control");       // 请求体里一个字都不许有
+        expect(typeof body.system).toBe("string");        // system 保持字符串，不改成数组
+        expect(Array.isArray(body.messages[0].content)).toBe(false);
+    });
+
+    it("原生模式工具清单不进文本；文本协议下进文本且仍在稳定段内", () => {
+        const nativeMsg = renderUserMessage(input("t", null, []), true, TOOLS);
+        expect(nativeMsg).not.toContain("## 可用工具");
+        const textMsg = renderUserMessage(input("t", null, [{ tool: "x", output: "y" }]), false, TOOLS);
+        const toolAt = textMsg.indexOf("## 可用工具");
+        expect(toolAt).toBeGreaterThanOrEqual(0);
+        expect(toolAt).toBeLessThan(textMsg.indexOf("## 已执行步骤"));   // 工具清单也属稳定段
+    });
+});
+
+describe("batchD / usage 缓存字段兜底（网关字段名不止一套）", () => {
+    it("Anthropic 风格字段优先；OpenAI 风格 prompt_tokens_details.cached_tokens 兜底", () => {
+        // 实测本机网关同时给两套且数值一致（cache-probe 输出 2824/2824）
+        expect(readCacheReadTokens({ cache_read_input_tokens: 2824, prompt_tokens_details: { cached_tokens: 2824 } })).toBe(2824);
+        // 只给 OpenAI 风格：**必须能读出来**，否则会把"命中"误记成 0（观测骗人）
+        expect(readCacheReadTokens({ prompt_tokens_details: { cached_tokens: 1664 } })).toBe(1664);
+        // 都没有 → 0，不猜
+        expect(readCacheReadTokens({ input_tokens: 100 })).toBe(0);
+        expect(readCacheReadTokens(undefined)).toBe(0);
+    });
+
+    it("写入侧：平铺字段与 TTL 分档是**同一数值的两种编码**，取 max 不相加", () => {
+        // 实测两者相等（cache_creation_input_tokens:2824 与 .ephemeral_5m_input_tokens:2824）
+        expect(readCacheCreationTokens({ cache_creation_input_tokens: 2824, cache_creation: { ephemeral_5m_input_tokens: 2824 } })).toBe(2824);
+        // 只给分档对象（平铺留 0）→ 不能漏记
+        expect(readCacheCreationTokens({ cache_creation_input_tokens: 0, cache_creation: { ephemeral_5m_input_tokens: 3500 } })).toBe(3500);
+        // 分档求和只用于 1h+5m 同时存在的形状
+        expect(readCacheCreationTokens({ cache_creation: { ephemeral_5m_input_tokens: 100, ephemeral_1h_input_tokens: 200 } })).toBe(300);
+        expect(readCacheCreationTokens({})).toBe(0);
+    });
+
+    it("缓存命中经 onCall 正常上报（端到端：只给 OpenAI 风格字段也要读到）", async () => {
+        stubFetch({
+            body: {
+                content: [{ type: "text", text: "完成" }], stop_reason: "end_turn",
+                usage: { input_tokens: 15, output_tokens: 5, prompt_tokens_details: { cached_tokens: 900 } },
+            },
+        });
+        const seen: number[] = [];
+        const llm = createRealLlm({ ...BASE_OPTS, onCall: (i) => seen.push(i.cacheReadTokens) });
+        await llm.next({ system: "s", task: "t", skill: null, history: [], tools: [] });
+        expect(seen[0]).toBe(900);                        // 批 D 之前这里会是 0
     });
 });
