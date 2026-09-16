@@ -155,7 +155,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import CardShell from '../components/CardShell.vue'
 import GradientButton from '../components/GradientButton.vue'
-import { fetchProjectById } from '../api/project'
+import { fetchProjectById, downloadProjectZip } from '../api/project'
 import { startProjectRun, stopProjectRun, fetchRunStatus, type RunStatus } from '../api/projectRun'
 import type { Project, ProjectStatus } from '../types/project'
 
@@ -307,13 +307,21 @@ function scrollTo(id: string) {
   document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' })
 }
 
-/** 下载 zip（调后端 API 打包项目文件） */
-function downloadZip() {
-  const id = route.params.id
-  const a = document.createElement('a')
-  a.href = `/api/project/${id}/download`
-  a.download = `${projectName.value}.zip`
-  a.click()
+/** 下载 zip（audit F1：原实现 <a href> 直导航——不带 Authorization、dev 下无 /api 代理，必坏包。
+ *  改走 axios 实例 blob 下载，request.ts 拦截器已放行 Blob 不拆 Result 信封） */
+async function downloadZip() {
+  try {
+    const id = Number(route.params.id)
+    const blob = await downloadProjectZip(id)
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${projectName.value}.zip`
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch {
+    // 失败已由响应拦截器统一弹 toast，此处不重复提示
+  }
 }
 </script>
 

@@ -28,6 +28,9 @@ request.interceptors.request.use((config) => {
 request.interceptors.response.use(
   (response) => {
     const res = response.data
+    // 二进制直传：responseType:'blob' 的下载类响应不是 Result 信封，
+    // 走下面的解包会拿 .data=undefined 把文件吃掉（9/16 修 audit F1 时发现）
+    if (res instanceof Blob) return res
     // 后端统一格式 { code: 1(成功) / 0(失败), msg, data }
     if (res.code === 0) {
       ElMessage.error(res.msg || '请求失败')

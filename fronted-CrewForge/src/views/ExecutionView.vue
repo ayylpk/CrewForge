@@ -174,9 +174,12 @@
           </div>
         </div>
         <div class="editor-wrap">
+          <!-- key 只含 path：曾把 userModified 编进 key（9/15 审计坑 F4），
+               用户敲第一字符→0变1→key 变→编辑器销毁重建，首字符被吞、光标/撤销栈重置。
+               注意：注释必须放标签外——塞进属性区会打断 Vue 模板解析（9/16 vue-tsc 实锤） -->
           <MonacoEditor
             v-if="activeFile"
-            :key="activeFile.path + ':' + (activeFile.userModified ? 'm' : '')"
+            :key="activeFile.path"
             :language="langFor(activeFile.path)"
             :value="activeFile.content || ''"
             @change="onUserEdit"

@@ -11,6 +11,7 @@ import com.hina.crewforge.pojo.entity.ProjectFile;
 import com.hina.crewforge.pojo.vo.ProjectFileVO;
 import com.hina.crewforge.service.ProjectFileService;
 import com.hina.crewforge.service.ProjectService;
+import com.hina.crewforge.service.support.ProjectGuard;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -30,6 +31,10 @@ public class ProjectFileServiceImpl extends ServiceImpl<ProjectFileMapper, Proje
     @Autowired
     private ProjectService projectService;
 
+    /** 项目归属门卫（9/15 审计漏洞①：list/create/update 补上这把已存在的"公共锁"） */
+    @Autowired
+    private ProjectGuard projectGuard;
+
     @Autowired
     private StringRedisTemplate redisTemplate;
 
@@ -44,6 +49,8 @@ public class ProjectFileServiceImpl extends ServiceImpl<ProjectFileMapper, Proje
 
     @Override
     public List<ProjectFileVO> listByProjectId(Long projectId) {
+        // 审计漏洞①（9/15）：文件树=项目内容的全量目录，必须先过归属锁再碰缓存
+        projectGuard.requireOwned(projectId);
         // 缓存优先
         String key = listKey(projectId);
         String cached = redisTemplate.opsForValue().get(key);
@@ -93,6 +100,8 @@ public class ProjectFileServiceImpl extends ServiceImpl<ProjectFileMapper, Proje
 
     @Override
     public void create(ProjectFileDTO dto) {
+        // 审计漏洞①：写入侧同锁——不许往别人项目下塞文件（与 list/update 同口径）
+        projectGuard.requireOwned(dto.getProjectId());
         LocalDateTime now = LocalDateTime.now();
         // 同一项目同路径已存在 → 覆盖更新(Agent 重新生成场景, 保留 user_modified 标记)
         ProjectFile exist = baseMapper.selectOne(new LambdaQueryWrapper<ProjectFile>()
@@ -117,19 +126,24 @@ public class ProjectFileServiceImpl extends ServiceImpl<ProjectFileMapper, Proje
 
     @Override
     public void update(Long id, ProjectFileDTO dto) {
+        // 审计漏洞①（写侧裸奔 + DTO 直拷 projectId 可改挂他人项目）：
+        // 先取行 → 以库内现况定归属（不信任 DTO）→ 禁止跨项目迁移
+        ProjectFile exist = baseMapper.selectById(id);
+        if (exist == null) {
+            throw new BaseException("文件不存在: " + id);
+        }
+        projectGuard.requireOwned(exist.getProjectId());
+        if (dto.getProjectId() != null && !dto.getProjectId().equals(exist.getProjectId())) {
+            throw new BaseException("不允许变更文件归属项目");
+        }
         ProjectFile entity = new ProjectFile();
         BeanUtils.copyProperties(dto, entity);
         entity.setId(id);
+        entity.setProjectId(null); // 更新语句绝不触碰 project_id（MP 对 null 字段跳过）
         entity.setUserModified(1); // 用户编辑过 → Agent 不再覆盖
         entity.setUpdateTime(LocalDateTime.now());
         baseMapper.updateById(entity);
-        // 更新前查一次拿 projectId（DTO 里没有时）
-        if (dto.getProjectId() != null) {
-            evictCache(dto.getProjectId());
-        } else {
-            ProjectFile exist = baseMapper.selectById(id);
-            if (exist != null) evictCache(exist.getProjectId());
-        }
+        evictCache(exist.getProjectId());
     }
 
     @Override

@@ -23,6 +23,8 @@ import java.util.Map;
  * 运行时设置服务实现（sys_settings 单行 id=1）
  *
  * 安全口径：apiKey 只进不出——getMasked 永远掩码回显，update 收到掩码/空值时保留库中原 key。
+ * 防钓 key（9/16 审计漏洞③）：test 收到掩码 key（=要用库内真 key）时，目标 URL 必须与落库配置
+ * 解析后的端点一致——"掩码 key + 自换新 URL"这一组合正是把真 key 的 Bearer 头钓到任意服务器的路。
  * 测试连接用 JDK HttpClient 发 1-token 最小对话（无外部依赖，deepseek/openai 两路都走 /chat/completions 形状）。
  */
 @Service
@@ -139,7 +141,23 @@ public class SettingsServiceImpl implements SettingsService {
         Map<String, Object> r = new HashMap<>();
         String kind = dto.getModelKind() == null ? "deepseek" : dto.getModelKind();
         String url = resolveTestUrl(kind, dto.getModelUrl());
-        String key = isMasked(dto.getApiKey()) ? currentKey() : blankToNull(dto.getApiKey());
+        // 审计漏洞③防钓闸：一次查库同时拿"真 key"与"落库端点"，两用一致（也消除两次读之间的 TOCTOU）
+        Settings db = settingsMapper.selectById(ROW_ID);
+        String key;
+        if (isMasked(dto.getApiKey())) {
+            // 掩码回传 = 用户没改 key = 接下来要发的是库内真 key——只许发给落库配置那个端点
+            if (db != null) {
+                String dbKind = db.getModelKind() == null ? "deepseek" : db.getModelKind();
+                String dbUrl = resolveTestUrl(dbKind, db.getModelUrl());
+                if (!dbUrl.equals(url)) {
+                    throw new BaseException("apiKey 为掩码回传，不能把库内真 key 发往非落库端点；更换端点请重新填写 apiKey 再测");
+                }
+            }
+            key = db == null ? null : db.getApiKey();
+        } else {
+            // 明文新 key 不受限：用户自己的新 key 测新端点，正是"测试连接"的本职场景
+            key = blankToNull(dto.getApiKey());
+        }
         // 没配 key 时：deepseek 路引擎会用 .env 兜底，测试这边也允许空 key（部分本地端点无鉴权）→ 用占位
         String auth = key == null ? "not-needed" : key;
         String model = blankToNull(dto.getModelName());
@@ -191,11 +209,6 @@ public class SettingsServiceImpl implements SettingsService {
         }
         String base = blankToNull(modelUrl) == null ? "https://api.deepseek.com/v1" : trimTrailingSlash(modelUrl);
         return base + "/chat/completions";
-    }
-
-    private String currentKey() {
-        Settings s = settingsMapper.selectById(ROW_ID);
-        return s == null ? null : s.getApiKey();
     }
 
     /** 掩码值判定：前端把回显的 ****xxxxx 原样传回 = 用户没改 key */

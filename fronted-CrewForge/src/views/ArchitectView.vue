@@ -22,6 +22,31 @@ function parseArr(raw?: string | null): unknown[] {
   }
 }
 
+/** 解析 devPlan：纯数组与引擎 PM 的 {phases:[…]} 对象两种都认
+ *  （口径与 ProjectDetailView 的 plan computed 样板完全一致，两处不许漂移） */
+function parsePlanArr(raw?: string | null): unknown[] {
+  if (!raw) return []
+  try {
+    const v = JSON.parse(raw)
+    const arr = Array.isArray(v) ? v : (v as { phases?: unknown[] })?.phases
+    return Array.isArray(arr) ? arr : []
+  } catch {
+    return []
+  }
+}
+
+/** 把读回的条目归一成页面模型：PM 的 planItem 只有 features 没有 tasks，
+ *  tasks 兜成 [] 同时防渲染 .length 崩（审计 F11 同型点） */
+function normalizePhases(rows: unknown[]): { name: string; progress: number; tasks: string[] }[] {
+  return (rows as Partial<{ name: string; progress: number; tasks: string[]; features: string[] }>[])
+    .filter((r): r is NonNullable<typeof r> => r != null && typeof r === 'object')
+    .map((r) => ({
+      name: r.name ?? '未命名阶段',
+      progress: typeof r.progress === 'number' ? r.progress : 0,
+      tasks: Array.isArray(r.tasks) ? r.tasks : Array.isArray(r.features) ? r.features : [],
+    }))
+}
+
 onMounted(async () => {
   const id = Number(route.params.id)
   if (!id) return
@@ -30,7 +55,9 @@ onMounted(async () => {
     projectName.value = p.name
     // 回显已保存的方案（确认方案提交过才有数据）
     techStack.value = (parseArr(p.techStack) as unknown[]).filter((x): x is string => typeof x === 'string')
-    phases.value = parseArr(p.devPlan) as { name: string; progress: number; tasks: string[] }[]
+    // devPlan 有两种存储形状（9/15 审计坑 F3）：网页自存=纯数组；引擎 PM 直写库={project, phases:[…]} 对象。
+    // 旧 parseArr 把对象当 → [] → 页面显示"暂无开发计划"，一点「确认方案」把 "[]" PUT 回去清空引擎计划。
+    phases.value = normalizePhases(parsePlanArr(p.devPlan))
     dirTree.value = restoreTree(parseArr(p.dirTree) as DirNode[])
   } catch {
     projectName.value = '项目 #' + route.params.id

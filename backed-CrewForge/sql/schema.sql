@@ -257,6 +257,7 @@ CREATE TABLE `sys_user` (
   `create_time` datetime DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
   `update_time` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   `deleted` tinyint DEFAULT '0' COMMENT '逻辑删除',
+  `role` tinyint NOT NULL DEFAULT '1' COMMENT '角色: 0=管理员 1=普通用户（migration_rbac_admin.sql 双修回填）',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_username` (`username`)
 ) ENGINE=InnoDB AUTO_INCREMENT=2 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='用户表';
@@ -274,7 +275,7 @@ CREATE TABLE `sys_user` (
 -- ------------------------------------------------------------
 -- 种子数据：演示账号 admin（BCrypt 口令哈希入库，明文见面试演示口径）+ 单行运行时配置
 -- 注意 api_key 留空=沿用 .env 的 DEEPSEEK_API_KEY（阶段 2 设置页接管后此处配置优先）
-INSERT IGNORE INTO `sys_user` VALUES (1,'admin','$2b$12$p9VBI/GKrxGOHg/MqjOkGuGzOQOb1EQ3nw3puqLE.97ZjrubuY2zO','系统管理员',NULL,NULL,1,'2026-08-05 20:18:42','2026-08-06 22:47:08',0);
+INSERT IGNORE INTO `sys_user` VALUES (1,'admin','$2b$12$p9VBI/GKrxGOHg/MqjOkGuGzOQOb1EQ3nw3puqLE.97ZjrubuY2zO','系统管理员',NULL,NULL,1,'2026-08-05 20:18:42','2026-08-06 22:47:08',0,0);
 INSERT IGNORE INTO `sys_settings`
   (`id`,`model_name`,`model_url`,`api_key`,`model_kind`,`java_base_url`,`confirm_timeout_min`,`smoke_build`,`update_time`)
   VALUES (1,'deepseek-v4-flash',NULL,NULL,'deepseek','http://localhost:8080',30,0,'2026-09-02 15:27:53');

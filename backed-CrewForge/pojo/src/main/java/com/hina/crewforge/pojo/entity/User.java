@@ -23,6 +23,8 @@ public class User {
     private String phone;
     /** 状态: 1-启用, 0-禁用 */
     private Integer status;
+    /** 角色: 0=管理员, 1=普通用户（9/16 权限底座 migration_rbac_admin.sql；消费方 AdminGuard，每次查库不吃 token） */
+    private Integer role;
     /** 创建时间 */
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createTime;

@@ -20,6 +20,11 @@ export function fetchProjectById(id: number): Promise<Project> {
   return request.get(`/api/project/${id}`) as Promise<Project>
 }
 
+/** 下载项目文件 zip（audit F1：原实现用 <a href> 直导航——不带 token 且 dev 无代理，必坏包） */
+export function downloadProjectZip(id: number): Promise<Blob> {
+  return request.get(`/api/project/${id}/download`, { responseType: 'blob' }) as Promise<Blob>
+}
+
 /** 删除项目 */
 export function deleteProject(id: number): Promise<void> {
   return request.delete(`/api/project/${id}`) as Promise<void>
