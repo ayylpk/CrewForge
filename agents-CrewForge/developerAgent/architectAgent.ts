@@ -17,10 +17,13 @@
 //     蓝图前缀推进，本来就收不下新项；写进提示词只是省模型返工，代码才是保证。
 //   · assembleTask()：蓝图+批次 → 完整 ArchitectTask 的确定性合并（审计产物 /
 //     _tasks 落盘重播种用）。纯函数不碰 fs——落盘策略归 runner。
-//   · decompose()（一步整包）**原样保留**：live/runner.ts 还在调用它，步骤 6 切管线
-//     后由 orchestrator 统一删除（连同 prompts/architect-system.md）。
 //
-// 三个生成入口共用同一条已验证的校验哲学（原 decompose 的设计，一字未改）：
+//   9/16 清理：一步整包的 decompose() 连同它的提示词 prompts/architect-system.md
+//   一并删除。删的依据不是"看着没用"，是两条生产入口（live/runner.ts --requirement
+//   与 live/architect-cli.ts）都只调 decomposeBlueprint/decomposeBatch，全仓再无第二
+//   个调用方；原注释"live/runner.ts 还在调用它"在那次切管线后就已经过期。
+//
+// 两个生成入口共用同一条已验证的校验哲学：
 //   · 1 次 LLM 调用吐 JSON → 校验链 → 不过就把**报错原文**喂回重试（≤maxAttempts）
 //     ——与 graph 的 llmErrorTolerance 同哲学：模型犯格式错不是死刑，
 //     有反馈环就能自愈；
@@ -50,9 +53,8 @@ import type { DeveloperLlm } from "./graph";
 /** 缺省提示词目录（与 developerAgent 的 prompts/ 管理方式一致：磁盘读，不内嵌） */
 const DEFAULT_PROMPT_DIR = path.resolve(import.meta.dir, "prompts");
 
-// 提示词三份一拆（9/15 两阶段）：system=旧一步整包（decompose 专用，步骤 6 退役）；
-// blueprint/batch 各自 ++ check-shape 拼接——判据机器字段口径只维护一份，防漂移。
-const ARCHITECT_PROMPT_FILE = "architect-system.md";
+// 提示词两份（9/16 起）：blueprint/batch 各自 ++ check-shape 拼接——判据机器字段
+// 口径只维护一份，防漂移。（第三份 architect-system.md 随 decompose 一并退役。）
 const ARCHITECT_BLUEPRINT_PROMPT_FILE = "architect-blueprint.md";
 const ARCHITECT_BATCH_PROMPT_FILE = "architect-batch.md";
 const ARCHITECT_CHECK_SHAPE_FILE = "_check-shape.md";
@@ -69,33 +71,18 @@ export interface ArchitectAgentOptions {
     promptDir?: string;
 }
 
-export interface DecomposeInput {
-    /** 项目需求原文（唯一业务输入） */
-    requirement: string;
-    /** 任务包身份，缺省 "p1"/"t1" */
-    projectId?: string;
-    taskId?: string;
-}
-
-/** 拆解结果：任务包 + 过程观测量（测试/CLI 报告用） */
-export interface DecomposeResult {
-    task: ArchitectTask;
-    /** 消耗的 LLM 调用次数（含被拒重试） */
-    attempts: number;
-    /** 每轮被拒的原因摘要（成功前那些轮）；一次成功则为空 */
-    rejections: string[];
-}
-
 export interface DecomposeBlueprintInput {
     requirement: string;
     projectId?: string;
     taskId?: string;
 }
 
-/** 蓝图拆解结果（形状与 DecomposeResult 对齐：task=architect_task 形制的蓝图） */
+/** 蓝图拆解结果：task=architect_task 形制的蓝图 + 过程观测量（测试/CLI 报告用） */
 export interface BlueprintResult {
     task: ArchitectTask;
+    /** 消耗的 LLM 调用次数（含被拒重试） */
     attempts: number;
+    /** 每轮被拒的原因摘要（成功前那些轮）；一次成功则为空 */
     rejections: string[];
 }
 
@@ -159,7 +146,7 @@ function llmText(raw: unknown): string {
             : JSON.stringify(raw));
 }
 
-/** architect_task 形制的 user 文本（decompose 与蓝图共用——同一形状同一话术） */
+/** architect_task 形制的 user 文本（蓝图阶段用） */
 function taskUserText(requirement: string, projectId: string, taskId: string, feedback: string): string {
     return [
         `## 项目需求\n${requirement}`,
@@ -181,7 +168,7 @@ function trimRequirement(requirement: string): string {
 type Gate<T> = { ok: true; value: T } | { ok: false; reason: string };
 
 /**
- * 共享校验-重试循环（原 decompose :92-186 的循环+信封拆包+反馈环抽出来的）。
+ * 校验-重试循环（信封拆包 + 反馈环 + 预算可见性，从最初的整包拆解里抽出来的）。
  * 只管循环骨架：user 文本、抠包后的闸门交给回调；
  * 反馈原文逐字喂回、budget 可见性（批 E 同款：让模型知道还剩几次机会，
  * 而不是盲重试）、耗尽抛错含最后一次原因——全部保持原行为。
@@ -200,13 +187,24 @@ async function generateValidated<T>(
     let feedback = "";
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        const raw = await llm.next({
-            system: s.system,
-            task: s.userFor(attempt, feedback),
-            skill: null, history: [], tools: [],
-            // 架构师的"预算"= 剩余重试次数（批 E 预算可见性的同款用途）
-            budget: { used: attempt - 1, total: maxAttempts },
-        });
+        // ★ 调用层也在重试环内（9/16 p20 第三跑补刀：w6 批拆解撞中转超时，
+        //   裸 await 让传输错直接穿出循环 → dispatch_cancelled 整次作废——
+        //   「3 连拒」原来只兜内容拒绝）。传输错按拒绝处理：原文进 rejections
+        //   与反馈、本次重发；连耗尽仍抛「全部被拒」，保留作废底线。
+        let raw: Awaited<ReturnType<DeveloperLlm["next"]>>;
+        try {
+            raw = await llm.next({
+                system: s.system,
+                task: s.userFor(attempt, feedback),
+                skill: null, history: [], tools: [],
+                // 架构师的"预算"= 剩余重试次数（批 E 预算可见性的同款用途）
+                budget: { used: attempt - 1, total: maxAttempts },
+            });
+        } catch (e) {
+            feedback = `LLM 调用失败（链路/超时错误，非内容拒绝）：${(e as Error).message ?? String(e)}`;
+            rejections.push(feedback);
+            continue;
+        }
 
         // ① 信封拆包 + 抠 JSON（围栏/叙述都能处理；抠不出=原文交回当拒绝原因）
         const text = llmText(raw);
@@ -247,16 +245,14 @@ async function generateValidated<T>(
 }
 
 /**
- * architect_task 形制产物的共享闸门链（③④⑤）：zod → 身份强制 → 业务硬闸 →
- * parseInbound 终验。decompose 与 decomposeBlueprint 唯一差异是 enforceCompileFloor
- * ——旧链路不查底线（保持 8 条存量测试的行为不变），蓝图链路查（提示词里
- * "每个被声明的 target 一条 COMPILE"的规矩从"求模型自觉"升级成代码事实）。
+ * architect_task 形制产物的闸门链（③④⑤）：zod → 身份强制 → 业务硬闸 →
+ * parseInbound 终验。业务硬闸里含蓝图底线——提示词里"每个 allowedRoots 至少
+ * 一条 COMPILE"的规矩不靠模型自觉，在这里落成代码事实。
  */
 function validateArchitectTask(
     candidate: unknown,
     projectId: string,
     taskId: string,
-    enforceCompileFloor: boolean,
 ): Gate<ArchitectTask> {
     // ③ 形状校验（ArchitectTaskSchema，zod）
     let parsed: ArchitectTask;
@@ -285,15 +281,13 @@ function validateArchitectTask(
     }
     // 蓝图底线闸：allowedRoots 每个根都要有 ≥1 条 COMPILE（feedback 点名缺哪个根——
     // "数量与强度"的提示词规矩落成代码事实，弱模型漏一条也不会静默欠验收）
-    if (enforceCompileFloor) {
-        for (const root of parsed.allowedRoots) {
-            const hasFloor = parsed.acceptanceChecks.some(
-                (c) => String(c.kind ?? "").trim().toUpperCase() === "COMPILE"
-                    && String(c.target ?? "").trim() === String(root).trim(),
-            );
-            if (!hasFloor) {
-                gaps.push(`allowedRoots「${root}」缺全局 COMPILE 底线判据（至少 1 条 kind=COMPILE、target="${root}"）`);
-            }
+    for (const root of parsed.allowedRoots) {
+        const hasFloor = parsed.acceptanceChecks.some(
+            (c) => String(c.kind ?? "").trim().toUpperCase() === "COMPILE"
+                && String(c.target ?? "").trim() === String(root).trim(),
+        );
+        if (!hasFloor) {
+            gaps.push(`allowedRoots「${root}」缺全局 COMPILE 底线判据（至少 1 条 kind=COMPILE、target="${root}"）`);
         }
     }
     if (gaps.length > 0) {
@@ -308,17 +302,46 @@ function validateArchitectTask(
     return { ok: true, value: parsed };
 }
 
-/** 判据的 (method, path) 归一键：method 大小写宽容（verifier 也是 toUpperCase 后用的） */
-function methodPathKey(method: unknown, pathValue: unknown): string {
-    return `${String(method ?? "GET").trim().toUpperCase()} ${String(pathValue ?? "").trim()}`;
+/** 端点路径归一：剥查询串、去尾斜杠（根路径除外）。method 大小写宽容（verifier 同款）。 */
+function normalizeEndpointPath(p: string): string {
+    const bare = (p.split("?")[0] ?? "").trim().replace(/\/+$/, "");
+    return bare === "" ? "/" : bare;
+}
+
+/**
+ * 蓝图路径模板 → 真 router 形状的正则：分段匹配，`{param}` 命中任意单段。
+ * ⚠️ 9/16 p20 第四跑补刀：旧闸拿裸字符串相等判命中，模型把 `{id}` 写作 `{pid}/{tid}`、
+ * 带 `?projectId=` 查询串、或用具体测试值（/api/tasks/999999）引用端点——语义全对
+ * 却 3 连拒整次作废。占位符名是拼写自由，不是端点身份；多一段/少一段仍必拒。
+ */
+function compilePathTemplate(template: string): RegExp {
+    const segs = normalizeEndpointPath(template).split("/").filter((s) => s !== "");
+    const body = segs
+        .map((s) => (/^\{[^}]*\}$/.test(s) ? "[^/]+" : s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")))
+        .join("/");
+    return new RegExp(`^/${body}$`);
+}
+
+/** 蓝图端点索引（contract.endpoints 是 unknown[]——严格读取，拼不出 path 的条目忽略） */
+function compileEndpointMatchers(blueprint: ArchitectTask): { method: string; re: RegExp }[] {
+    const out: { method: string; re: RegExp }[] = [];
+    for (const ep of Array.isArray(blueprint.contract?.endpoints) ? blueprint.contract.endpoints : []) {
+        if (!ep || typeof ep !== "object") continue;
+        const e = ep as { method?: unknown; path?: unknown };
+        if (typeof e.path !== "string" || !e.path.trim()) continue;
+        out.push({
+            method: String(e.method ?? "GET").trim().toUpperCase(),
+            re: compilePathTemplate(e.path),
+        });
+    }
+    return out;
 }
 
 export function createArchitectAgent(o: ArchitectAgentOptions) {
     const maxAttempts = o.maxAttempts ?? 3;
     const promptDir = o.promptDir ?? DEFAULT_PROMPT_DIR;
     // 提示词从磁盘读（与 developerAgent 的 prompts/ 管理方式一致）；缺失 fail fast。
-    // 三份都在构造期读——起工就验全，不留"跑到第二批才发现文件没部署"的后患。
-    const systemTask = readPrompt(promptDir, ARCHITECT_PROMPT_FILE);
+    // 每份都在构造期读——起工就验全，不留"跑到第二批才发现文件没部署"的后患。
     const systemBlueprint = composePrompt(
         readPrompt(promptDir, ARCHITECT_BLUEPRINT_PROMPT_FILE),
         readPrompt(promptDir, ARCHITECT_CHECK_SHAPE_FILE),
@@ -330,27 +353,9 @@ export function createArchitectAgent(o: ArchitectAgentOptions) {
 
     return {
         /**
-         * 【旧一步整包，兼容保留】需求文本 → ArchitectTask（全局+逐项一次吐完）。
-         * runner.ts 还在调用；步骤 6 切两阶段管线后由 orchestrator 删除。
-         * 校验不过把报错原文喂回重试，全败抛错（不静默）。
-         */
-        async decompose(input: DecomposeInput): Promise<DecomposeResult> {
-            const requirement = trimRequirement(input.requirement);
-            const projectId = input.projectId ?? "p1";
-            const taskId = input.taskId ?? "t1";
-
-            const r = await generateValidated<ArchitectTask>(o.llm, maxAttempts, "拆解", {
-                system: systemTask,
-                userFor: (_attempt, feedback) => taskUserText(requirement, projectId, taskId, feedback),
-                validate: (candidate) => validateArchitectTask(candidate, projectId, taskId, false),
-            });
-            return { task: r.value, attempts: r.attempts, rejections: r.rejections };
-        },
-
-        /**
          * 蓝图拆解：需求原文 → architect_task 形制的**蓝图**（全局一次冻结）。
-         * 闸门链在旧五道之上多一条"每个 allowedRoots ≥1 条 COMPILE 底线"；
-         * 其余字段口径与 decompose 完全同形（同一 Schema、同一终验）。
+         * 闸门链在通用四道之上多一条"每个 allowedRoots ≥1 条 COMPILE 底线"；
+         * 其余字段口径与装配产物完全同形（同一 Schema、同一终验）。
          * 逐项 detail 与功能级判据**不在**产物里——那是批次的活。
          */
         async decomposeBlueprint(input: DecomposeBlueprintInput): Promise<BlueprintResult> {
@@ -361,7 +366,7 @@ export function createArchitectAgent(o: ArchitectAgentOptions) {
             const r = await generateValidated<ArchitectTask>(o.llm, maxAttempts, "蓝图拆解", {
                 system: systemBlueprint,
                 userFor: (_attempt, feedback) => taskUserText(requirement, projectId, taskId, feedback),
-                validate: (candidate) => validateArchitectTask(candidate, projectId, taskId, true),
+                validate: (candidate) => validateArchitectTask(candidate, projectId, taskId),
             });
             return { task: r.value, attempts: r.attempts, rejections: r.rejections };
         },
@@ -390,15 +395,7 @@ export function createArchitectAgent(o: ArchitectAgentOptions) {
             const cap = input.maxAttempts ?? maxAttempts;
             const delivered = new Set(input.deliveredCheckIds ?? []);
 
-            // 蓝图端点索引（contract.endpoints 是 unknown[]——严格读取，拼不出键的条目忽略）
-            const endpointKeys = new Set<string>();
-            for (const ep of Array.isArray(blueprint.contract?.endpoints) ? blueprint.contract.endpoints : []) {
-                if (!ep || typeof ep !== "object") continue;
-                const e = ep as { method?: unknown; path?: unknown };
-                if (typeof e.path === "string" && e.path.trim()) {
-                    endpointKeys.add(methodPathKey(e.method, e.path));
-                }
-            }
+            const endpointMatchers = compileEndpointMatchers(blueprint);
 
             const r = await generateValidated<ArchitectBatch>(o.llm, cap, `批次 ${item.id} 拆解`, {
                 system: systemBatch,
@@ -435,11 +432,13 @@ export function createArchitectAgent(o: ArchitectAgentOptions) {
                     if (collided.length > 0) {
                         gaps.push(`判据 id 撞车：${collided.join("、")} 已在前面交付，判据 id 必须全局唯一（换新 id 或删掉重复判据）`);
                     }
-                    if (endpointKeys.size > 0) {
-                        const offenders = parsed.checks.filter(
-                            (c) => String(c.kind ?? "").trim().toUpperCase() === "CONTRACT"
-                                && !endpointKeys.has(methodPathKey(c.method, c.path)),
-                        );
+                    if (endpointMatchers.length > 0) {
+                        const offenders = parsed.checks.filter((c) => {
+                            if (String(c.kind ?? "").trim().toUpperCase() !== "CONTRACT") return false;
+                            const method = String(c.method ?? "GET").trim().toUpperCase();
+                            const path = typeof c.path === "string" ? normalizeEndpointPath(c.path) : "/";
+                            return !endpointMatchers.some((m) => m.method === method && m.re.test(path));
+                        });
                         if (offenders.length > 0) {
                             gaps.push(`以下 CONTRACT 判据的 (method, path) 没命中蓝图 contract.endpoints（拼写跑偏的判据会让 TestAgent 打空靶）：\n${offenders.map(
                                 (c) => `- ${String(c.method ?? "GET").trim().toUpperCase()} ${typeof c.path === "string" && c.path.trim() ? c.path.trim() : "(缺 path)"}`,

@@ -33,6 +33,8 @@ import {
 } from "./developerAgent/protocol";
 import type { ArchitectBatch, ArchitectTask } from "./developerAgent/protocol";
 import { createArchitectAgent } from "./developerAgent/architectAgent";
+// 批次重放文件名与 runner/architect-cli 共用同一份消毒规则（itemId 是模型自由文本）
+import { batchFileNameOf } from "./developerAgent/architectCheckpoint";
 import type { DeveloperLlm } from "./developerAgent/graph";
 
 // ============================================================
@@ -1005,11 +1007,6 @@ export function blueprintDispatchKeyOf(taskId: string, blueprint: ArchitectTask)
 /** 批次幂等键：每批独立记账——蓝图/各批"分别记"是重跑不重发的粒度基础 */
 export function batchDispatchKeyOf(taskId: string, batch: ArchitectBatch): string {
     return dispatchKeyOf(taskId, `batch:${batch.itemId}:${hashOf(canonicalJson(batch))}`);
-}
-
-/** itemId → 重放文件名（只替换文件系统非法字符，不动消息本体与幂等键） */
-function batchFileNameOf(itemId: string): string {
-    return `batch-${itemId.replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")}.json`;
 }
 
 export interface ArchitectBatchDispatchOptions {

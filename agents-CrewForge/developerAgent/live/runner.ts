@@ -48,8 +48,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { createDeveloperAgent } from "../index";
 import { createRealLlm } from "../realLlm";
-import { createArchitectAgent } from "../architectAgent";
-import type { DecomposeResult } from "../architectAgent";
+import { assembleTask, createArchitectAgent } from "../architectAgent";
+import {
+    batchFileNameOf, createArchitectCheckpoint, deliveredCheckIdsOf, pendingCheckpointWork,
+    rebuildArchitectCheckpointFromParts, restoreArchitectCheckpoint,
+    saveArchitectCheckpoint, saveRequirementHash,
+} from "../architectCheckpoint";
+import type { ArchitectCheckpoint } from "../architectCheckpoint";
 // 9/15 实弹补：runner 此前没加载仓库 .env，shell 里若继承着别的 ANTHROPIC_* 值
 // （如 Claude Code 自己的中转站），createRealLlm 的 env 兜底会拿到错误端点——
 // 实测 404 Model "qwen3.8-flash" is not supported。以仓库 .env 为准（CLI 同款做法）。
@@ -169,8 +174,9 @@ function loadTaskFromFile(filePath: string): ArchitectTask {
 
 /**
  * 需求原文 → 架构师拆解 → 任务包（落盘留证）。
- * LLM 配置与 architect-cli 一致：maxTokens 32768（整包输出 >8192 会被截断）、
- * timeoutMs 900s（小包 ~85s/次；中型项目 p7 在 480s 处被自掐，留 2 倍余量）。
+ * LLM 配置与 architect-cli 一致：maxTokens 32768、timeoutMs 1350s（9/16 按用户指令
+ * 从 900s ×1.5——p7 实弹 w4 单发 509s、w5 撞 900s 直接作废整次）。
+ * 蓝图与每批**生成即落盘**，外加一份 checkpoint：拆解中途断掉可续跑，不从头重烧。
  * 这里**不依赖惰性 llm**——要拆解就必须有凭据，拿不到就是 fail fast，不静默降级。
  */
 async function decomposeRequirement(reqPath: string): Promise<{ task: ArchitectTask; outFile: string }> {
@@ -191,7 +197,7 @@ async function decomposeRequirement(reqPath: string): Promise<{ task: ArchitectT
         let seq = 0;
         architectLlm = createRealLlm({
             maxTokens: 32768,
-            timeoutMs: 900_000,
+            timeoutMs: 1_350_000, // 9/16 用户指令 ×1.5（与 architect-cli 同源同值）
             onCall: (i) => {
                 seq++;
                 const extra = i.attempts > 1 ? ` [${i.escalated ? "升档" : "重试"}×${i.attempts}]` : "";
@@ -203,30 +209,66 @@ async function decomposeRequirement(reqPath: string): Promise<{ task: ArchitectT
         process.exit(2);
     }
 
+    const outFile = path.join(RUNS_ROOT, "_tasks", `${runId}.json`);
+    const checkpointFile = path.join(RUNS_ROOT, "_tasks", `${runId}.checkpoint.json`);
+    const partsDir = path.join(RUNS_ROOT, "_tasks", `${runId}-parts`);
+    fs.mkdirSync(partsDir, { recursive: true });
+    // --reset = 从头拆。只删档案不够：_parts 里的中间产物还在，重建能把旧蓝图接回来
+    const reset = argv.includes("--reset");
+    if (reset) {
+        try { fs.rmSync(checkpointFile); } catch { /* 不存在=正常 */ }
+    }
     const t0 = Date.now();
-    let result: DecomposeResult;
     try {
-        result = await createArchitectAgent({ llm: architectLlm }).decompose({ requirement, projectId, taskId });
+        const agent = createArchitectAgent({ llm: architectLlm });
+        // 续跑优先级：档案 > 用 _parts 中间产物重建 > 从蓝图重拆。
+        //   · 档案权威（自带需求指纹）；_parts 重建兜"档案功能上线前的历史运行"——
+        //     那种运行中间产物齐全却没有档案，按"只认档案"会被判成从没拆过、整份白烧；
+        //   · 两者都没有才是真首次运行。
+        const warn = (reason: string): void => console.warn(`[architect] ⚠️ ${reason}`);
+        let checkpoint: ArchitectCheckpoint;
+        const restored = restoreArchitectCheckpoint(checkpointFile, requirement, projectId, taskId, warn);
+        const resumed = restored
+            ?? (reset ? null : rebuildArchitectCheckpointFromParts(partsDir, requirement, projectId, taskId, warn));
+        if (resumed) {
+            checkpoint = resumed;
+            if (restored) {
+                console.log(`[architect] checkpoint 恢复：已完成 ${checkpoint.batches.length} 个批次，跳过已完成工作`);
+            } else {
+                // 重建出来的档案立刻落盘：下次运行走权威档案，不再依赖 _parts 兜底
+                saveArchitectCheckpoint(checkpointFile, checkpoint);
+                console.log(`[architect] 从 _parts 重建档案：已完成 ${checkpoint.batches.length} 个批次，不重烧`);
+            }
+        } else {
+            const bp = await agent.decomposeBlueprint({ requirement, projectId, taskId });
+            checkpoint = createArchitectCheckpoint(requirement, bp.task);
+            fs.writeFileSync(path.join(partsDir, "blueprint.json"), JSON.stringify(bp.task, null, 2), "utf8");
+            saveRequirementHash(partsDir, requirement);
+            saveArchitectCheckpoint(checkpointFile, checkpoint);
+        }
+        // delivered 必须逐字重建上次的判据清单（少一条就漏放重复 id），pending 即本次要拆的切片
+        const delivered = deliveredCheckIdsOf(checkpoint);
+        const pending = pendingCheckpointWork(checkpoint);
+        console.log(`[architect] 待拆工作项 ${pending.length} 个：${pending.map((w) => w.id).join(", ") || "(无，直接装配)"}`);
+        for (const item of pending) {
+            const b = await agent.decomposeBatch({ requirement, blueprint: checkpoint.blueprint, item, deliveredCheckIds: delivered, projectId, taskId });
+            checkpoint = createArchitectCheckpoint(requirement, checkpoint.blueprint, [...checkpoint.batches, b.batch]);
+            delivered.push(...b.batch.checks.map((c) => c.id));
+            fs.writeFileSync(path.join(partsDir, batchFileNameOf(item.id)), JSON.stringify(b.batch, null, 2), "utf8");
+            saveArchitectCheckpoint(checkpointFile, checkpoint);
+            console.log(`[architect] 批次 ${item.id} 完成：判据 +${b.batch.checks.length}`);
+        }
+        const task = assembleTask(checkpoint.blueprint, checkpoint.batches);
+        fs.mkdirSync(path.dirname(outFile), { recursive: true });
+        fs.writeFileSync(outFile, JSON.stringify(task, null, 2), "utf8");
+        console.log(`[architect] ✅ 两阶段拆解完成：${((Date.now() - t0) / 1000).toFixed(1)}s`);
+        return { task, outFile };
     } catch (e) {
         // 拆解全败（格式/校验/网络）：原文进 stderr，任务不发车——归因在架构师，不在开发
         console.error(`[architect] 拆解失败（任务不发车）：${(e as Error).message}`);
         process.exit(2);
     }
-    const secs = ((Date.now() - t0) / 1000).toFixed(1);
-
-    // 拆解报告：PM 监视口——拆了什么、几次过、验收几条，一眼能对
-    const items = result.task.foundationPlan.workItems ?? [];
-    console.log(`[architect] ✅ 拆解完成：${secs}s，尝试 ${result.attempts} 次`
-        + (result.rejections.length > 0 ? `（被拒 ${result.rejections.length} 次后自愈）` : "（一次通过）"));
-    console.log(`[architect] 工作项 ${items.length}：${items.map((w) => `${w.id}/${w.kind}`).join(", ")}`);
-    console.log(`[architect] 验收判据 ${result.task.acceptanceChecks.length} 条：${result.task.acceptanceChecks.map((c) => c.id).join(", ")}`);
-    console.log(`[architect] 接口契约 ${result.task.contract.endpoints.length} 条，stack=${result.task.stackProfile.backend ?? "?"}${result.task.stackProfile.frontend && result.task.stackProfile.frontend !== "none" ? "+" + result.task.stackProfile.frontend : ""}`);
-
-    const outFile = path.join(RUNS_ROOT, "_tasks", `${runId}.json`);
-    fs.mkdirSync(path.dirname(outFile), { recursive: true });
-    fs.writeFileSync(outFile, JSON.stringify(result.task, null, 2), "utf-8");
-    console.log(`[architect] 任务包落盘：${outFile}（复跑可用 --task 直喂）`);
-    return { task: result.task, outFile };
+    throw new Error("unreachable");
 }
 
 let task: ArchitectTask;

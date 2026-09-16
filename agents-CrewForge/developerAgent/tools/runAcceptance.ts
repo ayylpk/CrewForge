@@ -199,10 +199,23 @@ export const runAcceptanceTool: ToolSpec = {
 
         const timeoutMs = num(args, "timeoutMs", 300_000);
         const startedAll = Date.now();
-        const lines: string[] = [];
-        const m = (s: string): void => { lines.push(s); console.log(`[runAcceptance] ${s}`); };
+        const modelLines: string[] = [];       // 给模型的：紧凑、失败优先（见下方 output 注释）
+        // 全量逐条现场只进控制台（runner 把它落进日志），**不进 output** —— 否则必被 8192 截断
+        const m = (s: string): void => { console.log(`[runAcceptance] ${s}`); };
+        /** 从工具原始输出里抠出**一条**能进紧凑清单的原因（优先"· "条目行，其次末行） */
+        const briefReason = (out: string): string => {
+            const ls = out.split(/\r?\n/).map((s) => s.trim()).filter((s) => s !== "");
+            const pick = ls.find((s) => s.startsWith("·")) ?? ls[ls.length - 1] ?? "";
+            return pick.replace(/^·\s*/, "").slice(0, 220);
+        };
 
         let passed = 0, failed = 0;
+        // ★ 第三个桶：判据**求值不了**（判据侧问题，改代码无效）。
+        //   与 failed 严格分开：9/16 p7 实弹把两类混在一起报 ❌，模型分不清该改代码
+        //   还是这条判据根本判不了，在一条永远过不了的判据上追了 49 分钟。
+        let unevaluable = 0;
+        const unevaluableIds: string[] = [];
+        const failedIds: string[] = [];
         const results: Record<string, unknown>[] = [];
 
         for (const item of runnable) {
@@ -254,14 +267,23 @@ export const runAcceptanceTool: ToolSpec = {
                 timeoutMs: Math.min(180_000, Math.max(30_000, timeoutMs - (Date.now() - startedAll))),
                 log: (l) => m(l),
             });
-            if (r.ok) passed++; else failed++;
-            m(`${r.ok ? "✅" : "❌"} ${item.id} ${intent.method} ${intent.path} → ${String(r.meta["actualStatus"] ?? "-")}（期望 ${intent.expectedStatus}）`);
-            // ★ 失败必须带现场（9/15 p1 实弹抓到的真缺口）：
-            //   第一版只打一行 "→ -（期望 201）"，13 条契约全失败时模型看不到**任何**
-            //   原因——服务没起来？断言挂了？它只能靠"再摸摸看"去猜（实测它猜了 2 轮
-            //   才定位到 SQL 保留字）。r5 的 25 次自造验证就是这么烧出来的：
-            //   工具给的现场越薄，模型越要自己造工具。所以失败分支一律附原文
-            //   （与 runCommand 失败同规格：给足 stdout/stderr 尾部）。
+            // 分三桶：全绿 / 有真断言失败（改代码有用）/ 全是"判不了"（改代码无效）
+            const uneval = (r.meta["unevaluableChecks"] as string[] | undefined) ?? [];
+            const realFails = (r.meta["assertFailures"] as string[] | undefined) ?? [];
+            if (r.ok) passed++;
+            else if (uneval.length > 0 && realFails.length === 0) { unevaluable++; unevaluableIds.push(item.id); }
+            else { failed++; failedIds.push(item.id); }
+            const oneLine = `${r.ok ? "✅" : "❌"} ${item.id} ${intent.method} ${intent.path} → ${String(r.meta["actualStatus"] ?? "-")}（期望 ${intent.expectedStatus}）`;
+            m(oneLine);
+            // 给模型的那份：一行结论 + 一行原因 —— 够它决定"该改哪一条"
+            modelLines.push(r.ok ? oneLine : `${oneLine}\n    ↳ ${briefReason(r.output)}`);
+            // ★ 失败现场：**全量**原文进控制台/日志（人看得细），模型侧走紧凑清单 + only 重跑。
+            //   9/15 p1 的教训（只打一行 → 模型看不到任何原因 → 自己去造工具猜）仍然成立，
+            //   所以"一行原因"必须留；但旧做法把全量塞进 output，几十条 × 2.5KB 必超 8192，
+            //   于是被 clipForModel 头尾截断 —— **失败清单恰好在中间被吃掉**
+            //   （9/16 p7 llm#55 原话："truncated in the middle so I can't see which"）。
+            //   现在：模型拿到"一行结论 + 一行原因"（够决定改哪条），要看某条完整现场就
+            //   only:["<id>"] 重跑 —— 现场依然够，但不再越窗。
             if (!r.ok) {
                 m(`--- ${item.id} 现场 ---\n${r.output.slice(-2_500)}`);
             }
@@ -270,19 +292,56 @@ export const runAcceptanceTool: ToolSpec = {
 
         const unexec = unexecutable.map((u) => `${u.id}(${u.kind})`);
         const summary = [
-            `验收预演完成：通过 ${passed} / 失败 ${failed} / 共 ${runnable.length} 条可执行判据`
+            `验收预演完成：通过 ${passed} / 失败 ${failed} / 不可判定 ${unevaluable} / 共 ${runnable.length} 条可执行判据`
             + (unexec.length > 0 ? `；另有 ${unexec.length} 条无法机械执行：${unexec.join(", ")}` : ""),
             `耗时 ${((Date.now() - startedAll) / 1000).toFixed(1)}s`,
-            "",
-            "⚠️ 这是自检预演，不是验收结论：verified 只能由外部 TestAgent 判定。",
         ];
+        if (unevaluable > 0) {
+            // 把"判不了"单独讲清楚：它既不是绿，也不是模型的锅
+            summary.push(
+                "",
+                `⚠️ 不可判定的判据（${unevaluable} 条）：${unevaluableIds.join(", ")}`,
+                "   这些**不是代码问题**——是判据自身求值不了（形状非法 / 执行器不支持的写法）。",
+                "   改服务端代码对它们**无效**：要修的是判据（架构师侧）。别在它们身上反复重跑预演。",
+            );
+        }
+        // ★ id 清单永远完整（这是不可再省的那部分：模型至少要**知道是哪几条**）。
+        //   明细可以省，清单不能省——9/16 p7 的痛点正是"知道错了 17 条、不知道是哪 17 条"。
+        if (failed > 0) summary.push("", `失败（改代码有用）：${failedIds.join(", ")}`);
+        summary.push("", "⚠️ 这是自检预演，不是验收结论：verified 只能由外部 TestAgent 判定。");
 
-        // 一条 CONTRACT 失败 → ok:false（让模型看到失败并去修），但**不阻断**：全部结果都在 output 里
+        // 一条 CONTRACT 失败 → ok:false（让模型看到失败并去修），但**不阻断**。
+        // ★ output 给模型的是**紧凑版**：失败/不可判定清单（一条一行 + 一行原因）+ 汇总。
+        //   全量 lines 只进控制台与 meta.results —— 堆进 output 就会被 8192 截断，把清单吃掉。
+        const hint = (failed > 0 || unevaluable > 0)
+            ? `\n要看某一条的完整现场：用 only: ["${failedIds[0] ?? unevaluableIds[0] ?? ""}"] 只重跑它。`
+            : "";
+        // 兜底：明细本身也要有上限。64 条全失败时一行约 270 字符 × 64 ≈ 17KB，照样越窗；
+        // 而"是哪几条"的完整清单在 summary 里（那部分不省），这里省掉的只是逐条原因。
+        const DETAIL_CAP = 5_000;
+        let body = modelLines.join("\n");
+        if (body.length > DETAIL_CAP) {
+            const kept: string[] = [];
+            let n = 0;
+            for (const l of modelLines) {
+                if (n + l.length > DETAIL_CAP) break;
+                kept.push(l);
+                n += l.length;
+            }
+            body = `${kept.join("\n")}\n…（明细过长，已省略 ${modelLines.length - kept.length} 条原因；`
+                + "完整 id 见下面的清单，逐条现场用 only 重跑）";
+        }
         return {
-            ok: failed === 0 && runnable.length > 0,
-            output: [...lines, "", ...summary].join("\n"),
+            // fail-closed：有真失败、或仍有判不了的，都不算绿（判不了 ≠ 通过；
+            // 同"JSON 解析失败也判失败"的既有口径）
+            ok: failed === 0 && unevaluable === 0 && runnable.length > 0,
+            output: [
+                modelLines.length > 0 ? body : "（全部判据通过）",
+                "",
+                ...summary,
+            ].join("\n") + hint,
             meta: {
-                passed, failed, runnable: runnable.length,
+                passed, failed, failedIds, unevaluable, unevaluableIds, runnable: runnable.length,
                 unexecutable: unexecutable.map((u) => u.id),
                 results,
                 durationMs: Date.now() - startedAll,

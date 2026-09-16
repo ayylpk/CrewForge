@@ -1,8 +1,9 @@
 // tests/architectAgent.test.ts —— architectAgent 的零 LLM 单测（Fake LLM，全程不联网）
 //
-//   被测链路（9/15 晚两阶段升级后）：
-//   · decompose()（旧一步整包）——runner 还在调用，本文件保留其全部存量用例；
-//   · decomposeBlueprint()——闸门链 = 旧五道 + "每个 allowedRoots ≥1 条 COMPILE 底线"；
+//   被测链路（9/15 晚两阶段升级后；9/16 清理掉一步整包的 decompose）：
+//   · 校验-重试环（信封拆包 / 抠 JSON / 权威字段闸 / 反馈环 / 传输错自愈）——
+//     蓝图与批次共用同一段骨架，用例挂在蓝图阶段上；
+//   · decomposeBlueprint()——闸门链 = 通用校验链 + "每个 allowedRoots ≥1 条 COMPILE 底线"；
 //   · decomposeBatch()——ArchitectBatchSchema + 业务闸（业务项判据≥1 / id 撞车 /
 //     CONTRACT 必须命中蓝图 endpoints）+ 代码强制身份；
 //   · assembleTask()——纯函数装配：前缀序校验、detail 入位、判据按序合并 id 去重。
@@ -21,7 +22,7 @@ import type { DeveloperLlm } from "../graph";
 const REQ = "做一个便签管理小工具：可新增、查看、删除便签。";
 
 /**
- * 合法任务包 fixture——能一口气过全部五道校验链。
+ * 蓝图 fixture 的底座：能一口气过形状闸的任务包。
  * ⚠️ ArchitectTaskSchema 是严格 z.object：顶层 12 个字段一个不能多一个不能少；
  * workItems.kind 只能取七种枚举值。
  */
@@ -53,7 +54,6 @@ const VALID_TASK = {
 /**
  * 合法蓝图 fixture——在 VALID_TASK 基础上补齐蓝图底线闸：
  * allowedRoots 的每个根（backend/frontend）都要有一条 COMPILE。
- * （decompose 旧闸不查底线，所以旧 8 例继续吃 VALID_TASK；decomposeBlueprint 吃这份。）
  */
 const VALID_BLUEPRINT = {
     ...VALID_TASK,
@@ -102,90 +102,56 @@ function scriptedLlm(decisions: unknown[]) {
     return { llm, tasks, count: () => calls };
 }
 
-/**
- * 照抄型 Fake：从 prompt 里抠出 projectId/taskId 并"照抄"进任务包——
- * 模拟真实模型行为（身份是架构师从 prompt 抄进 JSON 的，agent 不做强行覆盖）。
- */
-function echoIdentityLlm() {
-    let calls = 0;
-    const llm: DeveloperLlm = {
-        id: "fake-echo",
-        calls: () => calls,
-        async next(input) {
-            calls++;
-            const p = /projectId:\s*(\S+)/.exec(input.task)?.[1] ?? "p1";
-            const t = /taskId:\s*(\S+)/.exec(input.task)?.[1] ?? "t1";
-            return JSON.stringify({ ...VALID_TASK, projectId: p, taskId: t });
-        },
-    };
-    return { llm, count: () => calls };
-}
-
-describe("architectAgent / 零 LLM 校验链", () => {
-    it("一次成功：合法 JSON 直接通过，attempts=1、rejections 空", async () => {
-        const fake = scriptedLlm([JSON.stringify(VALID_TASK)]);
-        const agent = createArchitectAgent({ llm: fake.llm });
-        const result = await agent.decompose({ requirement: REQ });
-
-        expect(fake.count()).toBe(1);
-        expect(result.attempts).toBe(1);
-        expect(result.rejections).toEqual([]);
-        // 关键字段逐个对（不是整对象 toEqual——zod parse 会补 looseObject 之外的无关差异）
-        expect(result.task.type).toBe("architect_task");
-        expect(result.task.projectId).toBe("p1");
-        expect(result.task.taskId).toBe("t1");
-        expect(result.task.requirementSnapshot.goal).toBe("便签管理");
-        expect(result.task.stackProfile.backend).toBe("node+express");
-        expect(result.task.foundationPlan.dirs).toEqual(["backend", "frontend"]);
-        expect(result.task.foundationPlan.workItems?.length).toBe(4);
-        expect(result.task.acceptanceChecks.length).toBe(1);
-        expect(result.task.allowedRoots).toEqual(["backend", "frontend"]);
-        expect(result.task.developerInstructions).toBe("按顺序做");
-    });
-
-    it("反馈环：空 acceptanceChecks 被业务闸拒 → 被拒原因进第二次 prompt → 第二次成功", async () => {
-        // 第 1 次：schema 层合法但验收判据为空 → 业务硬闸拒
-        const fake = scriptedLlm([{ ...VALID_TASK, acceptanceChecks: [] }, VALID_TASK]);
-        const agent = createArchitectAgent({ llm: fake.llm });
-        const result = await agent.decompose({ requirement: REQ });
-
-        expect(fake.count()).toBe(2);
-        expect(result.attempts).toBe(2);
-        expect(result.rejections.length).toBe(1);
-        expect(result.rejections[0]).toContain("acceptanceChecks 不能为空");
-        // ★ 反馈环证据：第二次 prompt 必须带上第一次被拒的原因摘要 + 修正指令 + 原始需求
-        expect(fake.tasks[1]).toContain("acceptanceChecks 不能为空");
-        expect(fake.tasks[1]).toContain("必须修正");
-        expect(fake.tasks[1]).toContain(REQ);
-    });
-
+describe("architectAgent / 校验-重试环（蓝图与批次共用同一段骨架，用例挂在蓝图侧）", () => {
     it("重试耗尽：maxAttempts=2 两次都吐非 JSON → 抛错含最后一次原因，且不超发", async () => {
         const fake = scriptedLlm(["完全不是 JSON 的输出", "还是不是 JSON"]);
         const agent = createArchitectAgent({ llm: fake.llm, maxAttempts: 2 });
         // 最后一次拒绝原因 = "输出里找不到合法 JSON 对象……" → 错误信息含 "JSON"
-        await expect(agent.decompose({ requirement: REQ })).rejects.toThrow("JSON");
+        await expect(agent.decomposeBlueprint({ requirement: REQ })).rejects.toThrow("JSON");
         expect(fake.count()).toBe(2); // 恰好两次，不多烧
     });
 
-    it("runner 兼容终验：成功产物过 parseInbound 同链路 → ok=true", async () => {
-        const fake = scriptedLlm([JSON.stringify(VALID_TASK)]);
-        const agent = createArchitectAgent({ llm: fake.llm });
-        const result = await agent.decompose({ requirement: REQ });
+    it("调用层自愈：第 1 次 LLM 调用抛传输错（中转超时）→ 第 2 次成功，不再裸穿整次作废", async () => {
+        // 9/16 p20 第三跑死因：w6 批拆解撞 "The operation timed out."，
+        // generateValidated 的裸 await 让传输错直接穿出「3 连拒」环（它只兜内容拒绝）
+        // → dispatch_cancelled 整次作废。传输错必须和内容拒绝一样进重试环。
+        let calls = 0;
+        const llm: DeveloperLlm = {
+            id: "fake-flaky",
+            calls: () => calls,
+            async next() {
+                calls++;
+                if (calls === 1) throw new Error("The operation timed out.");
+                return JSON.stringify(VALID_BLUEPRINT);
+            },
+        };
+        const result = await createArchitectAgent({ llm }).decomposeBlueprint({ requirement: REQ });
+        expect(calls).toBe(2);
+        expect(result.attempts).toBe(2);
+        expect(result.rejections[0]).toContain("The operation timed out."); // 拒因留痕可上报
+    });
 
-        const inbound = parseInbound(JSON.stringify(result.task));
-        if (!inbound.ok) throw new Error(`runner 入站校验意外失败：${inbound.error}`);
-        expect(inbound.message.type).toBe("architect_task");
+    it("调用层耗尽：传输错连吃 maxAttempts 次 → 抛「全部被拒」含最后原因，不超发", async () => {
+        let calls = 0;
+        const llm: DeveloperLlm = {
+            id: "fake-dead",
+            calls: () => calls,
+            async next() { calls++; throw new Error("boom"); },
+        };
+        const agent = createArchitectAgent({ llm, maxAttempts: 2 });
+        await expect(agent.decomposeBlueprint({ requirement: REQ })).rejects.toThrow("全部被拒");
+        expect(calls).toBe(2);
     });
 
     it("权威字段拦截：requirementSnapshot 里夹带 done → 闸先于 zod 拒收 → 反馈后自愈", async () => {
         // 顶层加 done 会被严格 z.object 直接拒（测不到闸的优先级），
         // 所以塞进 looseObject 的 requirementSnapshot：zod 放行、authority 闸必须先拦。
         const fake = scriptedLlm([
-            { ...VALID_TASK, requirementSnapshot: { goal: "x", done: true } },
-            VALID_TASK,
+            { ...VALID_BLUEPRINT, requirementSnapshot: { goal: "x", done: true } },
+            VALID_BLUEPRINT,
         ]);
         const agent = createArchitectAgent({ llm: fake.llm });
-        const result = await agent.decompose({ requirement: REQ });
+        const result = await agent.decomposeBlueprint({ requirement: REQ });
 
         expect(result.attempts).toBe(2);
         expect(result.rejections[0]).toContain("权威字段");
@@ -194,35 +160,20 @@ describe("architectAgent / 零 LLM 校验链", () => {
     });
 
     it("围栏/叙述里的 JSON 能抠出：```json 围栏 + 前后叙述文字 → 一次成功", async () => {
-        const fake = scriptedLlm(["架构师分析如下：\n```json\n" + JSON.stringify(VALID_TASK) + "\n```"]);
+        const fake = scriptedLlm(["架构师分析如下：\n```json\n" + JSON.stringify(VALID_BLUEPRINT) + "\n```"]);
         const agent = createArchitectAgent({ llm: fake.llm });
-        const result = await agent.decompose({ requirement: REQ });
+        const result = await agent.decomposeBlueprint({ requirement: REQ });
 
         expect(fake.count()).toBe(1);
         expect(result.attempts).toBe(1);
         expect(result.task.taskId).toBe("t1");
     });
 
-    it("身份缺省注入：不传 → p1/t1；传了 → 用传入值（身份经 prompt 传递、模型照抄）", async () => {
-        // ① 不传身份：prompt 注入缺省 p1/t1
-        const d = echoIdentityLlm();
-        const r1 = await createArchitectAgent({ llm: d.llm }).decompose({ requirement: REQ });
-        expect(r1.task.projectId).toBe("p1");
-        expect(r1.task.taskId).toBe("t1");
-
-        // ② 显式传入：身份出现在 prompt 里并被照抄进任务包
-        const c = echoIdentityLlm();
-        const r2 = await createArchitectAgent({ llm: c.llm })
-            .decompose({ requirement: REQ, projectId: "p2", taskId: "t9" });
-        expect(r2.task.projectId).toBe("p2");
-        expect(r2.task.taskId).toBe("t9");
-    });
-
     it("空需求 fail fast：空串/纯空白直接拒绝，一次 LLM 都不调", async () => {
-        const fake = scriptedLlm([JSON.stringify(VALID_TASK)]);
+        const fake = scriptedLlm([JSON.stringify(VALID_BLUEPRINT)]);
         const agent = createArchitectAgent({ llm: fake.llm });
-        await expect(agent.decompose({ requirement: "" })).rejects.toThrow("需求文本为空");
-        await expect(agent.decompose({ requirement: "   \n\t  " })).rejects.toThrow("需求文本为空");
+        await expect(agent.decomposeBlueprint({ requirement: "" })).rejects.toThrow("需求文本为空");
+        await expect(agent.decomposeBlueprint({ requirement: "   \n\t  " })).rejects.toThrow("需求文本为空");
         expect(fake.count()).toBe(0);
     });
 });
@@ -258,7 +209,7 @@ describe("architectAgent / decomposeBlueprint（蓝图阶段）", () => {
     });
 
     it("COMPILE 底线闸：allowedRoots 的 frontend 没有底线判据 → 拒且点名缺的根", async () => {
-        // 只给 backend 一条底线（VALID_TASK 原样）——decompose 旧闸放行，蓝图闸必须拦
+        // 只给 backend 一条底线 → 蓝图底线闸必须拦，且点名缺的是哪个根
         const fake = scriptedLlm([
             { ...VALID_BLUEPRINT, acceptanceChecks: [{ id: "ac-1", kind: "COMPILE", target: "backend" }] },
             VALID_BLUEPRINT,
@@ -365,6 +316,41 @@ describe("architectAgent / decomposeBatch（批次阶段）", () => {
         expect(r.attempts).toBe(2);
         expect(r.rejections[0]).toContain("/api/ghost"); //  offenders 逐条列出
         expect(r.rejections[0]).toContain("endpoints");
+    });
+
+    it("端点闸=真 router 形状：占位符名任意/查询串剥掉/具体实例命中（9/16 p20 误杀补刀）", async () => {
+        // p20 第四跑死因：蓝图模板 GET /api/tasks/{id}，批次判据写 GET /api/tasks/999999、
+        // 占位符叫 {pid}/{tid}、或带 ?projectId= 查询串——语义全对，裸字符串闸 3 连拒整次作废。
+        const bp = ArchitectTaskSchema.parse({
+            ...VALID_BLUEPRINT,
+            contract: {
+                version: "1",
+                endpoints: [
+                    { method: "GET", path: "/api/notes/{id}" },
+                    { method: "POST", path: "/api/notes" },
+                ],
+            },
+        });
+        const w2 = workItemOf(bp, 1);
+        const okChecks = [
+            { id: "v-1", kind: "CONTRACT", method: "GET", path: "/api/notes/{nid}", expectedStatus: 200 },         // 占位符换名
+            { id: "v-2", kind: "CONTRACT", method: "GET", path: "/api/notes/999999?expand=1", expectedStatus: 200 }, // 具体实例+查询串
+            { id: "v-3", kind: "CONTRACT", method: "POST", path: "/api/notes/", expectedStatus: 201 },             // 尾斜杠
+        ];
+        const fake = scriptedLlm([mkBatch({ itemId: "w2", checks: okChecks })]);
+        const r = await createArchitectAgent({ llm: fake.llm })
+            .decomposeBatch({ requirement: REQ, blueprint: bp, item: w2, deliveredCheckIds: [] });
+        expect(r.attempts).toBe(1); // 全命中：一次都不该拒
+
+        // 对穿：凭空多一段/少一段仍然必须拒（闸没被放宽成摆设）
+        const bad = scriptedLlm([
+            mkBatch({ itemId: "w2", checks: [{ id: "v-9", kind: "CONTRACT", method: "GET", path: "/api/notes/1/2", expectedStatus: 200 }] }),
+            mkBatch({ itemId: "w2", checks: okChecks }),
+        ]);
+        const r2 = await createArchitectAgent({ llm: bad.llm })
+            .decomposeBatch({ requirement: REQ, blueprint: bp, item: w2, deliveredCheckIds: [] });
+        expect(r2.attempts).toBe(2);
+        expect(r2.rejections[0]).toContain("/api/notes/1/2");
     });
 
     it("批次身份：模型谎报 itemId/projectId 也被代码盖成入参（镜像蓝图纪律）", async () => {
@@ -474,10 +460,9 @@ describe("architectAgent / 提示词 fail-fast", () => {
         const dir = mkdtempSync(join(tmpdir(), "arch-prompts-"));
         const write = (name: string, text: string) => writeFileSync(join(dir, name), text, "utf-8");
 
-        // ① 空目录：第一个要读的文件（architect-system.md）就 ENOENT
-        expect(() => createArchitectAgent({ llm: fake.llm, promptDir: dir })).toThrow("architect-system.md");
-        // ② system/blueprint 有、_check-shape.md 是空白 → fail fast 且点名共享文件
-        write("architect-system.md", "x");
+        // ① 空目录：第一个要读的文件（architect-blueprint.md）就 ENOENT
+        expect(() => createArchitectAgent({ llm: fake.llm, promptDir: dir })).toThrow("architect-blueprint.md");
+        // ② 蓝图提示词有、_check-shape.md 是空白 → fail fast 且点名共享文件
         write("architect-blueprint.md", "y");
         write("_check-shape.md", "   \n");
         expect(() => createArchitectAgent({ llm: fake.llm, promptDir: dir })).toThrow("_check-shape.md");

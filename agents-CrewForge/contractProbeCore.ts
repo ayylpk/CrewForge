@@ -112,7 +112,16 @@ export interface JsonAssertion {
     matches?: string;
     length?: number;
     minLength?: number;
-    each?: { path: string; equals?: unknown; matches?: string };
+    /**
+     * 逐项断言：数组每一项都要满足同一条子断言。
+     *
+     * ★ 9/16 修：这里原本写死成 `{path, equals?, matches?}` —— **窄能力被写进了类型里**，
+     *   于是模型写的 `each:{path,notEquals}` / `each:{path,exists}`（这两个在顶层都是合法修饰符）
+     *   在类型层就被否掉，实现层也真的只实现了那两个 → 合法判据被记成 ❌。
+     *   现在直接复用 JsonAssertion（只去掉 each，避免无界嵌套）：修饰符清单**只有一份**，
+     *   以后加修饰符自动跟着走，不会再出现"类型/实现/文档"三方漂移。
+     */
+    each?: Omit<JsonAssertion, "each">;
 }
 
 /** 一条契约断言 */
@@ -281,15 +290,51 @@ export function resolveResetTarget(
  *   纯函数、零 IO——这样它能被单测直接钉住（断言器本身错了比断言不过更危险：
  *   它会静默把坏实现判成绿的）。
  */
+
+/**
+ * 「不可判定」标记：**判据本身**没法求值（形状非法 / 执行器不支持的写法）。
+ *
+ *   ★ 与"断言不过"性质完全不同，混在一起报 ❌ 是 9/16 p7 实弹最贵的坑：
+ *     · 断言不过 = 判据能判、服务端答错了 → **模型改代码有用**；
+ *     · 不可判定 = 这条判据求值不了 → 模型改什么代码都**没用**，是判据侧要人来修。
+ *   两者原来一律记 ❌，模型分不清，在一条永远过不了的判据上追了 49 分钟。
+ *   这里用前缀做**机器可检**的标记，调用方据此分流（与 HISTORY_FOLDED_NOTE /
+ *   ANTI_SPEC_GAMING_MARKER 同一手法：明示、不静默、可被代码识别）。
+ */
+export const UNEVALUABLE_MARK = "[不可判定] ";
+
+/** 这条失败原因是不是"判不了"（而非"判错了"）。 */
+export function isUnevaluable(why: string | null): boolean {
+    return typeof why === "string" && why.startsWith(UNEVALUABLE_MARK);
+}
+
+/** each 子断言支持的全部修饰符（与顶层同一份名单；each 自身不允许嵌套） */
+const EACH_MODIFIERS = ["exists", "equals", "notEquals", "contains", "matches", "length", "minLength"] as const;
+
+/** `each` 子断言的形状检查。消息留住"至少要给"这个字眼——单测钉着它。 */
+function eachShapeIssue(path: string, e: JsonAssertion): string | null {
+    if (!e || typeof e !== "object") {
+        return `${UNEVALUABLE_MARK}each 形状非法：${path} 的 each 必须是个对象（形如 {path, equals}）`;
+    }
+    const shape = EACH_MODIFIERS.filter((k) => (e as unknown as Record<string, unknown>)[k] !== undefined);
+    if (shape.length === 0) {
+        return `${UNEVALUABLE_MARK}each 形状非法：${path} 的 each 至少要给 ${EACH_MODIFIERS.join("/")} 之一`;
+    }
+    if (shape.length > 1) {
+        return `${UNEVALUABLE_MARK}each 形状非法：${path} 的 each 同时给了 ${shape.join(" + ")}——一条断言只表达一件事`;
+    }
+    return null;
+}
+
 export function evalAssertion(root: unknown, a: JsonAssertion): string | null {
     const shape = ["exists", "equals", "notEquals", "contains", "matches", "length", "minLength", "each"]
         .filter((k) => (a as unknown as Record<string, unknown>)[k] !== undefined);
     if (shape.length === 0) {
-        return `断言形状非法：${a.path} 至少要有 exists/equals/notEquals/contains/matches/length/minLength/each 之一`;
+        return `${UNEVALUABLE_MARK}断言形状非法：${a.path} 至少要有 exists/equals/notEquals/contains/matches/length/minLength/each 之一`;
     }
     if (shape.length > 1 && !(shape.length === 2 && shape.includes("each") && shape.includes("minLength"))) {
         // each + minLength 是刻意允许的组合（验"过滤生效且非空"）；其余多写视为任务包写错
-        return `断言形状非法：${a.path} 同时给了 ${shape.join(" + ")}——一条断言只表达一件事`;
+        return `${UNEVALUABLE_MARK}断言形状非法：${a.path} 同时给了 ${shape.join(" + ")}——一条断言只表达一件事`;
     }
 
     const actual = pickByPath(root, a.path);
@@ -337,34 +382,27 @@ export function evalAssertion(root: unknown, a: JsonAssertion): string | null {
     if (a.minLength !== undefined) {
         const n = Array.isArray(actual) || typeof actual === "string" ? actual.length : null;
         if (n === null) return `${a.path} 不是数组/字符串（实际 ${show(actual)}），无法判断 minLength`;
-        return n >= a.minLength ? null : `${a.path} 长度 ${n}，期望 ≥ ${a.minLength}`;
+        if (n < a.minLength) return `${a.path} 长度 ${n}，期望 ≥ ${a.minLength}`;
+        // ★ each + minLength 是形状闸**刻意允许**的组合（"过滤生效且非空"），所以这里
+        //   过了不能直接 return —— 旧实现提前返回，等于把 each 那段静默跳过：一条写着
+        //   "每条都得是 X" 的判据会退化成"只要非空就算过"。**假绿比假红危险**
+        //   （它会把坏实现记成绿的，而且没有任何信号）。
+        if (a.each === undefined) return null;
     }
-    // each：数组每一项的 path 都满足（equals 或 matches 二选一）
+    // each：数组每一项都要满足同一条子断言。
+    // ★ 9/16 p7 实弹：子断言**递归走同一条求值链**，所以 each 支持全部修饰符。
+    //   旧实现只在 each 里实现 equals/matches 两个，于是模型写的
+    //   `each:{path:"title",notEquals:"B任务"}` / `each:{path:"userId",exists:true}`
+    //   ——两者在**顶层都是合法写法**——被判成"形状非法"。后果不是"判错"，而是
+    //   一条**永远过不了、又根本不是代码问题**的判据被记成 ❌，模型去追一个幻影，
+    //   49 分钟里一直在追。窄子集 = 执行器的能力缺口伪装成"你代码写错了"。
     if (!Array.isArray(actual)) return `${a.path} 不是数组（实际 ${show(actual)}），无法用 each 逐项断言`;
     const e = a.each!;
-    if (e.equals === undefined && e.matches === undefined) {
-        return `each 形状非法：${a.path} 的 each 至少要给 equals 或 matches`;
-    }
+    const eShape = eachShapeIssue(a.path, e);
+    if (eShape !== null) return eShape;
     for (const [i, item] of actual.entries()) {
-        const v = pickByPath(item, e.path);
-        if (e.equals !== undefined) {
-            if (!deepEqual(v, e.equals)) {
-                return `${a.path}[${i}].${e.path} 实际为 ${show(v)}，期望每一项都深等于 ${show(e.equals)}`;
-            }
-            continue;
-        }
-        if (typeof v !== "string") {
-            return `${a.path}[${i}].${e.path} 不是字符串（实际 ${show(v)}），无法用 matches 判断`;
-        }
-        let re: RegExp;
-        try {
-            re = new RegExp(e.matches!);
-        } catch (err) {
-            return `each.matches 正则非法（${e.matches}）：${(err as Error).message}`;
-        }
-        if (!re.test(v)) {
-            return `${a.path}[${i}].${e.path} 实际为「${v}」，不匹配正则 /${e.matches}/`;
-        }
+        const why = evalAssertion(item, e);
+        if (why !== null) return `${a.path}[${i}].${e.path} 不满足：${why}`;
     }
     return null;
 }
@@ -646,18 +684,34 @@ export async function runContractProbe(o: {
                         };
                     }
                     const failures: string[] = [];
+                    const unevaluable: string[] = [];
                     for (const a of o.intent.assertJson) {
                         const why = evalAssertion(parsed, a);
                         say(`probe: 断言 ${a.path} → ${why === null ? "✅ 通过" : `❌ ${why}`}`);
-                        if (why !== null) failures.push(why);
+                        if (why === null) continue;
+                        // ★ 两类严格分流：改代码有用的（真断言失败）vs 改代码没用的（判据求值不了）
+                        (isUnevaluable(why) ? unevaluable : failures).push(why);
                     }
-                    if (failures.length > 0) {
+                    if (failures.length > 0 || unevaluable.length > 0) {
+                        const total = o.intent.assertJson.length;
+                        const out = [
+                            `${pre}${head}`,
+                            `正文片段 ${body.replace(/\s+/g, " ").slice(0, 600)}`,
+                            `结构化断言：通过 ${total - failures.length - unevaluable.length}`
+                                + ` / 不通过 ${failures.length} / 不可判定 ${unevaluable.length}（共 ${total} 条）`,
+                        ];
+                        if (failures.length > 0) {
+                            out.push(`不通过（服务端行为不符，**改代码有用**）：\n${failures.map((f) => `  · ${f}`).join("\n")}`);
+                        }
+                        if (unevaluable.length > 0) {
+                            out.push("不可判定（**判据侧问题，改代码无效**——要修的是判据，不是服务端）：\n"
+                                + unevaluable.map((f) => `  · ${f}`).join("\n"));
+                        }
                         return {
+                            // fail-closed：判不了 ≠ 通过（沿用"JSON 解析失败也判失败"的既有口径）
                             ok: false,
-                            output: `${pre}${head}\n正文片段 ${body.replace(/\s+/g, " ").slice(0, 600)}\n`
-                                + `结构化断言失败（${failures.length}/${o.intent.assertJson.length} 条）：\n`
-                                + failures.map((f) => `  · ${f}`).join("\n"),
-                            meta: { ...meta, assertFailures: failures },
+                            output: out.join("\n"),
+                            meta: { ...meta, assertFailures: failures, unevaluableChecks: unevaluable },
                         };
                     }
                 }

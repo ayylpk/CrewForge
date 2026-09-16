@@ -12,7 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { budgetText } from "../realLlm";
-import { pickByPath, suggestServeCommand, fillVars, fillVarsDeep, deepEqual, evalAssertion, resolveResetTarget } from "../../contractProbeCore";
+import { pickByPath, suggestServeCommand, fillVars, fillVarsDeep, deepEqual, evalAssertion, isUnevaluable, resolveResetTarget } from "../../contractProbeCore";
 import type { JsonAssertion } from "../../contractProbeCore";
 import { prepareCheck } from "../live/verifier";
 
@@ -358,6 +358,38 @@ describe("evalAssertion / 结构化断言（治 expectBodyContains 的假绿）"
         expect(evalAssertion(ok, { path: "data", each: { path: "status", equals: "completed" }, minLength: 1 })).toBeNull();
     });
 
+    it("each 支持全部修饰符（9/16 修：旧实现只有 equals/matches，模型用 notEquals/exists 被判「形状非法」）", () => {
+        // p7 实弹原样：这几条是模型写的**合法**判据，旧执行器判不了 → 记成 ❌ → 模型去追幻影
+        const tasks = { data: [{ title: "A任务" }, { title: "B任务" }] };
+        const why1 = evalAssertion(tasks, { path: "data", each: { path: "title", notEquals: "B任务" } });
+        expect(why1).toContain("data[1].title");     // 指出是第几条
+        expect(why1).not.toContain("形状非法");       // 关键：不能再报"判不了"
+        expect(evalAssertion({ data: [{ title: "A任务" }] }, { path: "data", each: { path: "title", notEquals: "B任务" } })).toBeNull();
+
+        const members = { data: [{ userId: 1 }, { userId: 2 }] };
+        expect(evalAssertion(members, { path: "data", each: { path: "userId", exists: true } })).toBeNull();
+        expect(evalAssertion({ data: [{ userId: 1 }, {}] }, { path: "data", each: { path: "userId", exists: true } }))
+            .toContain("data[1].userId");
+
+        // 其余修饰符同样走通：contains / length / minLength
+        expect(evalAssertion({ data: [{ t: "hello" }] }, { path: "data", each: { path: "t", contains: "ell" } })).toBeNull();
+        expect(evalAssertion({ data: [{ t: "ab" }] }, { path: "data", each: { path: "t", length: 2 } })).toBeNull();
+        expect(evalAssertion({ data: [{ t: "ab" }] }, { path: "data", each: { path: "t", minLength: 3 } })).toContain("期望 ≥ 3");
+    });
+
+    it("each + minLength：两段都要判（旧实现 minLength 提前 return，把 each 静默跳过 = 假绿）", () => {
+        const shape = { path: "data", each: { path: "status", equals: "completed" }, minLength: 1 } as const;
+        // 非空但每条都不过 each → 必须红；旧实现在这里返回 null（假绿）
+        expect(evalAssertion({ data: [{ status: "active" }] }, shape)).toContain("data[0].status");
+        // 两段都满足才绿
+        expect(evalAssertion({ data: [{ status: "completed" }] }, shape)).toBeNull();
+        // minLength 不满足时仍然报 minLength
+        expect(evalAssertion({ data: [] }, shape)).toContain("期望 ≥ 1");
+        // each 子断言的形状错误仍然要拦住
+        expect(evalAssertion({ data: [1] }, { path: "data", each: { path: "x", equals: 1, exists: true } } as never))
+            .toContain("只表达一件事");
+    });
+
     it("形状非法 → 直接判失败并说明（不静默放过一条写错的断言）", () => {
         expect(evalAssertion({}, { path: "a" })).toContain("至少要有");
         expect(evalAssertion({}, { path: "a", equals: 1, exists: true })).toContain("同时给了");
@@ -391,5 +423,23 @@ describe("evalAssertion / 结构化断言（治 expectBodyContains 的假绿）"
     it("路径不存在时的报错是人可读的（模型能直接看懂缺什么）", () => {
         expect(evalAssertion({ data: {} }, { path: "data.items", each: { path: "x", equals: 1 } }))
             .toContain("不是数组（实际 undefined）");
+    });
+
+    it("不可判定 vs 断言不过：形状类失败带 [不可判定]，真失败不带（9/16 分流）", () => {
+        // 形状非法 → 判据侧问题：改代码无效
+        expect(isUnevaluable(evalAssertion({}, { path: "a" }))).toBe(true);
+        expect(isUnevaluable(evalAssertion({}, { path: "a", equals: 1, exists: true }))).toBe(true);
+        expect(isUnevaluable(evalAssertion({ data: [1] }, { path: "data", each: { path: "x" } as never }))).toBe(true);
+        expect(isUnevaluable(evalAssertion({ data: [{ t: 1 }] }, { path: "data", each: { path: "t", equals: 1, exists: true } } as never))).toBe(true);
+
+        // 真断言失败 → 模型改代码**有用**，绝不能标成不可判定（否则模型会放弃修）
+        const realBad = evalAssertion({ data: [{ status: "active" }] }, { path: "data", each: { path: "status", equals: "completed" } });
+        expect(realBad).not.toBeNull();
+        expect(isUnevaluable(realBad)).toBe(false);
+        // "形状不匹配"仍然是**真失败**：断言本身合法，是服务端返回的形态不对 → 改代码能修
+        expect(isUnevaluable(evalAssertion({ n: 5 }, { path: "n", length: 1 }))).toBe(false);
+        expect(isUnevaluable(evalAssertion({ data: {} }, { path: "data.items", each: { path: "x", equals: 1 } }))).toBe(false);
+        // 通过 → 既不是失败也不是不可判定
+        expect(isUnevaluable(evalAssertion({ data: [{ status: "completed" }] }, { path: "data", each: { path: "status", equals: "completed" } }))).toBe(false);
     });
 });
