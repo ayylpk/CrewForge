@@ -13,7 +13,7 @@ import { describe, expect, it } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { assembleTask, createArchitectAgent } from "../architectAgent";
+import { assembleTask, createArchitectAgent, placeholderGateGaps } from "../architectAgent";
 import { ArchitectBatchSchema, ArchitectTaskSchema, parseInbound } from "../protocol";
 import type { ArchitectBatch, ArchitectTask, WorkItem } from "../protocol";
 import type { DeveloperLlm } from "../graph";
@@ -333,7 +333,9 @@ describe("architectAgent / decomposeBatch（批次阶段）", () => {
         });
         const w2 = workItemOf(bp, 1);
         const okChecks = [
-            { id: "v-1", kind: "CONTRACT", method: "GET", path: "/api/notes/{nid}", expectedStatus: 200 },         // 占位符换名
+            // 占位符换名（端点闸只认"分段形状"、不认名字）；A2 要求它由本条 setup 抽出来
+            { id: "v-1", kind: "CONTRACT", method: "GET", path: "/api/notes/{nid}", expectedStatus: 200,
+              setup: [{ method: "POST", path: "/api/notes", expectedStatus: 201, extract: { name: "nid", from: "data.id" } }] },
             { id: "v-2", kind: "CONTRACT", method: "GET", path: "/api/notes/999999?expand=1", expectedStatus: 200 }, // 具体实例+查询串
             { id: "v-3", kind: "CONTRACT", method: "POST", path: "/api/notes/", expectedStatus: 201 },             // 尾斜杠
         ];
@@ -470,5 +472,41 @@ describe("architectAgent / 提示词 fail-fast", () => {
         write("_check-shape.md", "z");
         expect(() => createArchitectAgent({ llm: fake.llm, promptDir: dir })).toThrow("architect-batch.md");
         expect(fake.count()).toBe(0);
+    });
+});
+
+// ============================================================
+// A2 生成期占位符闸：引用未由 setup 抽取的 {var} → 该批被拒（喂回原话重出）
+//   治 p7 那 13 条（path 用 {id}、setup 抽成 {tid}）——生成期拦下，不留给执行期伪装成 404。
+describe("A2 生成期占位符闸：placeholderGateGaps", () => {
+    it("path 引用未抽取的 {id} → 出闸（含变量对照：缺 id、抽的是 pid）", () => {
+        const gaps = placeholderGateGaps([
+            {
+                id: "ac-30", kind: "CONTRACT", method: "POST", path: "/api/projects/{id}/tasks",
+                setup: [{ method: "POST", path: "/api/projects", extract: { name: "pid", from: "data.id" } }],
+            },
+        ]);
+        expect(gaps.length).toBe(1);
+        expect(gaps[0]).toContain("ac-30");
+        expect(gaps[0]).toContain("{id}");
+        expect(gaps[0]).toContain("{pid}");
+    });
+
+    it("setup 已声明用到的变量 → 放行；非 CONTRACT 判据不参与闸", () => {
+        expect(placeholderGateGaps([
+            {
+                id: "ok", kind: "CONTRACT", method: "GET", path: "/api/tasks/{tid}",
+                setup: [{ method: "POST", path: "/api/tasks", extract: { name: "tid", from: "id" } }],
+            },
+            // 命令类判据没有占位符概念 → 一律放行（哪怕正文里有 `{whatever}` 这种字面量）
+            { id: "c1", kind: "COMPILE", command: "npm", args: ["run", "build"] },
+            { id: "c2", command: "echo {whatever}" },
+        ])).toEqual([]);
+    });
+
+    it("与 A1 同一判定：空 setup + path 带占位符 → 出闸（不误放）", () => {
+        const gaps = placeholderGateGaps([{ id: "x", kind: "CONTRACT", method: "GET", path: "/api/x/{rid}" }]);
+        expect(gaps.length).toBe(1);
+        expect(gaps[0]).toContain("没有任何 setup 抽取变量");
     });
 });

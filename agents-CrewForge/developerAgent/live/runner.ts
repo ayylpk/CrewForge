@@ -85,6 +85,7 @@ const USAGE = [
     "  --requirement  需求原文：先由架构师 Agent 现场拆解成任务包，再走同一执行链",
     "  --sandbox soft    本机受约束执行（realIsolation=false，仅开发/冒烟）",
     "  --sandbox strict  默认：没有真实隔离后端就不执行命令（blocked）",
+    "  --max-wall-minutes <n>  墙钟硬闸：超过 n 分钟强制收手（默认关闭；B1）",
 ].join("\n");
 
 const taskFile = argOf("--task");
@@ -539,6 +540,23 @@ function writeReport(state: DeveloperState, rounds: number, snap: ReturnType<typ
     return jsonPath;
 }
 
+// ---------- B1：墙钟硬闸（可选，pi AbortSignal 同族）----------
+//
+//   迭代闸（MAX_TEST_ROUNDS / maxStepsPerLoop）与预算闸（maxLlmCalls）之外再加一道**墙钟**：
+//   单次 LLM 调用可能很慢（p7 实弹单发 509s），纯计数闸下"少数几次超长调用"仍能把整次运行拖很久。
+//   到点直接 emergencyCleanup（清进程 + 关账本 + 退出码 1），不靠提示词自觉。
+//   默认**关闭**（不传 --max-wall-minutes 即零行为变化）；给了正数才启用。
+const rawWallMinutes = argOf("--max-wall-minutes");
+const wallMinutes = rawWallMinutes !== null && Number.isFinite(Number(rawWallMinutes)) && Number(rawWallMinutes) > 0
+    ? Number(rawWallMinutes) : 0;
+const wallTimer = wallMinutes > 0
+    ? setTimeout(() => {
+        console.error(`\n[runner] ⏱ 墙钟到点（${wallMinutes} 分钟）——强制收手（B1 硬闸）`);
+        void emergencyCleanup("wall-clock", 1);
+    }, wallMinutes * 60_000)
+    : null;
+if (wallMinutes > 0) console.log(`[runner] 墙钟上限 ${wallMinutes} 分钟（超出即强制收手）`);
+
 // ---------- 消息环主循环 ----------
 
 let state = await handle.run({ task });
@@ -644,5 +662,6 @@ console.log(`[runner] 运行报告（Markdown）：${jsonPath.replace(/\.json$/,
 // shutdown() 会先 cleanupAllProcesses() 再关账本；这里 await 它，不留后台进程。
 await handle.shutdown();
 console.log("[runner] 已清理遗留进程并关闭 Ledger");
+if (wallTimer) clearTimeout(wallTimer);
 
 process.exit(state.status === "ready" ? 0 : 1);

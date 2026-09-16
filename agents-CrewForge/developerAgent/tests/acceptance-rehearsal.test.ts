@@ -12,7 +12,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { budgetText } from "../realLlm";
-import { pickByPath, suggestServeCommand, fillVars, fillVarsDeep, deepEqual, evalAssertion, isUnevaluable, resolveResetTarget } from "../../contractProbeCore";
+import { pickByPath, suggestServeCommand, fillVars, fillVarsDeep, deepEqual, evalAssertion, isUnevaluable, resolveResetTarget, unresolvedPlaceholders, formatUnresolvedPlaceholders, runContractProbe } from "../../contractProbeCore";
 import type { JsonAssertion } from "../../contractProbeCore";
 import { prepareCheck } from "../live/verifier";
 
@@ -442,4 +442,95 @@ describe("evalAssertion / 结构化断言（治 expectBodyContains 的假绿）"
         // 通过 → 既不是失败也不是不可判定
         expect(isUnevaluable(evalAssertion({ data: [{ status: "completed" }] }, { path: "data", each: { path: "status", equals: "completed" } }))).toBe(false);
     });
+});
+
+// ============================================================
+// A1 发送前静态预检：引用未抽取的占位符 = 判据侧问题（不可判定），不是服务端问题
+//
+//   9/16 p7 实弹：64 条里 13 条 path 用 {id}，自己的 setup 却抽成 {tid}/{pid}；
+//   字面 {id} 发出去 → 服务端**正确**地回 404 → 被（模型和人）误读成"接口没实现"，
+//   追了 49 分钟。预检把它变成**不可判定**（改代码无效），且在**起服务之前**就判定。
+describe("A1 未解析占位符预检（治「缺变量伪装成服务端答错」）", () => {
+    it("引用了没有 setup 抽取的占位符 → 报现场 + 变量对照（p7 ac-30 原样：path 用 {id}、setup 抽成 {pid}）", () => {
+        const intent = {
+            method: "POST", path: "/api/projects/{id}/tasks", expectedStatus: 201,
+            setup: [{ method: "POST", path: "/api/projects", expectedStatus: 201, extract: { name: "pid", from: "data.id" } }],
+        } as never;
+        const text = formatUnresolvedPlaceholders(unresolvedPlaceholders(intent)).join("\n");
+        expect(text).toContain("{id}");
+        expect(text).toContain("setup 抽取的变量只有 {pid}");     // 关键对照：缺的是 id、抽的是 pid
+        expect(text).toContain("没有任何步骤会把它抽出来");
+    });
+
+    it("setup 声明了用到的变量 → 全部放行（不误伤合法判据）", () => {
+        const intent = {
+            method: "GET", path: "/api/tasks/{tid}/comments", expectedStatus: 200,
+            setup: [{ method: "POST", path: "/api/tasks", expectedStatus: 201, extract: { name: "tid", from: "data.id" } }],
+        } as never;
+        expect(unresolvedPlaceholders(intent)).toEqual([]);
+    });
+
+    it("顺序敏感：只能用**前面**步骤抽的变量；引用后面才抽的 → 标记", () => {
+        const bad = {
+            method: "GET", path: "/api/x", expectedStatus: 200,
+            setup: [
+                { method: "GET", path: "/api/a/{later}", expectedStatus: 200 },   // {later} 此刻还没抽
+                { method: "POST", path: "/api/b", expectedStatus: 201, extract: { name: "later", from: "id" } },
+            ],
+        } as never;
+        const text = formatUnresolvedPlaceholders(unresolvedPlaceholders(bad)).join("\n");
+        expect(text).toContain("{later}");
+        expect(text).toContain("前置步骤 1");
+    });
+
+    it("扫描穿透 headers 与 body（不只 path）", () => {
+        const intent = {
+            method: "POST", path: "/api/ok", expectedStatus: 201,
+            headers: { "X-Tenant": "{tenant}" },
+            body: { ref: "{missing}", nested: ["{deep}"] },
+        } as never;
+        const names = unresolvedPlaceholders(intent).flatMap((u) => u.missing);
+        expect(names).toContain("tenant");
+        expect(names).toContain("missing");
+        expect(names).toContain("deep");
+    });
+
+    it("fail-fast：起服务**之前**就返回（serve 命令是假的也拿不到 boot_failed，证明没去起服务）", async () => {
+        const intent = {
+            method: "GET", path: "/api/tasks/{id}", expectedStatus: 200,
+            setup: [{ method: "POST", path: "/api/tasks", expectedStatus: 201, extract: { name: "tid", from: "data.id" } }],
+        } as never;
+        const r = await runContractProbe({
+            projectDirAbs: process.cwd(),
+            serve: { command: "definitely-not-a-real-binary-xyz", args: [], cwd: "." },
+            intent: intent as never,
+        });
+        // 关键：拿到的是"未解析占位符"，而不是"服务启动失败"——证明根本没起服务
+        expect(r.ok).toBe(false);
+        expect(r.meta.kind).toBe("unresolved_placeholders");
+        expect((r.meta.unevaluableChecks as string[]).length).toBeGreaterThan(0);
+        expect(r.output).toContain("[不可判定]");
+    }, 30_000);
+
+    it("runAcceptance 桶归位：未解析占位符 → 归「不可判定」桶（不是失败，且不起服务）", async () => {
+        const proj = mk("vproj-unres", { "backend/package.json": JSON.stringify({ scripts: { dev: "node src/index.js" } }) });
+        const { runAcceptanceTool } = await import("../tools/runAcceptance");
+        const ctx = {
+            workspace: { exec: async () => ({ exitCode: 0, stdout: "", stderr: "", timedOut: false }) },
+            projectDirAbs: proj,
+            acceptanceChecks: [{
+                id: "ac-unres", kind: "CONTRACT", method: "GET", path: "/api/tasks/{id}", expectedStatus: 200,
+                setup: [{ method: "POST", path: "/api/tasks", expectedStatus: 201, extract: { name: "tid", from: "data.id" } }],
+            }],
+            owner: "developer", taskId: "t",
+        } as never;
+        // serveCommand 给个真命令也无妨：预检在起服务前就返回，不会真的去起
+        const r = await runAcceptanceTool.run(ctx, { serveCommand: "node", serveArgs: ["src/index.js"], bootWaitMs: 4_000, timeoutMs: 30_000 });
+        const meta = r.meta as Record<string, unknown>;
+        expect(meta["unevaluable"]).toBe(1);
+        expect(meta["unevaluableIds"]).toContain("ac-unres");
+        expect(meta["failed"]).toBe(0);                       // 关键：不是失败桶
+        expect(meta["failedIds"]).toEqual([]);
+        expect(r.output).toContain("不可判定");
+    }, 30_000);
 });

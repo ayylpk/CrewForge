@@ -44,6 +44,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { extractJson } from "./realLlm";
+import { formatUnresolvedPlaceholders, unresolvedPlaceholders } from "../contractProbeCore";
 import {
     ArchitectBatchSchema, ArchitectTaskSchema, assertNoAuthorityFields, parseInbound,
 } from "./protocol";
@@ -337,6 +338,31 @@ function compileEndpointMatchers(blueprint: ArchitectTask): { method: string; re
     return out;
 }
 
+/**
+ * ★ A2 生成期占位符闸（纯函数，可单测）：捞出"引用了没有 setup 抽取的占位符"的 CONTRACT 判据。
+ *
+ *   复用 contractProbeCore 的 `unresolvedPlaceholders`——**不许架构师侧另写一套判定**，
+ *   否则就是新的漂移源（与"机器证据、不是'应该兼容'"同一条规矩）。
+ *   治的正是 p7 那 13 条（path 用 {id}、setup 却抽成 {tid}/{pid}）：这类判据永远过不了、
+ *   又不是服务端问题，却在执行期把 404 伪装成"接口没实现"。在**生成期**拦下 → 喂回原话 → 模型重出，
+ *   而不是等跑验收时才发现（那时预算已经烧完）。
+ */
+export function placeholderGateGaps(checks: readonly unknown[]): string[] {
+    const gaps: string[] = [];
+    for (const raw of checks) {
+        if (!raw || typeof raw !== "object") continue;
+        const c = raw as { kind?: unknown; id?: unknown };
+        if (String(c.kind ?? "").trim().toUpperCase() !== "CONTRACT") continue;
+        const unresolved = unresolvedPlaceholders(raw as never);
+        if (unresolved.length > 0) {
+            gaps.push(`判据 ${String(c.id ?? "?")} 引用了没有 setup 抽取的占位符——`
+                + `path / setup / headers / body 里的每个 {var} 都必须先由某条 setup 的 extract 抽出来：\n`
+                + formatUnresolvedPlaceholders(unresolved).map((s) => `  · ${s}`).join("\n"));
+        }
+    }
+    return gaps;
+}
+
 export function createArchitectAgent(o: ArchitectAgentOptions) {
     const maxAttempts = o.maxAttempts ?? 3;
     const promptDir = o.promptDir ?? DEFAULT_PROMPT_DIR;
@@ -445,10 +471,11 @@ export function createArchitectAgent(o: ArchitectAgentOptions) {
                             ).join("\n")}`);
                         }
                     }
+                    // ★ A2：占位符闸（生成期）——每个 `{var}` 必须由本判据自己的 setup 抽出来。
+                    gaps.push(...placeholderGateGaps(parsed.checks));
                     if (gaps.length > 0) {
                         return { ok: false, reason: `批次业务不完整：\n${gaps.map((g) => `- ${g}`).join("\n")}` };
                     }
-
                     const inbound = parseInbound(JSON.stringify(parsed));
                     if (!inbound.ok) {
                         return { ok: false, reason: `批次未通过 runner 入站校验：${inbound.error}` };

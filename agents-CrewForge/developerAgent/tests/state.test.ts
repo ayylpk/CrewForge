@@ -1,8 +1,8 @@
 // tests/state.test.ts —— 状态机与判定纪律（纯函数，零 LLM）
 import { describe, expect, it } from "bun:test";
 import {
-    assertStatusTransition, canGoReady, canTransitionStatus, initialDeveloperState,
-    isBudgetExceeded, isRepairExhausted, isRepeatedFailure, lastInboundType,
+    ACCEPTANCE_STALL_LIMIT, assertStatusTransition, canGoReady, canTransitionStatus, initialDeveloperState,
+    isAcceptanceStalled, isBudgetExceeded, isRepairExhausted, isRepeatedFailure, lastInboundType,
     nextArrivedWorkItem, nextUnarrivedWorkItem, nextWorkItem,
 } from "../state";
 import type { TestFailure } from "../protocol";
@@ -145,5 +145,20 @@ describe("state / 批次到齐纯函数", () => {
 
     it("旧 nextWorkItem 语义不变：不看 arrivedItems（batched=false 的存量链路零扰动）", () => {
         expect(nextWorkItem(s(["w1"], []))?.id).toBe("w2");
+    });
+});
+
+// ============================================================
+// B2：验收预演「无进展」判定（治模型自调 runAcceptance 空转——p7 的 23 次空转）
+describe("B2 验收无进展：isAcceptanceStalled（连续零变化才停，不是单次）", () => {
+    it("阈值语义：连续 < LIMIT 不停，达到 LIMIT 才停", () => {
+        expect(isAcceptanceStalled({ acceptanceStallCount: 0 })).toBe(false);
+        expect(isAcceptanceStalled({ acceptanceStallCount: ACCEPTANCE_STALL_LIMIT - 1 })).toBe(false);
+        expect(isAcceptanceStalled({ acceptanceStallCount: ACCEPTANCE_STALL_LIMIT })).toBe(true);
+        expect(isAcceptanceStalled({ acceptanceStallCount: ACCEPTANCE_STALL_LIMIT + 5 })).toBe(true);
+    });
+
+    it("默认初始状态就是不停（存量状态零扰动）", () => {
+        expect(isAcceptanceStalled(initialDeveloperState({}))).toBe(false);
     });
 });

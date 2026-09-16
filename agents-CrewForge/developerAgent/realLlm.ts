@@ -191,8 +191,8 @@ export function toAnthropicTools(tools: ToolDescriptorLike[]): unknown[] {
  *        {kind:'batch', calls:[...]}（③并行：一次并发执行，省往返）；
  *        只要混进任何一个非只读工具 → 整包降级只取第一个，note 留警告
  *        （"写/执行一轮一个"的记账语义是结构保证，不能靠模型自觉）；
- *   ② 没工具 + stop_reason=max_tokens → 返回原文（截断的决策不可信，
- *      交给 coerceDecision 判失败，按一步计费——与旧协议同语义）
+ *   ② 没工具 + stop_reason=max_tokens → `{kind:'truncated', note}`（截断的决策不可信，
+ *      coerceDecision 仍判 null → 按一步失败计费；但带上 kind，上层才能给出"拆小"的**可操作**反馈）
  *   ③ 没工具 + 正常结束 → {kind:'done', note:文本}
  *      （模型"不再调用工具"就是自然完成信号）
  */
@@ -232,8 +232,12 @@ export function fromAnthropicContent(
     }
 
     if (stopReason === "max_tokens") {
-        // 截断：决策不可信。返回原文，让 coerceDecision 判 null → 按一步失败计费。
-        return text || "(输出被 max_tokens 截断，无文本)";
+        // 截断：决策不可信——`coerceDecision` 对未知 kind 一律给 null，仍是"按一步失败计费"（旧语义不变）。
+        // 但**显式带上 kind:"truncated"**，好让上层把"截断"和"JSON 格式错"分开：
+        //   截断要的反馈是"把这一步拆小"；格式错要的反馈是"改格式"。
+        // 此前这里返回裸原文，上层只能回一句笼统的"无法解析决策"——模型会把截断误判成格式问题，
+        // 下一轮照样一次吐到截断（9/16 p7 llm#8：8192 截断 → 升档 32768 又截断，白烧 155s + 4 万 token）。
+        return { kind: "truncated", note: text || "(输出被 max_tokens 截断，无文本)" };
     }
 
     return { kind: "done", note: text };
@@ -481,7 +485,8 @@ export function createRealLlm(opts: RealLlmOptions = {}): DeveloperLlm {
     const maxTokens = opts.maxTokens ?? 8192;
     // T3b 实弹教训：偶发一次 >120s 的慢响应会把整个任务打死（见 graph.ts 的配套修复），
     // 超时抬到 240s；再配合 runToolLoop 的单步容错，慢不再等于死。
-    const timeoutMs = opts.timeoutMs ?? 240_000;
+    // 9/16 p7 联跑用户指令 ×1.5：240s → 360s（中型项目单发判据体量更大）。
+    const timeoutMs = opts.timeoutMs ?? 360_000;
     // 原生 tool_use 开关：显式选项优先，其次 env，缺省开。
     const native = opts.nativeTools ?? (process.env.DEVELOPER_LLM_NATIVE_TOOLS !== "0");
     // 9/15 批 C：瞬时故障重试次数 / max_tokens 升档开关（可关，缺省开）。

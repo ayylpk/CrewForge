@@ -86,6 +86,17 @@ export interface DeveloperState {
     maxRepairAttempts: number;
     /** 连续「修了一轮但一个文件都没动」的次数；≥1 即停止（同签名 + 文件无变化不许原地重试） */
     stalledRepairs: number;
+    /**
+     * 连续「验收预演失败集合零变化」的次数——治模型**自调 runAcceptance 空转**
+     * （p7 重跑：23 次 LLM 调用、76 条持续失败、从不停止）。
+     *
+     *   与 stalledRepairs 的分工：后者只在**外部测试失败后的 repair 节点**里累加；
+     *   而 p7 的空转全程停在 implementing 里自己反复重跑预演，repairAttempts 一直是 0，
+     *   所以 stalledRepairs 那道闸根本没被触达。
+     */
+    acceptanceStallCount: number;
+    /** 上一次验收预演的失败集合指纹（用于比对是否零变化）；null = 尚无基线 */
+    acceptanceStallKey: string | null;
     /** 本地预检报 NO_BUILD_ENTRY 的目标（如 backend）：**未验证**——不算通过、不触发编译修复，送检时如实标注 */
     localChecksUnverified: string[];
     /** 已**预占**的 LLM 调用次数：请求发出前先加，崩溃也不会漏账 */
@@ -139,6 +150,8 @@ export const DeveloperAnnotation = Annotation.Root({
     repairAttempts: Annotation<number>({ reducer: lastWrite, default: () => 0 }),
     maxRepairAttempts: Annotation<number>({ reducer: lastWrite, default: () => 2 }),
     stalledRepairs: Annotation<number>({ reducer: lastWrite, default: () => 0 }),
+    acceptanceStallCount: Annotation<number>({ reducer: lastWrite, default: () => 0 }),
+    acceptanceStallKey: Annotation<string | null>({ reducer: lastWrite, default: () => null }),
     localChecksUnverified: Annotation<string[]>({ reducer: lastWrite, default: () => [] }),
     llmCallsPlanned: Annotation<number>({ reducer: lastWrite, default: () => 0 }),
     llmCallsCompleted: Annotation<number>({ reducer: lastWrite, default: () => 0 }),
@@ -161,7 +174,8 @@ export function initialDeveloperState(patch: Partial<DeveloperState>): Developer
         currentWorkItemId: null,
         currentFiles: [], activeSkill: null, messages: [], lastTestFailure: null,
         changedFiles: [], failureSignatures: [], repairAttempts: 0,
-        maxRepairAttempts: 2, stalledRepairs: 0, localChecksUnverified: [],
+        maxRepairAttempts: 2, stalledRepairs: 0,
+        acceptanceStallCount: 0, acceptanceStallKey: null, localChecksUnverified: [],
         llmCallsPlanned: 0, llmCallsCompleted: 0, toolCalls: 0,
         status: "received", error: null,
         ...patch,
@@ -249,6 +263,19 @@ export function isRepairExhausted(state: Pick<DeveloperState, "repairAttempts" |
 /** 上一轮"修了但没动任何文件" → 停止（同签名 + 无变化，再修也是原地打转） */
 export function isStalled(state: Pick<DeveloperState, "stalledRepairs">): boolean {
     return state.stalledRepairs >= 1;
+}
+
+/**
+ * 验收预演连续「失败集合零变化」的上限。
+ *   dsh `blockedAfterConsecutiveRounds` 同族：看的是**连续**而非单次——单次零变化可能是
+ *   一轮还没落地的编辑；连续 3 次跑出的失败集合一字不差，就说明这段代码没在朝修复方向动，
+ *   再跑只是烧预算。取 3 而非更小，是给"改一处需要重跑一次验收"留出正常抖动余量。
+ */
+export const ACCEPTANCE_STALL_LIMIT = 3;
+
+/** 验收预演连续无进展到顶 → 停手上报（治模型自调 runAcceptance 空转——p7 的 23 次空转） */
+export function isAcceptanceStalled(state: Pick<DeveloperState, "acceptanceStallCount">): boolean {
+    return (state.acceptanceStallCount ?? 0) >= ACCEPTANCE_STALL_LIMIT;
 }
 
 /**

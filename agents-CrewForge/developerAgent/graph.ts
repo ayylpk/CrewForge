@@ -24,6 +24,7 @@ import path from "node:path";
 import { END, START, StateGraph } from "@langchain/langgraph";
 import {
     DeveloperAnnotation, assertStatusTransition, canGoReady, canReserveLlmCall, hasPendingWorkItem,
+    ACCEPTANCE_STALL_LIMIT, isAcceptanceStalled,
     isBudgetExceeded, isRepairExhausted, isRepeatedFailure, isStalled, isTimeoutRepeated,
     lastInboundType, nextArrivedWorkItem, nextUnarrivedWorkItem, nextWorkItem, pickSkillForState,
 } from "./state";
@@ -45,6 +46,7 @@ import { DEVELOPER_ROLE_NAME, READONLY_TOOL_NAMES, WRITE_TOOLS, str, strList } f
 import type { Workspace } from "./workspace";
 import { createReadonlySubAgentDispatcher } from "./tools/readonlySubAgent";
 import type { ReadonlySubAgentEvidenceInput, ReadonlySubAgentLlm } from "./tools/readonlySubAgent";
+import { evaluateGuardrails, evaluateWriteBatch } from "./guardrails";
 
 // ============================================================
 // 命令指纹与超时策略（规格五）
@@ -77,13 +79,16 @@ export const NEVER_CACHE_TOOLS: ReadonlySet<string> = new Set([
     "httpRequest", "startProcess", "readProcess", "stopProcess", "delegateReadonly",
 ]);
 
-/** 默认超时（规格五.6）：普通命令 2 分钟 / 构建 10 分钟 / 服务 2 分钟 / HTTP 30 秒 */
+/** 默认超时（规格五.6 ×1.5，9/16 p7 中型项目联跑用户指令）：
+ *  普通命令 3 分钟 / 构建 15 分钟 / 服务 3 分钟 / HTTP 45 秒。
+ *  ⚠️ 与 processSandbox.DEFAULT_TIMEOUTS、workspace-policy.json timeoutsMs、
+ *  timeout-policy.test.ts 四处同源，改一处必改四处。 */
 export const EXEC_TIMEOUT_DEFAULTS: Record<string, number> = {
-    runCommand: 120_000,
-    shell: 120_000,
-    runBuild: 600_000,
-    startProcess: 120_000,
-    httpRequest: 30_000,
+    runCommand: 180_000,
+    shell: 180_000,
+    runBuild: 900_000,
+    startProcess: 180_000,
+    httpRequest: 45_000,
 };
 
 /** 人可读的命令签名（TIMEOUT_REPEATED 留痕与对外上报都用它） */
@@ -386,6 +391,35 @@ export function repeatReminderText(tool: string, args: ToolArgs, streak: number)
 }
 
 /**
+ * 从一次工具结果里抽出「验收失败集合指纹」——B2 无进展检测的比对键（纯函数，可单测）。
+ *   · null = 这不是验收预演结果（别的工具，不参与检测）；
+ *   · ""   = 全绿（有进展，计数清零）；
+ *   · 其余 = 失败/不可判定集合的指纹——两次一模一样即"零变化"（改了代码但结果没动）。
+ *
+ *   与 `repeatReminderText` 的差别：后者比的是**调用参数**是否相同（同一动作重复）；
+ *   这里比的是**结果状态**是否相同——参数可以每次都不同（换着 only 跑子集），
+ *   但只要底层失败集合没动，就是货真价实的"没有进展"。这正是 p7 逃过软提醒的原因。
+ */
+export function acceptanceProgressKey(result: ToolResult): string | null {
+    const meta = result.meta as Record<string, unknown> | undefined;
+    if (!meta || typeof meta !== "object") return null;
+    // 只认 runAcceptance 的结果形状（三个字段任一在场即认）
+    if (!("failedIds" in meta) && !("unevaluableIds" in meta) && !("runnable" in meta)) return null;
+    const failed = Number(meta["failed"] ?? 0);
+    const unevaluable = Number(meta["unevaluable"] ?? 0);
+    if (failed === 0 && unevaluable === 0) return "";   // 全绿 = 有进展
+    const ids = (v: unknown): string[] => Array.isArray(v) ? (v as unknown[]).map(String).sort() : [];
+    return `failed=${failed}[${ids(meta["failedIds"]).join(",")}]|unev=${unevaluable}[${ids(meta["unevaluableIds"]).join(",")}]`;
+}
+
+/** B2 无进展软提醒文本（第 2 次零变化时随结果回灌模型） */
+export function acceptanceStallReminderText(streak: number): string {
+    return `[无进展提醒] 验收预演的失败集合已连续 ${streak} 次一字未变。`
+        + "反复重跑不会改变结果——针对失败的那几条判据去改代码；若判定是判据自身的问题（不可判定），"
+        + `就如实上报而不是继续跑。再零变化 ${ACCEPTANCE_STALL_LIMIT - streak} 次将强制停手。`;
+}
+
+/**
  * 超时延长的唯一裁决点（规格五.7）。
  *   ① 只有执行类工具能延长；
  *   ② 必须 `timeoutReason` 非空；
@@ -469,6 +503,22 @@ export async function invokeWithFingerprintCache(o: {
         tool: o.tool, args: o.args, taskId: o.ctx.taskId,
         ...(snapshotHash !== undefined ? { snapshotHash } : {}),
     });
+
+    // ★ C1：代码级护栏（默认拒绝 + 单调 deny）——"禁止"写在代码里，不写在提示词里。
+    //   放在缓存查找**之前**：否则一条早于护栏存在的缓存结果会绕过它。
+    const guard = evaluateGuardrails(o.tool, o.args);
+    if (guard) {
+        o.ledger.appendEvent("guardrail_denied", { tool: o.tool, rule: guard.id, reason: guard.reason });
+        return {
+            cached: false,
+            fingerprint,
+            result: {
+                ok: false,
+                output: `拒绝（护栏 ${guard.id}）：${guard.reason}`,
+                rejected: { code: "GUARDRAIL_DENIED", target: o.tool, message: guard.reason },
+            },
+        };
+    }
 
     // ★ 只读工具永不复用旧结果：新鲜度 > 毫秒级节省。指纹仍算出来（记账/去重统计用），
     //   只是不参与缓存命中判定，也不写入 completed_tool_call。
@@ -560,6 +610,18 @@ export interface DeveloperLlm {
 }
 
 /** 模型输出 → 决策（形状不对返回 null，由调用方当一步失败处理） */
+/**
+ * 这一步的输出是不是被 max_tokens 截断的（realLlm 在截断时回 `{ kind: "truncated" }`）。
+ *
+ *   为什么要单独判定：截断与"JSON 格式错"的正确反馈**不同**——
+ *   截断 → "把这一步拆小、别再一次性吐整个模块"；格式错 → "改格式"。
+ *   此前两者共用一句"无法解析模型决策"，模型无从知道是被截断，下一轮继续撞顶白烧
+ *   （9/16 p7 llm#8：8192 截断 → 升档 32768 又截断，155s + 4 万 token 全废）。
+ */
+export function isTruncatedDecision(raw: unknown): boolean {
+    return !!raw && typeof raw === "object" && (raw as { kind?: unknown }).kind === "truncated";
+}
+
 export function coerceDecision(raw: unknown): LlmDecision | null {
     let v: unknown = raw;
     if (typeof v === "string") {
@@ -621,6 +683,11 @@ export interface ToolLoopResult {
     timeoutRepeated: boolean;
     /** 触发重复超时的命令签名 */
     timeoutSignature: string | null;
+    /**
+     * B2：验收预演「无进展」检测结果——连续失败集合零变化的次数、指纹与是否已到顶停手。
+     * 跨 loop 累积（初值由节点从 state 带入），治模型自调 runAcceptance 空转（p7 的 23 次）。
+     */
+    acceptanceStall: { count: number; key: string | null; stopped: boolean };
     /** 本轮用过的工具调用指纹（进 state.completedToolCalls） */
     fingerprints: string[];
     /** 被批准的语义化超时延长记录 */
@@ -653,6 +720,8 @@ export async function runToolLoop(o: {
      * 去重复用 / 确定性分析不占。
      */
     subagentUsesLlm?: boolean;
+    /** B2：带入的验收无进展计数（跨 loop 累积；缺省从 0 / 空 起） */
+    acceptanceStall?: { count: number; key: string | null };
 }): Promise<ToolLoopResult> {
     const toolDefs = o.tools.describe();
     const history: unknown[] = [];
@@ -680,6 +749,27 @@ export async function runToolLoop(o: {
     /** 重复调用链（9/15 软提醒）：连续相同键的计数，任何不同的调用把它重置为 1 */
     let repeatKey: string | null = null;
     let repeatStreak = 0;
+    /** B2：验收预演无进展计数（初值来自 state，跨 loop 累积） */
+    let stallCount = o.acceptanceStall?.count ?? 0;
+    let stallKey: string | null = o.acceptanceStall?.key ?? null;
+    let acceptanceStallStopped = false;
+    /**
+     * 记账一次工具结果，判断"验收失败集合是否零变化"。
+     *   "n/a"      = 不是验收预演结果（别的工具，不参与检测）；
+     *   "progress" = 有进展（全绿，或失败集合变了）；
+     *   "stall"    = 零变化（可软提醒）；
+     *   "limit"    = 到顶（该硬停——调用方负责 break）。
+     */
+    const noteAcceptanceProgress = (result: ToolResult): "n/a" | "progress" | "stall" | "limit" => {
+        const key = acceptanceProgressKey(result);
+        if (key === null) return "n/a";
+        if (key === "") { stallCount = 0; stallKey = null; return "progress"; }   // 全绿 = 有进展
+        if (key === stallKey) stallCount++;
+        else { stallKey = key; stallCount = 1; }
+        if (stallCount >= ACCEPTANCE_STALL_LIMIT) return "limit";
+        if (stallCount >= 2) return "stall";
+        return "progress";
+    };
     /**
      * 记账一次调用并产出（可能的）重复提醒文本。
      * 口径对齐 dsh repeat-tool-reminder：连续计数、参数规范化、命中阈值 [3,5,8] 时
@@ -760,8 +850,18 @@ export async function runToolLoop(o: {
 
         const decision = preDecision;
         if (!decision) {
-            // 解析失败**也计费**（规格九）：这次请求已经花掉了
-            history.push({ error: "无法解析模型决策（需要 {kind:'tool'|'done'}）" });
+            // 解析失败**也计费**（规格九）：这次请求已经花掉了。
+            // ★ 分清"截断"和"格式错"：反馈不同，模型才不会反复撞（截断=拆小；格式错=改格式）。
+            if (isTruncatedDecision(raw)) {
+                o.ledger.appendEvent("decision_truncated", { taskId: o.ctx.taskId, seq: planned });
+                history.push({
+                    error: "你这一步的输出**被 max_tokens 截断了**（不是 JSON 格式错误）——决策不完整，本步未执行。"
+                        + "请把这一步**拆小**：一次只做一件事（一个工作项，或 1~2 个文件），"
+                        + "用工具调用分几步落地；不要一次性把整个模块 / 整个后端目录写出来。",
+                });
+            } else {
+                history.push({ error: "无法解析模型决策（需要 {kind:'tool'|'done'}）" });
+            }
             steps++;
             continue;
         }
@@ -774,6 +874,20 @@ export async function runToolLoop(o: {
         // 只到这一步的必然已过两道白名单（fromAnthropicContent + coerceDecision）。
         if (decision.kind === "batch" && decision.batch && decision.batch.length > 0) {
             const batch = decision.batch;
+            // ★ C1：批级护栏——一次铺太多文件即整批拒绝（治"一次生成整个后端目录"）
+            const batchDenied = evaluateWriteBatch(batch);
+            if (batchDenied) {
+                o.ledger.appendEvent("guardrail_batch_denied", {
+                    taskId: o.ctx.taskId, rule: batchDenied.id, count: batch.length, reason: batchDenied.reason,
+                });
+                history.push({
+                    tool: "batch", args: { calls: batch.map((c) => c.tool) }, ok: false,
+                    output: `拒绝（护栏 ${batchDenied.id}）：${batchDenied.reason}`,
+                    rejected: { code: "GUARDRAIL_DENIED", target: "batch", message: batchDenied.reason },
+                });
+                steps++;
+                continue;
+            }
             const started = batch.map(() => Date.now());
             const settled = await Promise.all(batch.map((c, i) =>
                 invokeWithFingerprintCache({
@@ -804,6 +918,17 @@ export async function runToolLoop(o: {
                 });
                 const batchReminder = noteRepeat(c.tool, c.args);
                 if (batchReminder) history.push({ reminder: batchReminder });
+                // ★ B2：验收预演无进展（批内命中同样计数）
+                const bprog = noteAcceptanceProgress(result);
+                if (bprog === "stall") history.push({ reminder: acceptanceStallReminderText(stallCount) });
+                else if (bprog === "limit") acceptanceStallStopped = true;
+            }
+            if (acceptanceStallStopped) {
+                o.ledger.appendEvent("acceptance_no_progress_stop", {
+                    taskId: o.ctx.taskId, streak: stallCount, key: stallKey, where: "batch",
+                });
+                steps++;
+                break;
             }
             steps++;
             continue;
@@ -916,12 +1041,33 @@ export async function runToolLoop(o: {
         // ★ 9/15 重复调用软提醒（参考 dsh repeat-tool-reminder）：只提醒，不拦截
         const reminder = noteRepeat(call.tool, call.args);
         if (reminder) history.push({ reminder });
+        // ★ B2：验收预演无进展检测——软提醒（第 2 次）→ 硬停（第 3 次，break）
+        const prog = noteAcceptanceProgress(result);
+        if (prog === "stall") {
+            o.ledger.appendEvent("acceptance_no_progress", { taskId: o.ctx.taskId, streak: stallCount, key: stallKey });
+            history.push({ reminder: acceptanceStallReminderText(stallCount) });
+        } else if (prog === "limit") {
+            acceptanceStallStopped = true;
+            o.ledger.appendEvent("acceptance_no_progress_stop", {
+                taskId: o.ctx.taskId, streak: stallCount, key: stallKey, where: "single",
+            });
+            o.ledger.recordFailure({
+                taskId: o.ctx.taskId, attempt: stallCount,
+                signature: `ACCEPTANCE_NO_PROGRESS:${stallKey ?? ""}`, category: "CONTRACT",
+                detail: `验收预演失败集合连续 ${stallCount} 次零变化，停止重跑，交给外部决定下一步`,
+                at: Date.now(),
+            });
+            transcript.push({ tool: call.tool, ok: false, output: `[NO_PROGRESS] 验收失败集合连续 ${stallCount} 次零变化` });
+            steps++;
+            break;
+        }
         steps++;
     }
 
     return {
         steps, llmCallsPlanned: planned, llmCallsCompleted: completed, toolCalls,
         changedFiles, finished, budgetStopped, timeoutRepeated, timeoutSignature,
+        acceptanceStall: { count: stallCount, key: stallKey, stopped: acceptanceStallStopped },
         fingerprints, timeoutExtensions, transcript,
     };
 }
@@ -1087,6 +1233,8 @@ export function routeAfterLocalChecks(state: DeveloperState, maxLlmCalls = 40): 
     if (isBudgetExceeded(state, maxLlmCalls)) return "developerBlocked";
     // 规格五.8：同一命令连续超时两次 → 不再自己重试，交给外部决定
     if (isTimeoutRepeated(state)) return "developerBlocked";
+    // ★ B2 恢复路径兜底：带着"验收零进展"状态落到这里（旧 checkpoint 的 resumeNode）同样停手
+    if (isAcceptanceStalled(state)) return "developerBlocked";
     // ★ 工作项推进优先于修复：本地预检跑的是**整站** build，而工作项是**分阶段**的。
     //   骨架阶段（w1）刚落地时整站 build 必红——那个红不代表"代码写错了"，
     //   只代表"后面的工作项还没做"。这时该继续推进工作项，而不是去修一个尚未实现的模块。
@@ -1107,7 +1255,7 @@ export function routeAfterLocalChecks(state: DeveloperState, maxLlmCalls = 40): 
     return "repair";
 }
 
-export type ImplementRoute = "continueWorkItems" | "runLocalChecks" | "waitBatch";
+export type ImplementRoute = "continueWorkItems" | "runLocalChecks" | "waitBatch" | "developerBlocked";
 
 /**
  * 实现节点的**动态**出口（规格七：工作项驱动）。
@@ -1132,6 +1280,9 @@ export type ImplementRoute = "continueWorkItems" | "runLocalChecks" | "waitBatch
  * batched=false 时上面这条 if 短路不进，legacy 分支逐字节不变（金标准：tests/graph.test.ts）。
  */
 export function routeAfterImplement(state: DeveloperState, maxLlmCalls = 40): ImplementRoute {
+    // ★ B2：验收预演连续零进展 → 直接停手。放最前：此时再推进工作项 / 再跑预检都只是烧预算，
+    //   模型自调 runAcceptance 空转（p7 的 23 次）正是被这条拦下的。
+    if (isAcceptanceStalled(state)) return "developerBlocked";
     if (isBudgetExceeded(state, maxLlmCalls)) return "runLocalChecks";
     if (isTimeoutRepeated(state)) return "runLocalChecks";
     if (state.batched) {
@@ -1194,7 +1345,8 @@ export function buildDeveloperGraph(deps: DeveloperGraphDeps) {
     const readText = deps.readTextFile ?? defaultRead;
     const maxLlmCalls = deps.maxLlmCalls ?? 40;
     const maxSteps = deps.maxStepsPerLoop ?? 12;
-    const waitTestTimeoutMs = deps.waitTestTimeoutMs ?? 15 * 60_000;
+    // 9/16 用户指令 ×1.5：15min → 22.5min（与 retry-policy.json waitTestTimeoutMs 同步）
+    const waitTestTimeoutMs = deps.waitTestTimeoutMs ?? 22.5 * 60_000;
 
     const send = (target: string, message: OutboundMessage): void => {
         try { deps.port.send(target, message); }
@@ -1570,6 +1722,7 @@ export function buildDeveloperGraph(deps: DeveloperGraphDeps) {
             llmErrorTolerance: deps.llmErrorTolerance,
             onWrite,
             subagentUsesLlm: deps.subagentLlm !== undefined,
+            acceptanceStall: { count: state.acceptanceStallCount, key: state.acceptanceStallKey },
         });
         deps.ledger.exitNode("bootstrapOrImplement", "implementing", {
             steps: loop.steps, changed: loop.changedFiles.length, budgetStopped: loop.budgetStopped,
@@ -1595,8 +1748,12 @@ export function buildDeveloperGraph(deps: DeveloperGraphDeps) {
             completedToolCalls: loop.fingerprints,
             timeoutRepeated: loop.timeoutRepeated,
             timeoutSignature: loop.timeoutSignature,
+            acceptanceStallCount: loop.acceptanceStall.count,
+            acceptanceStallKey: loop.acceptanceStall.key,
             currentWorkItemId: remaining?.id ?? null,
-            error: loop.timeoutRepeated ? `TIMEOUT_REPEATED ${loop.timeoutSignature ?? ""}` : state.error,
+            error: loop.acceptanceStall.stopped
+                ? `ACCEPTANCE_NO_PROGRESS：验收失败集合连续 ${loop.acceptanceStall.count} 次零变化，停止重跑`
+                : loop.timeoutRepeated ? `TIMEOUT_REPEATED ${loop.timeoutSignature ?? ""}` : state.error,
             messages: [{
                 type: "implement_summary", steps: loop.steps, changedFiles: loop.changedFiles,
                 finished: loop.finished, workItem: item?.kind ?? null,
@@ -1814,6 +1971,7 @@ export function buildDeveloperGraph(deps: DeveloperGraphDeps) {
             llmBudget: Math.max(0, maxLlmCalls - state.llmCallsPlanned),
             llmErrorTolerance: deps.llmErrorTolerance,
             subagentUsesLlm: deps.subagentLlm !== undefined,
+            acceptanceStall: { count: state.acceptanceStallCount, key: state.acceptanceStallKey },
         });
 
         deps.ledger.recordFailure({
@@ -1843,7 +2001,11 @@ export function buildDeveloperGraph(deps: DeveloperGraphDeps) {
             completedToolCalls: loop.fingerprints,
             timeoutRepeated: loop.timeoutRepeated,
             timeoutSignature: loop.timeoutSignature,
-            error: null,
+            acceptanceStallCount: loop.acceptanceStall.count,
+            acceptanceStallKey: loop.acceptanceStall.key,
+            error: loop.acceptanceStall.stopped
+                ? `ACCEPTANCE_NO_PROGRESS：验收失败集合连续 ${loop.acceptanceStall.count} 次零变化（repair 阶段）`
+                : null,
             messages: [{
                 type: "repair_summary", attempt, signature, changedFiles: loop.changedFiles, tree, stalled,
                 timeoutRepeated: loop.timeoutRepeated, timeoutExtensions: loop.timeoutExtensions,
@@ -1871,7 +2033,9 @@ export function buildDeveloperGraph(deps: DeveloperGraphDeps) {
         deps.ledger.enterNode("developerBlocked", state.status);
         const fallback = state.timeoutRepeated
             ? `TIMEOUT_REPEATED：命令「${state.timeoutSignature ?? "?"}」连续超时两次，已停止重试`
-            : "已达停止条件（重复失败 / 修复次数耗尽 / 预算超限）";
+            : isAcceptanceStalled(state)
+                ? `ACCEPTANCE_NO_PROGRESS：验收失败集合连续 ${state.acceptanceStallCount} 次零变化，已停止重跑（不再烧预算）`
+                : "已达停止条件（重复失败 / 修复次数耗尽 / 预算超限）";
         const reason = state.error ?? fallback;
         send(targets.architect, {
             type: "developer_blocked", projectId: state.projectId, taskId: state.taskId,
@@ -1922,6 +2086,7 @@ export function buildDeveloperGraph(deps: DeveloperGraphDeps) {
             continueWorkItems: "loadContext",
             runLocalChecks: "runLocalChecks",
             waitBatch: "waitBatch",          // 分批：批没到，本项做完就出图（不裸跑下一项）
+            developerBlocked: "developerBlocked",   // ★ B2：验收连续零进展 → 停手上报
         })
         // ★ 路径名 → 真实节点：数组型 pathMap 只接受**真实节点名**，
         //   而 "loadContext" 恰好就是真实节点名，所以这里数组写法也能过；

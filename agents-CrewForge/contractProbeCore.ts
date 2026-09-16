@@ -425,6 +425,90 @@ export function fillVarsDeep(value: unknown, vars: Record<string, string>): unkn
     return value;
 }
 
+/** 收集一段文本里所有 `{name}` 占位符的 name（与 fillVars 的识别正则同源） */
+function placeholderNamesIn(text: string): string[] {
+    return [...text.matchAll(/\{(\w+)\}/g)].map((m) => m[1]!);
+}
+
+/** 递归收集任意结构（path / headers / body）里出现的占位符名 */
+function collectPlaceholderNames(value: unknown, into: Set<string>): void {
+    if (typeof value === "string") {
+        for (const n of placeholderNamesIn(value)) into.add(n);
+        return;
+    }
+    if (Array.isArray(value)) {
+        for (const v of value) collectPlaceholderNames(v, into);
+        return;
+    }
+    if (value && typeof value === "object") {
+        for (const v of Object.values(value as Record<string, unknown>)) collectPlaceholderNames(v, into);
+    }
+}
+
+/** 一处"引用了没有 setup 抽取的占位符"的现场 */
+export interface UnresolvedPlaceholder {
+    /** 哪个请求（人类可读标签，含方法+路径） */
+    where: string;
+    /** 引用了、但没有任何 setup 抽取的占位符名 */
+    missing: string[];
+    /** 此刻已声明的变量名（照对用——p7 的坑正是"缺 id、却抽了 tid"） */
+    declared: string[];
+}
+
+/**
+ * 静态预检：这条判据要打的请求里，有没有**永远解析不了**的 `{var}`。
+ *
+ *   ★ 变量池的唯一来源是本判据自己的 `setup[].extract`（引擎没有任何其它注入通道）。
+ *     所以"某请求引用的 {id} 会不会被解析"**不需要起服务就能判定**：
+ *     按序推演 setup 抽取的变量名，凡用到未被抽取的占位符 = 这条判据**永远过不了、
+ *     又不是服务端的问题**——把字面 {id} 发出去，服务端只会正确地回 404，
+ *     而 404 恰是最像"接口没实现"的信号，会被模型和人**双双误读成实现缺口**。
+ *
+ *   ★ 9/16 p7 实弹：64 条里 13 条（ac-30/31/35/36/38/39/52~58）正是这一类——
+ *     path 写 `{id}`，自己的 setup 却抽成 `{tid}`/`{pid}`，全包没有 `id`。
+ *     剔掉这 13 条后 **51/51 全过**：即"74% 且 49 分钟不收敛"全由这 13 条假失败造成。
+ *
+ *   ★ 与 `assertShapeIssue` 同族：都是"判据侧问题伪装成服务端答错"。区别是
+ *     这条**纯静态**（无 IO），因此能放在**起服务之前**——起服务也改变不了解析结果，
+ *     白起一次服务（p7 那 13 条各自白起一次服务）纯属浪费。
+ *
+ *   返回逐处现场（空数组 = 全部可解析）。A2（架构师侧批次闸）复用同一函数。
+ */
+export function unresolvedPlaceholders(intent: ContractIntent): UnresolvedPlaceholder[] {
+    const out: UnresolvedPlaceholder[] = [];
+    const declared = new Set<string>();
+    for (const [i, step] of (intent.setup ?? []).entries()) {
+        pushUnresolved(out, `前置步骤 ${i + 1}（${step.method.toUpperCase()} ${step.path}）`,
+            [step.path, step.headers, step.body], declared);
+        // 抽取的变量名在本步骤**之后**才可用（自引用是非法写法，会被上面拦下）
+        if (step.extract?.name) declared.add(step.extract.name);
+    }
+    pushUnresolved(out, `主请求（${intent.method.toUpperCase()} ${intent.path}）`,
+        [intent.path, intent.headers, intent.body], declared);
+    return out;
+}
+
+function pushUnresolved(
+    out: UnresolvedPlaceholder[], where: string, values: unknown[], declared: Set<string>,
+): void {
+    const used = new Set<string>();
+    for (const v of values) collectPlaceholderNames(v, used);
+    const missing = [...used].filter((n) => !declared.has(n));
+    if (missing.length === 0) return;
+    out.push({ where, missing, declared: [...declared] });
+}
+
+/** 把 `unresolvedPlaceholders` 的现场渲染成人可读的一行行（含"该抽成什么"的对照） */
+export function formatUnresolvedPlaceholders(list: readonly UnresolvedPlaceholder[]): string[] {
+    return list.flatMap((u) => {
+        const declText = u.declared.length > 0
+            ? `本判据 setup 抽取的变量只有 ${u.declared.map((d) => `{${d}}`).join("、")}`
+            : "本判据没有任何 setup 抽取变量";
+        return u.missing.map((n) =>
+            `${u.where} 引用了占位符 {${n}}，但${declText}，没有任何步骤会把它抽出来`);
+    });
+}
+
 /**
  * 起服务 → 等健康 → （可选）登录取 token → 打契约请求 → 断言 → **保证收尸**。
  *
@@ -449,6 +533,31 @@ export async function runContractProbe(o: {
     const chunks: string[] = [];
 
     const deadlineAll = startedAt + (o.timeoutMs ?? 180_000);
+
+    // ── A1：起服务**之前**拦住"占位符永远解析不了"的判据 ──
+    //   纯静态（无 IO），所以放在最前：起服务也改变不了解析结果，白起一次纯浪费。
+    //   归入"不可判定"第三态——判据侧问题、改代码无效，别让 404 把它伪装成实现缺口。
+    {
+        const unresolved = unresolvedPlaceholders(o.intent);
+        if (unresolved.length > 0) {
+            const marked = formatUnresolvedPlaceholders(unresolved).map((s) => `${UNEVALUABLE_MARK}${s}`);
+            say(`probe: ${marked.join("\nprobe: ")}`);
+            return {
+                ok: false,
+                output: [
+                    ...marked,
+                    "（判据侧问题：占位符没有对应的 setup 抽取，改服务端代码无效——要修的是判据本身）",
+                    "（未起服务、未发请求：起服务也不会改变结果）",
+                ].join("\n"),
+                meta: {
+                    kind: "unresolved_placeholders",
+                    unevaluableChecks: marked,
+                    missingVars: [...new Set(unresolved.flatMap((u) => u.missing))],
+                    exitCode: 1, durationMs: Date.now() - startedAt,
+                },
+            };
+        }
+    }
 
     try {
         let bootLog = "";

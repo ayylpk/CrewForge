@@ -5,7 +5,7 @@
 //   ② 文本协议（nativeTools:false）的 HTTP 契约——**保底路径，行为必须与 9/14 前一致**；
 //   ③ 原生 tool_use（缺省）——工具进 tools 字段、tool_use 块出决策、无工具=完成。
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { coerceDecision } from "../graph";
+import { coerceDecision, isTruncatedDecision } from "../graph";
 import {
     createRealLlm, extractJson, fromAnthropicContent, toAnthropicTools, renderUserMessage,
     ESCALATED_MAX_TOKENS, isRetryableStatus, parseRetryAfterMs,
@@ -183,9 +183,19 @@ describe("realLlm / fromAnthropicContent", () => {
         expect(r).toEqual({ kind: "done", note: "四周已经做完。" });
     });
 
-    it("无工具 + max_tokens（截断）→ 返回原文，判失败不计成 done", () => {
+    it("无工具 + max_tokens（截断）→ 带 kind:'truncated' 标记，coerceDecision 仍判失败（不计成 done）", () => {
         const r = fromAnthropicContent([{ type: "text", text: "我正在" }], "max_tokens");
-        expect(coerceDecision(r)).toBeNull();   // 截断的决策不可信，按一步失败计费
+        expect(coerceDecision(r)).toBeNull();   // 截断的决策不可信，按一步失败计费（旧语义不变）
+        // ★ 但必须带上标记：上层据此把"截断"（该拆小）与"格式错"（该改格式）分开反馈
+        expect(isTruncatedDecision(r)).toBe(true);
+        expect((r as { note: string }).note).toContain("我正在");
+        // 空文本也带标记（否则退化成不可分辨的 null）
+        expect(isTruncatedDecision(fromAnthropicContent([], "max_tokens"))).toBe(true);
+        // 对照：正常结束 / 有工具 都不该被判成截断
+        expect(isTruncatedDecision(fromAnthropicContent([{ type: "text", text: "done" }], "end_turn"))).toBe(false);
+        expect(isTruncatedDecision(
+            fromAnthropicContent([{ type: "tool_use", id: "t", name: "mkdir", input: {} }], "tool_use"),
+        )).toBe(false);
     });
 
     it("input 不是对象（网关畸形返回）→ args 归零，不抛错", () => {

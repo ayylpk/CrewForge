@@ -3,7 +3,7 @@ import { afterAll, describe, expect, it } from "bun:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { buildDeveloperGraph, coerceDecision, routeAfterImplement, routeAfterLocalChecks, routeAfterTestResult } from "../graph";
+import { acceptanceProgressKey, buildDeveloperGraph, clipArgsForModel, clipForModel, coerceDecision, isTruncatedDecision, routeAfterImplement, routeAfterLocalChecks, routeAfterTestResult } from "../graph";
 import type { MessagePort } from "../graph";
 import { DeveloperLedger } from "../ledger";
 import { Workspace } from "../workspace";
@@ -272,6 +272,20 @@ describe("graph / 决策解析", () => {
         expect(coerceDecision("not json")).toBe(null);
         expect(coerceDecision(42)).toBe(null);
     });
+
+    it("isTruncatedDecision：只认 kind:'truncated'（截断 ≠ 格式错，反馈要分开）", () => {
+        expect(isTruncatedDecision({ kind: "truncated", note: "我正在" })).toBe(true);
+        // 对照：正常决策不算截断
+        expect(isTruncatedDecision({ kind: "done", note: "x" })).toBe(false);
+        expect(isTruncatedDecision({ kind: "tool", tool: "readFile" })).toBe(false);
+        expect(isTruncatedDecision({ kind: "batch", calls: [] })).toBe(false);
+        // 裸字符串（旧形状）与空值都不算
+        expect(isTruncatedDecision("我正在")).toBe(false);
+        expect(isTruncatedDecision(null)).toBe(false);
+        expect(isTruncatedDecision(undefined)).toBe(false);
+        // 且 coerceDecision 对它仍是 null——"按一步失败计费"的语义不变
+        expect(coerceDecision({ kind: "truncated", note: "x" })).toBe(null);
+    });
 });
 
 describe("graph / 默认路径不依赖旧控制平面", () => {
@@ -308,5 +322,73 @@ describe("graph / 默认路径不依赖旧控制平面", () => {
             const src = fs.readFileSync(file, "utf-8");
             expect(/from\s+["'][^"']*engine2/.test(src)).toBe(false);
         }
+    });
+});
+
+// ============================================================
+// B2：验收预演「无进展」检测（治模型自调 runAcceptance 空转——p7 的 23 次空转）
+//   与 repeat-tool-reminder 的分工：后者比"调用参数是否相同"，这里比"结果状态是否相同"——
+//   参数可以每次不同（换着 only 跑子集），只要底层失败集合没动，就是货真价实的"没进展"。
+describe("B2 验收无进展：指纹与路由", () => {
+    const contractResult = (failed: string[], unev: string[] = []) => ({
+        ok: false, output: "",
+        meta: { failed: failed.length, failedIds: failed, unevaluable: unev.length, unevaluableIds: unev, runnable: 64 },
+    });
+
+    it("acceptanceProgressKey：只认 runAcceptance 结果；全绿=空串；失败集合变化→不同键（与顺序无关）", () => {
+        // 非验收结果（别的工具）→ null，不参与检测
+        expect(acceptanceProgressKey({ ok: true, output: "", meta: { path: "a.ts" } } as never)).toBe(null);
+        expect(acceptanceProgressKey({ ok: true, output: "" } as never)).toBe(null);
+        // 全绿 → 空串（有进展，计数清零）
+        expect(acceptanceProgressKey({ ok: true, output: "", meta: { failed: 0, failedIds: [], unevaluable: 0, unevaluableIds: [], runnable: 64 } } as never)).toBe("");
+        // 同一失败集合 → 同一键（与 id 顺序无关）
+        expect(acceptanceProgressKey(contractResult(["ac-2", "ac-1"]) as never))
+            .toBe(acceptanceProgressKey(contractResult(["ac-1", "ac-2"]) as never));
+        // 集合变了 → 键不同（= 有进展）
+        expect(acceptanceProgressKey(contractResult(["ac-1"]) as never))
+            .not.toBe(acceptanceProgressKey(contractResult(["ac-1", "ac-2"]) as never));
+        // 只有"不可判定"、无真失败 → 仍是有失败的键（绝不能当全绿放行）
+        expect(acceptanceProgressKey(contractResult([], ["ac-52"]) as never)).not.toBe("");
+    });
+
+    it("routeAfterImplement：验收连续零进展（到顶）→ developerBlocked（优先于工作项推进）", () => {
+        const stalled = initialDeveloperState({
+            status: "implementing",
+            workItems: [{ id: "w1", kind: "foundation" }, { id: "w2", kind: "backend" }],
+            completedWorkItems: ["w1"],           // 还有 w2 没做——但零进展优先停手，不许继续烧
+            acceptanceStallCount: 3,
+        });
+        expect(routeAfterImplement(stalled)).toBe("developerBlocked");
+        // 未到顶 → 照常推进工作项（不误伤）
+        expect(routeAfterImplement(initialDeveloperState({ ...stalled, acceptanceStallCount: 2 }))).toBe("continueWorkItems");
+    });
+
+    it("routeAfterLocalChecks：恢复路径带着零进展状态 → developerBlocked（兜底）", () => {
+        expect(routeAfterLocalChecks(initialDeveloperState({
+            status: "implementing", error: null, acceptanceStallCount: 3,
+        }))).toBe("developerBlocked");
+    });
+});
+
+// ============================================================
+// C2：有界截断（报错/结果不淹没模型）——头尾保留 + 明示省略 + 出路提示
+//   P1 已把 runAcceptance 输出紧凑化；这里是 graph 侧的通用兜底（同样管住其它工具）。
+describe("C2 有界截断：clipForModel / clipArgsForModel", () => {
+    it("超限输出头尾保留 + 明示省略；有 rawOutputPath 时给出完整现场路径", () => {
+        const long = "A".repeat(20_000);
+        const out = clipForModel({ tool: "runCommand", output: long, meta: { rawOutputPath: "/tmp/full.log" } });
+        expect(out.length).toBeLessThan(long.length);
+        expect(out).toContain("中段省略");
+        expect(out).toContain("/tmp/full.log");                 // 出路：完整输出在哪
+        // 短输出原样返回（不无谓加省略标记）
+        expect(clipForModel({ tool: "readFile", output: "short" })).toBe("short");
+    });
+
+    it("clipArgsForModel 只裁超长字符串字段；短参数（路径）原样，且明示『调用按完整参数执行』", () => {
+        const args = { path: "a.ts", content: "x".repeat(9_000) };
+        const clipped = clipArgsForModel(args);
+        expect(clipped["path"]).toBe("a.ts");
+        expect(String(clipped["content"]).length).toBeLessThan(9_000);
+        expect(String(clipped["content"])).toContain("调用已按**完整**参数执行");
     });
 });
