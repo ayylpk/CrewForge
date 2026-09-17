@@ -67,28 +67,92 @@ export async function invokeWithTimeout<T>(
     }
 }
 
-/** 结构化输出失败带反馈重试：把上次校验错误拼进下次 prompt，让模型自纠错 */
+/** 结构化输出失败的机器分类（不许把解析失败伪装成"需求不完整"） */
+export type StructuredFailureCategory = "SPEC" | "OUTPUT_PARSE" | "TIMEOUT" | "TOOL";
+
+export interface StructuredFailure {
+    category: StructuredFailureCategory;
+    /** 最后一次的错误原文（截断保存，进失败报告） */
+    error: string;
+    /** 模型原始输出（能拿到就留档；拿不到为 undefined） */
+    raw: string | undefined;
+    attempts: number;
+    label: string;
+}
+
+/** 统一结构化调用结果：★ 失败是**返回值**，不是异常（阶段 1 提交 1） */
+export type StructuredCallResult<T> =
+    | { ok: true; value: T; attempts: number }
+    | { ok: false; failure: StructuredFailure };
+
+/** 类型化的结构化失败异常：冒泡到 runner 时必须被转成显式终态，不许让进程裸退 */
+export class StructuredOutputFailure extends Error {
+    readonly failure: StructuredFailure;
+    constructor(f: StructuredFailure) {
+        super(`[${f.category}] ${f.label} 结构化输出失败（${f.attempts} 次）：${f.error.slice(0, 200)}`);
+        this.name = "StructuredOutputFailure";
+        this.failure = f;
+    }
+}
+
+export function classifyStructuredError(message: string): StructuredFailureCategory {
+    if (/Failed to parse|OUTPUT_PARSING_FAILURE|Unexpected token|JSON Parse|SyntaxError/i.test(message)) return "OUTPUT_PARSE";
+    if (/超时|timed? ?out|aborted|AbortError/i.test(message)) return "TIMEOUT";
+    return "TOOL";
+}
+
+/**
+ * 结构化调用（**永不抛**）：有界重试 + 第二次换策略（缩小输出）+ 结构化失败结果。
+ *
+ *   规矩（阶段 1）：
+ *     · 第 1 次失败：原 schema 重试，把错误原文喂回去；
+ *     · 第 2 次失败：**改策略**——要求缩小输出（最小字段 / 数组 ≤2 项 / 字符串 ≤80 字）；
+ *     · 达到上限：返回 { ok:false, failure }，由调用方决定终态（绝不裸抛）。
+ */
+export async function retryStructuredResult<T>(
+    label: string,
+    call: (feedback: string, signal?: AbortSignal) => Promise<T>,
+    opts?: { timeoutMs?: number; retries?: number },
+): Promise<StructuredCallResult<T>> {
+    const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const retries = Math.max(1, opts?.retries ?? DEFAULT_RETRIES);
+    let feedback = "";
+    let lastError = "";
+    let lastRaw: string | undefined;
+    let lastCategory: StructuredFailureCategory = "TOOL";
+
+    for (let attempt = 1; attempt <= retries; attempt++) {
+        try {
+            const value = await invokeWithTimeout(label, timeoutMs, sig => call(feedback, sig));
+            return { ok: true, value, attempts: attempt };
+        } catch (error) {
+            const message = (error as Error)?.message ?? String(error);
+            const raw = (error as { llmOutput?: unknown })?.llmOutput;
+            lastError = message;
+            if (typeof raw === "string" && raw.length > 0) lastRaw = raw.slice(0, 4000);
+            lastCategory = classifyStructuredError(message);
+            console.warn(`${label} LLM 失败（第 ${attempt}/${retries} 次，${lastCategory}）：${message.slice(0, 140)}`);
+            if (attempt >= retries) break;
+            feedback = attempt === 1
+                ? `\n\n## 上次输出校验失败，必须根据以下错误修正后重新输出（只输出合法 JSON，不要 Markdown 或说明）\n${message.slice(0, 400)}`
+                : `\n\n## 连续两次校验失败：**改为缩小输出**——只填最小必需字段，数组最多 2 项，每个字符串不超过 80 字，不要嵌套不必要的对象，不要任何解释文字。上次错误：\n${message.slice(0, 400)}`;
+        }
+    }
+    return {
+        ok: false,
+        failure: { category: lastCategory, error: lastError.slice(0, 2000), raw: lastRaw, attempts: retries, label },
+    };
+}
+
+/** 结构化输出失败带反馈重试（**会抛** StructuredOutputFailure）：保留给已有调用点，语义不变 */
 export async function retryStructured<T>(
     label: string,
     call: (feedback: string, signal?: AbortSignal) => Promise<T>,
     opts?: { timeoutMs?: number; retries?: number },
 ): Promise<T> {
-    const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    const retries = opts?.retries ?? DEFAULT_RETRIES;
-    let feedback = "";
-    for (let attempt = 1; attempt <= retries; attempt++) {
-        try {
-            return await invokeWithTimeout(label, timeoutMs, sig => call(feedback, sig));
-        } catch (error) {
-            const message = (error as Error).message;
-            console.log(`${label} LLM 失败（第 ${attempt} 次）：${message.slice(0, 100)}`);
-            if (attempt === retries) throw error;
-            feedback =
-                `\n\n## 上次输出校验失败，必须根据以下错误修正后重新输出（只输出合法 JSON，不要 Markdown 或说明）\n` +
-                message.slice(0, 400);
-        }
-    }
-    throw new Error(`${label} 重试耗尽`);
+    const res = await retryStructuredResult<T>(label, call, opts);
+    if (!res.ok) throw new StructuredOutputFailure(res.failure);
+    return res.value;
 }
 
 /** 从回复文本里抠出合法 JSON（模型常把 JSON 夹在文字里） */

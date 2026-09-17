@@ -1210,6 +1210,13 @@ export function renderReviewFindings(f: ReviewInputLike | null): string {
 export type LocalCheckRoute = "requestTest" | "repair" | "developerBlocked" | "continueWorkItems" | "waitBatch";
 export type TestResultRoute = "repair" | "developerReady" | "developerBlocked";
 
+/**
+ * 修复环的独立新鲜预算（搬运①，2026-09-17）。
+ * 取值依据：s4 实弹里修一个真实缺陷（PATCH 500）的定位+改+复验 ≈ 8~12 调，
+ * 30 = 单轮修复的宽裕上限；总浪费上界 = REPAIR_LLM_BUDGET × maxRepairAttempts，有界。
+ */
+export const REPAIR_LLM_BUDGET = 30;
+
 /** 授权路径的规范化比较形式 */
 function normRoot(p: string): string {
     return p.replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/\/+$/, "");
@@ -1230,11 +1237,16 @@ export function intersectRoots(configured: readonly string[], requested: readonl
 }
 
 export function routeAfterLocalChecks(state: DeveloperState, maxLlmCalls = 40): LocalCheckRoute {
-    if (isBudgetExceeded(state, maxLlmCalls)) return "developerBlocked";
+    // ★ 搬运①（claude-code SerialBatchEventUploader 的 per-item fresh budget 口径）：
+    //   验证失败（state.error 非空）时共享池闸让位——修复环有自己的独立新鲜预算
+    //   （REPAIR_LLM_BUDGET，见 repair 节点），只受修复轮次/重复失败/停滞闸约束。
+    //   s4 实弹教训：构建烧光 120 调后，test_failure 回推被本闸一票否决 → 修复轮数=0 直接 blocked。
     // 规格五.8：同一命令连续超时两次 → 不再自己重试，交给外部决定
     if (isTimeoutRepeated(state)) return "developerBlocked";
     // ★ B2 恢复路径兜底：带着"验收零进展"状态落到这里（旧 checkpoint 的 resumeNode）同样停手
     if (isAcceptanceStalled(state)) return "developerBlocked";
+    // 工作项没做完就该有额度：没额度又没做完 = 诚实 blocked（构建池仍是构建期的油门）
+    if (hasPendingWorkItem(state) && isBudgetExceeded(state, maxLlmCalls)) return "developerBlocked";
     // ★ 工作项推进优先于修复：本地预检跑的是**整站** build，而工作项是**分阶段**的。
     //   骨架阶段（w1）刚落地时整站 build 必红——那个红不代表"代码写错了"，
     //   只代表"后面的工作项还没做"。这时该继续推进工作项，而不是去修一个尚未实现的模块。
@@ -1248,6 +1260,9 @@ export function routeAfterLocalChecks(state: DeveloperState, maxLlmCalls = 40): 
     //   放 :1089 之后：有已到未完项且额度够时照常推进（上面已拦），到这里的都是
     //   "没活可干但拆解流还开着"的形态 → 等批。budget/timeout 硬闸仍在最前面先收口。
     if (state.batched && nextUnarrivedWorkItem(state) !== null) return "waitBatch";
+    // ★ 全绿放行（s4c 教训）：工作项全做完且预演无错时，哪怕共享池已烧光也必须送检——
+    //   requestTest/test-core 回推本身几乎不花调用；失败走 REPAIR_LLM_BUDGET 新鲜预算。
+    //   原闸序在这里 budget-exceeded → blocked，等于"全绿了也进不了正式验收"。
     if (!state.error) return "requestTest";
     if (isRepairExhausted(state)) return "developerBlocked";
     // 规格六：上一轮修了但一个文件都没动 → 再修也是原地打转
@@ -1300,7 +1315,8 @@ export function routeAfterTestResult(state: DeveloperState, maxLlmCalls = 40): T
         return canGoReady(state) ? "developerReady" : "developerBlocked";
     }
     if (inbound === "test_failure") {
-        if (isBudgetExceeded(state, maxLlmCalls)) return "developerBlocked";
+        // ★ 搬运①：test_failure 进修复环不再看共享池（构建烧光 ≠ 修复没额度）。
+        //   修复走 REPAIR_LLM_BUDGET 独立新鲜预算，闸序保留：重复失败 → 轮次耗尽 → 停滞。
         if (isRepeatedFailure(state)) return "developerBlocked";
         if (isRepairExhausted(state)) return "developerBlocked";
         if (isStalled(state)) return "developerBlocked";
@@ -1447,6 +1463,32 @@ export function buildDeveloperGraph(deps: DeveloperGraphDeps) {
     const fillTemplate = (tpl: string, vars: Record<string, string>): string =>
         tpl.replace(/\{\{(\w+)\}\}/g, (_m, key: string) => vars[key] ?? "");
 
+
+/**
+ * 蓝图对照表（搬运 Claude Code VerifyPlanExecution，2026-09-17）：
+ * 送检前让执行者对照计划自查——每个工作项按声明的 paths 统计实际改动的文件数，
+ * 0 个的标 ⚠️。只报告不拦截（宁漏不误杀：items 可能合法地不需要新文件），
+ * 拦截交给模型读表后的自查与 test-core 的正式验收。
+ */
+const blueprintCoverageOf = (state: DeveloperState): string => {
+    const norm = (v: string) => v.replace(/\\/g, "/").replace(/^\.\/+/, "").toLowerCase();
+    const changed = (state.changedFiles ?? []).map(norm);
+    const rows = (state.workItems ?? []).map((w) => {
+        const paths = (w.paths ?? []).map(norm);
+        const matched = paths.length === 0
+            ? null
+            : changed.filter(f => paths.some(p => f.includes(p) || p.includes(f))).length;
+        const mark = matched === 0 ? " ⚠️ 零文件" : "";
+        return `- ${w.id} ${w.title ?? ""}：${matched == null ? "未声明路径（按详规自查）" : `改动 ${matched} 个文件`}${mark}`;
+    });
+    return [
+        "",
+        "## 蓝图对照表（送检前自查，VerifyPlanExecution 同款）",
+        ...rows,
+        "送检前逐行核对：有 ⚠️ 的项要么补交付，要么在送检说明里写明为什么不需要文件。",
+    ].join("\n");
+};
+
     const renderTask = (state: DeveloperState, skillName: string, tree: string): string => {
         const tpl = readText(path.join(PROMPTS_DIR, "task.md"));
         const item = state.workItems.find((w) => w.id === state.currentWorkItemId) ?? null;
@@ -1471,7 +1513,8 @@ export function buildDeveloperGraph(deps: DeveloperGraphDeps) {
             // 进提示词（一次一项，防整包时代那面输出体量墙换个位置在输入侧重演）。
             workItems: JSON.stringify((state.workItems ?? []).map((w) => ({ ...w, detail: undefined }))),
             currentWorkItem: JSON.stringify(item),
-            developerInstructions: state.developerInstructions,
+            // ★ 蓝图对照表随提示词注入：模型在实现/送检前都能看到"计划 vs 实际改动"
+            developerInstructions: state.developerInstructions + blueprintCoverageOf(state),
             // 官方脚手架候选（9/15）：空项目初始化加速用。栈名只进数据表不进技能；
             // 无候选（未收录栈/无 stackProfile）时是空串，不产生空节、零扰动。
             scaffoldHint: scaffoldHintFor(state.stackProfile),
@@ -1849,10 +1892,11 @@ export function buildDeveloperGraph(deps: DeveloperGraphDeps) {
             type: "test_request", projectId: state.projectId, taskId: state.taskId,
             correlationId, acceptanceHash: state.acceptanceHash,
             deadlineAt, targets: ["frontend", "backend"],
-            reason: state.error
+            reason: (state.error
                 ?? (unverified.length > 0
                     ? `本地检查通过（但 ${unverified.join("、")} 无工程构建入口，NO_BUILD_ENTRY=未验证，请外部验收覆盖构建项），请求正式验证`
-                    : "本地检查通过，请求正式验证"),
+                    : "本地检查通过，请求正式验证"))
+                + blueprintCoverageOf(state),
         });
 
         deps.ledger.exitNode("requestTest", "waiting_test", { correlationId, deadlineAt });
@@ -1968,7 +2012,10 @@ export function buildDeveloperGraph(deps: DeveloperGraphDeps) {
             task: renderRepair(state),
             skill: readSkill("debugging"),
             maxSteps,
-            llmBudget: Math.max(0, maxLlmCalls - state.llmCallsPlanned),
+            // ★ 搬运①：修复环的**独立新鲜预算**——每次进 repair 重置为 REPAIR_LLM_BUDGET，
+            //   不吃构建共享池（rlaph-wiggum 按轮重置 + SerialBatchEventUploader 每项独立失败预算的同族实现）。
+            //   轮数上限仍由 maxRepairAttempts / isRepeatedFailure / isStalled 把守，总浪费有界。
+            llmBudget: REPAIR_LLM_BUDGET,
             llmErrorTolerance: deps.llmErrorTolerance,
             subagentUsesLlm: deps.subagentLlm !== undefined,
             acceptanceStall: { count: state.acceptanceStallCount, key: state.acceptanceStallKey },

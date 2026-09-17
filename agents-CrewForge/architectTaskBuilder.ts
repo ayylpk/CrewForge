@@ -579,7 +579,19 @@ export function buildArchitectTaskFromPlan(o: {
         allowedRoots,
         forbiddenPaths,
         acceptanceChecks,
-        developerInstructions: sem.instructions,
+        // ★ 计划随行（搬运 Claude Code：计划与执行同一个脑子，2026-09-17）：
+        //   把架构师的拆解理由（总目标 / 栈取舍 / 各工作项一句话）随任务包带给 Developer，
+        //   治 PM→架构师→Developer 三次换脑的上下文断层（s4c 栈关键词丢失即断层实例）。
+        //   StackProfileSchema 是 looseObject，why 运行时透传给 Developer 的提示词。
+        developerInstructions: [
+            "## 拆解理由（架构师随行简报）",
+            `- 总目标：${sem.goal}`,
+            `- 技术栈取舍：${sem.stack.why}`,
+            ...sem.workItems.map(w => `- ${w.id}${w.title ? ` ${w.title}` : ""}（${w.kind}）`),
+            "",
+            "## 执行约束（原 developerInstructions）",
+            sem.instructions,
+        ].join("\n"),
     } as ArchitectTask;
 
     // ⑤ 自己先过一遍 Developer 的权威 schema —— 过不了的包**不许**派发

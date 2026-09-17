@@ -347,7 +347,7 @@ describe("分批流水 / 种子批校验（acceptArchitectTask 第二参）", ()
 });
 
 describe("分批流水 / resumeWithBatch", () => {
-    it("happy path：w1 跑到等批 → 推 w2 批 → 合并推进到送检；批齐后再喂重复批被拒", async () => {
+    it("happy path：w1 跑到等批 → 重复推 w1 幂等忽略 → 推 w2 批 → 合并推进到送检", async () => {
         const ledgerPath = nextLedgerPath();
         const agent = makeAgent(ledgerPath, scriptedLlm(WRITE_THEN_DONE).llm, { runId: "run-b" });
         const s1 = await agent.acceptArchitectTask(blueprintTask(), [seedW1()]);
@@ -357,8 +357,16 @@ describe("分批流水 / resumeWithBatch", () => {
             { id: "w2", kind: "frontend", done: false, arrived: false },
         ]);
 
-        // 乱序批（w1 已到还想再推 w1）→ 拒
-        expect(await agent.resumeWithBatch(seedW1())).toBe("rejected");
+        // 重复批（w1 已到甚至已做完，还被再推一遍）→ 幂等忽略：原地返回状态，不作废。
+        //   9/16 p20 首跑惨案：信封种子批已含 w1，拆分流又照发一遍 w1，
+        //   旧闸把「已到项重投」判成乱序 → DRIVER_GATE_REJECTED 整次作废。
+        const dup = await agent.resumeWithBatch(seedW1());
+        if (dup === "rejected") throw new Error("已到批次重复投递不该判乱序");
+        expect(dup.status).toBe("waiting_item");
+        expect(agent.ledger.listEvents().some((e) => e.type === "batch_duplicate_ignored")).toBe(true);
+        expect(agent.ledger.listEvents().some((e) => e.type === "batch_rejected")).toBe(false);
+        // 真乱序照拒：w9 从未到、也不是首个未达项（9/15 拍板②零容忍不变）
+        expect(await agent.resumeWithBatch(seedW1({ itemId: "w9" }))).toBe("rejected");
         expect(agent.ledger.listEvents().some((e) => e.type === "batch_rejected")).toBe(true);
 
         const s2 = await agent.resumeWithBatch(batchW2());

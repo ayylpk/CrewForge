@@ -8,6 +8,7 @@
 //   offset/limit 与 maxBytes 互斥优先：给了 offset 或 limit 就走行模式。
 import { num, str } from "./registry";
 import type { ToolContext, ToolResult, ToolSpec } from "./registry";
+import { markObserved } from "./observedFiles";
 
 const DEFAULT_MAX_BYTES = 256 * 1024;
 
@@ -38,6 +39,9 @@ export const readFileTool: ToolSpec = {
                 : r.endLine < r.totalLines
                     ? `\n…（共 ${r.totalLines} 行；续读：offset=${r.endLine + 1}）`
                     : `\n…（共 ${r.totalLines} 行，已到末尾）`;
+            // ★ 搬运③：行模式读取同样计入"已观察"（读到多少算多少，与 claude-code 的
+            //   isPartialView 语义相反——这里放宽，避免续读场景反复拒写）
+            markObserved(ctx.taskId, ctx.owner, r.path);
             return {
                 ok: true,
                 output: `${r.content}${more}`,
@@ -49,6 +53,8 @@ export const readFileTool: ToolSpec = {
         }
 
         const r = ctx.workspace.readText(target, num(args, "maxBytes", DEFAULT_MAX_BYTES));
+        // ★ 搬运③：成功读取 = 该文件进入本任务的"已观察"表（writeFile 先读后改闸的数据源）
+        markObserved(ctx.taskId, ctx.owner, r.path);
         const output = r.truncated
             ? `${r.content}\n…（已截断；文件共 ${r.bytes} 字节）`
             : r.content;

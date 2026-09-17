@@ -37,6 +37,12 @@ export const AcceptanceSchema = z.discriminatedUnion("kind", [
             status: z.number().int(),
             jsonPath: z.record(z.string(), PredicateSchema).optional(),
         }),
+        /**
+         * ★ 阶段 1 提交 3：从响应里抠变量供后续断言使用（如 { noteId: "data.id" }），
+         * 路径/请求头/请求体里的 `{name}` 会被替换成上一次捕获到的值。
+         * 没有它，"删除后再 GET 必须 404"这类**跨请求**断言无法机器执行。
+         */
+        capture: z.record(z.string(), z.string()).optional(),
         /** 给人看的说明（不参与判定） */
         display: z.string().optional(),
     }),

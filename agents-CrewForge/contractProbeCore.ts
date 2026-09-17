@@ -597,7 +597,19 @@ export async function runContractProbe(o: {
                         const target = abs + suffix;
                         if (!fs.existsSync(target)) continue;   // 兄弟文件未必有（WAL 未必启用）
                         try {
-                            fs.rmSync(target);
+                            // ★ EBUSY 有界重试（s4c 教训）：上一轮服务的句柄释放有滞后，
+                            //   Windows 下 rmSync 偶发 EBUSY——等 400ms 重试，最多 3 次。
+                            //   3 次仍占用才判失败（真占用：服务没退干净）。
+                            for (let rmTry = 0; ; rmTry++) {
+                                try {
+                                    fs.rmSync(target);
+                                    break;
+                                } catch (retryErr) {
+                                    const code = (retryErr as NodeJS.ErrnoException).code;
+                                    if (rmTry >= 2 || (code !== "EBUSY" && code !== "EPERM")) throw retryErr;
+                                    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 400);
+                                }
+                            }
                         } catch (e) {
                             const err = e as NodeJS.ErrnoException;
                             return {

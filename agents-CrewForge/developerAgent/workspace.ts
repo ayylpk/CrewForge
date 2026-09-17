@@ -171,7 +171,10 @@ export const FORBIDDEN_REL_PATHS: ReadonlyArray<{ path: string; code: ViolationC
     { path: "scripts", code: "TEST_SCRIPT" },
 ];
 
-/** CrewForge 控制平面根（= agents-CrewForge/）。生成项目永远不在其中。 */
+/** CrewForge 控制平面根（= agents-CrewForge/）。
+ *  ⚠️ 9/16 p20 实测推翻旧注释「生成项目永远不在其中」：团队线产物树就住在
+ *  runs/pXX/——**在**控制平面里。所以 checkPath 必须先用项目根圈定，
+ *  再对圈外路径谈控制平面；反过来会把整个生成项目误判成引擎地盘（首跑 0 改盘的母病）。 */
 const CONTROL_PLANE_ROOT = path.resolve(import.meta.dir, "..");
 
 /** 快照时跳过的大目录（生成项目里这些目录由工具链自己管，不属于"源码快照"） */
@@ -297,8 +300,13 @@ export class Workspace {
 
     /** 路径裁决（不抛异常）：返回违规码或 null。沙箱 guard 也用它 */
     checkPath(abs: string): string | null {
-        if (within(CONTROL_PLANE_ROOT, abs)) return "CONTROL_PLANE";
-        if (!within(this.config.projectDir, abs)) return "ESCAPE";
+        // 判定顺序是语义：先问「在项目内吗」——团队线 projectDir 落在控制平面里
+        // （runs/pXX），圈外才谈 CONTROL_PLANE / ESCAPE。旧顺序先扣 CONTROL_PLANE 帽，
+        // 会把圈住的项目整体误判成引擎地盘（9/16 p20 首跑 0 改盘母病）。
+        if (!within(this.config.projectDir, abs)) {
+            if (within(CONTROL_PLANE_ROOT, abs)) return "CONTROL_PLANE";
+            return "ESCAPE";
+        }
         const rel = toPosix(path.relative(this.config.projectDir, abs));
         const segments = rel.split("/").filter(Boolean);
         for (const { segment, code } of FORBIDDEN_SEGMENTS) {

@@ -1,12 +1,12 @@
 // ============================================================
 // final-gate-smoke.ts —— 交付关自测（零 LLM）
 //
-//   ① 无验证器栈 → done 但 **verified=false**（未验证 ≠ 通过）
-//   ② 无可验证对象（任务缺 method/path）→ done + verified=false + 如实说明
-//   ③ 跳过开关 → done + verified=false（不得冒充已验证）
+//   ① 无验证器栈 → **skipped_unverified** + verified=false（未验证 ≠ 通过）★阶段1 提交1
+//   ② 无可验证对象（任务缺 method/path）→ skipped_unverified + verified=false + 如实说明
+//   ③ 跳过开关 → skipped_unverified + verified=false（不得冒充已验证）
 //   ④ 验证通过 → done + verified=true + 报告落盘
 //   ⑤ ★ 编译/启动/契约失败 → **failed**（项目不算完成）
-//   ⑥ Docker 不可用（skipped_unverified）→ done + verified=false + 提示报告位置
+//   ⑥ Docker 不可用（skipped_unverified）→ skipped_unverified（**不再是 done**）
 // ============================================================
 
 import fs from "node:fs";
@@ -38,17 +38,17 @@ function fake(outcome: RunVerifyResult["outcome"], failures: string[] = []): (o:
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cffinalgate-"));
 
 async function main(): Promise<void> {
-    console.log("=== ①/②/③ 未验证路径 ===");
+    console.log("=== ①/②/③ 未验证路径（一律 skipped_unverified，绝不 done）===");
     {
         const r1 = await finalGate({ projectDir: tmp, tasks: TASKS, stack: { techniques: { frontend: { framework: "Svelte", ui: "Skeleton" }, backend: { framework: "Gin" } } } });
-        ok(r1.status === "done" && !r1.verified, `无验证器栈 → done 但未验证（${r1.summary.slice(0, 40)}）`);
+        ok(r1.status === "skipped_unverified" && !r1.verified, `无验证器栈 → skipped_unverified（${r1.summary.slice(0, 40)}）`);
 
         const r2 = await finalGate({ projectDir: tmp, tasks: DIRTY, verify: fake("ok") });
-        ok(r2.status === "done" && !r2.verified, `无可验证对象 → done 但未验证（${r2.summary.slice(0, 40)}）`);
+        ok(r2.status === "skipped_unverified" && !r2.verified, `无可验证对象 → skipped_unverified（${r2.summary.slice(0, 40)}）`);
         ok(r2.summary.includes("未验证"), "摘要显式说明未验证");
 
         const r3 = await finalGate({ projectDir: tmp, tasks: TASKS, skip: true });
-        ok(r3.status === "done" && !r3.verified && r3.summary.includes("不得对外宣称已验证"), "★ 跳过开关不冒充已验证");
+        ok(r3.status === "skipped_unverified" && !r3.verified && r3.summary.includes("不得对外宣称已验证"), "★ 跳过开关不冒充已验证");
     }
 
     console.log("=== ④ 验证通过 ===");
@@ -72,7 +72,7 @@ async function main(): Promise<void> {
     console.log("=== ⑥ Docker 不可用 ===");
     {
         const r = await finalGate({ projectDir: tmp, tasks: TASKS, verify: fake("skipped_unverified" as any) });
-        ok(r.status === "done" && !r.verified, "Docker 不可用 → done 但未验证（不 brick 无 Docker 的机器）");
+        ok(r.status === "skipped_unverified" && !r.verified, "★ Docker 不可用 → skipped_unverified（**不是 done**）");
         ok(r.summary.includes("未验证 ≠ 通过"), `摘要写明未验证：${r.summary.slice(0, 50)}`);
     }
 

@@ -21,6 +21,8 @@ import {
     dockerAvailable, startMysql, stopContainer, waitForHttp, waitForTcp, runContractTests,
     type DockerRunner, type ContractRunResult,
 } from "./docker";
+import { hostDbAvailable, createHostDatabase, dropHostDatabase, hostDbConfig, jdbcUrl } from "./hostDb";
+import { resolveBunExe } from "../tools";
 import { runCommand, killTree, type RunResult } from "../run";
 import { findMaven, type MavenLauncher } from "./maven";
 import type { Acceptance } from "../../ir/acceptance";
@@ -48,6 +50,8 @@ export interface RunVerifyResult {
     /** 用于失败签名的短句（进失败账本） */
     failures: string[];
     cleaned: boolean;
+    /** ★ 阶段 1：本次用哪种数据库落库（host = **宿主验证**，报告必须如实标注） */
+    dbMode?: "docker" | "host" | "none";
 }
 
 export interface RunVerifyOpts {
@@ -58,6 +62,13 @@ export interface RunVerifyOpts {
     startApp?: (args: { projectDir: string; dbPort: number; port: number }) => Promise<{ pid?: number; cmd: string; logFile: string | null; started: boolean }>;
     docker?: DockerRunner;
     mvnwPath?: string | null;
+    /**
+     * 数据库来源（★ 阶段 1）：
+     *   docker —— 容器起库（原行为）
+     *   host   —— **宿主 MySQL**（Docker 不可用时的落库方式；报告必须标注"宿主验证"）
+     *   auto   —— 默认：能用 Docker 用 Docker，否则回退宿主；两者都没有 → skipped_unverified
+     */
+    dbMode?: "docker" | "host" | "auto";
     /** 端口选择（默认随机高位端口） */
     appPort?: number;
     dbPort?: number;
@@ -72,8 +83,8 @@ function pickPort(base = 20000): number {
     return base + Math.floor(Math.random() * 2000);
 }
 
-/** 默认应用启动：Spring Boot 用 mvnw 打 jar 后 java -jar（构建在宿主，依赖走 ~/.m2） */
-async function defaultStartApp(o: RunVerifyOpts, dbPort: number, port: number, logDir: string): Promise<{ pid?: number; cmd: string; logFile: string | null; started: boolean }> {
+/** 默认应用启动：Spring Boot 用 mvnw/java 打 jar 后 java -jar（构建在宿主，依赖走 ~/.m2） */
+async function defaultStartApp(o: RunVerifyOpts, dsn: { url: string; user: string; password: string }, port: number, logDir: string): Promise<{ pid?: number; cmd: string; logFile: string | null; started: boolean }> {
     const backendDir = path.join(o.projectDir, "backend");
     const launcher: MavenLauncher | null = findMaven(backendDir)
         ?? (o.mvnwPath && fs.existsSync(o.mvnwPath)
@@ -104,13 +115,13 @@ async function defaultStartApp(o: RunVerifyOpts, dbPort: number, port: number, l
         env: {
             ...process.env,
             SERVER_PORT: String(port),
-            SPRING_DATASOURCE_URL: `jdbc:mysql://127.0.0.1:${dbPort}/app?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true`,
-            SPRING_DATASOURCE_USERNAME: "app",
-            SPRING_DATASOURCE_PASSWORD: "app",
+            SPRING_DATASOURCE_URL: dsn.url,
+            SPRING_DATASOURCE_USERNAME: dsn.user,
+            SPRING_DATASOURCE_PASSWORD: dsn.password,
         },
         stdio: ["ignore", out, out],
     });
-    return { pid: child.pid, cmd: `java -jar ${path.basename(jar)}（端口 ${port}）`, logFile, started: true };
+    return { pid: child.pid, cmd: `java -jar ${path.basename(jar)}（端口 ${port}，库 ${dsn.url.replace(/^jdbc:mysql:\/\//, "").split("?")[0]}）`, logFile, started: true };
 }
 
 /**
@@ -123,7 +134,7 @@ async function defaultStartApp(o: RunVerifyOpts, dbPort: number, port: number, l
 export async function verifyRun(o: RunVerifyOpts): Promise<RunVerifyResult> {
     const logDir = o.logDir ?? path.join(o.projectDir, "_verify");
     fs.mkdirSync(logDir, { recursive: true });
-    const ctx: { appPid?: number } = {};
+    const ctx: { appPid?: number; hostDbName?: string; dbMode: "docker" | "host" | "none" } = { dbMode: "none" };
     const dbName = `cf-${path.basename(o.projectDir)}-${Date.now().toString(36)}-db`;
 
     let result: Omit<RunVerifyResult, "cleaned">;
@@ -136,16 +147,22 @@ export async function verifyRun(o: RunVerifyOpts): Promise<RunVerifyResult> {
             summary: "编排异常（按工具级错误处理）",
         };
     } finally {
-        // ★ 无论成败必清理：杀应用进程树 + 删容器（防端口/磁盘泄漏，容器泄漏会吃满磁盘）
+        // ★ 无论成败必清理：杀应用进程树 + 删容器 + **删宿主验证库**（防端口/磁盘泄漏）
         if (ctx.appPid) killTree(ctx.appPid);
-        if (!o.skipDatabase) await stopContainer(dbName, o.docker);
+        if (!o.skipDatabase) {
+            if (ctx.dbMode === "docker") await stopContainer(dbName, o.docker);
+            if (ctx.dbMode === "host" && ctx.hostDbName) {
+                const dropped = await dropHostDatabase(ctx.hostDbName);
+                if (!dropped.ok) console.warn(`[verify] 宿主验证库清理失败：${dropped.error ?? "未知"}（库名 ${ctx.hostDbName}）`);
+            }
+        }
     }
-    return { ...result, cleaned: true };
+    return { ...result, cleaned: true, dbMode: ctx.dbMode };
 }
 
 /** 内层：只负责流程判断与早退，不负责清理 */
 async function attemptVerify(
-    o: RunVerifyOpts, logDir: string, dbName: string, ctx: { appPid?: number },
+    o: RunVerifyOpts, logDir: string, dbName: string, ctx: { appPid?: number; hostDbName?: string; dbMode: "docker" | "host" | "none" },
 ): Promise<Omit<RunVerifyResult, "cleaned">> {
     const evidence: RunVerifyEvidence[] = [];
     const failures: string[] = [];
@@ -156,41 +173,68 @@ async function attemptVerify(
     }
 
     const docker = o.docker;
+    const prefersHost = o.dbMode === "host";
     // 跳过 DB 时不查 Docker（纯静态服务不需要容器，别误报环境问题）
-    const hasDocker = o.skipDatabase ? true : await dockerAvailable(docker ?? undefined);
-    if (!hasDocker) {
-        return { outcome: "skipped_unverified", checked: false, evidence, failures,
-            summary: "Docker 不可用：无法起库与应用，run 级验证跳过（未验证 ≠ 通过）" };
-    }
+    const hasDocker = (o.skipDatabase || prefersHost) ? false : await dockerAvailable(docker ?? undefined);
 
-    const dbPort = o.dbPort ?? pickPort(33000);
     const appPort = o.appPort ?? pickPort(21000);
 
-    // 1) 起库（容器）
+    // ---------- 1) 起库：容器（原路）或宿主（阶段 1 新增） ----------
+    let dsn = { url: `jdbc:mysql://127.0.0.1:3306/app`, user: "app", password: "app" };
     if (!o.skipDatabase) {
-        const t0 = Date.now();
-        const db = await startMysql({
-            name: dbName, port: dbPort, database: "app", user: "app", password: "app",
-        }, docker);
-        evidence.push({ step: "mysql", cmd: `docker run --name ${dbName} -p 127.0.0.1:${dbPort}:3306`, exitCode: db.ok ? 0 : 1, durationMs: Date.now() - t0, ok: db.ok, logFile: null, excerpt: db.error?.slice(0, 200) });
-        if (!db.ok) {
-            failures.push(`数据库容器启动失败：${db.error ?? "未知"}`);
-            return { outcome: "env_error", checked: true, evidence, failures, summary: "环境问题：MySQL 容器起不来" };
-        }
-        // 等 MySQL 就绪：★ 用 TCP 探连接（MySQL 不说 HTTP，用 HTTP GET 会永远失败）
-        const ready = await waitForTcp("127.0.0.1", dbPort, { timeoutMs: 60_000, intervalMs: 1_500 });
-        evidence.push({ step: "mysql_ready", cmd: `tcp wait 127.0.0.1:${dbPort}`, exitCode: ready.ok ? 0 : 1, durationMs: ready.durationMs, ok: ready.ok, logFile: null, excerpt: `attempts=${ready.attempts}` });
-        if (!ready.ok) {
-            failures.push(`MySQL 在 60s 内未就绪（端口 ${dbPort}）`);
-            return { outcome: "env_error", checked: true, evidence, failures, summary: "环境问题：数据库未就绪" };
+        const useHost = prefersHost || !hasDocker;
+        if (useHost) {
+            const cfg = hostDbConfig();
+            const t0 = Date.now();
+            const avail = await hostDbAvailable(cfg);
+            if (!avail.ok) {
+                evidence.push({ step: "host_db_available", cmd: `mysql: SELECT 1 @ ${cfg.host}:${cfg.port}`, exitCode: 1, durationMs: Date.now() - t0, ok: false, logFile: null, excerpt: avail.error?.slice(0, 200) });
+                // Docker 与宿主库都没有 → 未验证（不是通过，也不是产品失败）
+                return { outcome: "skipped_unverified", checked: false, evidence, failures,
+                    summary: `Docker 不可用且宿主 MySQL 不可连（${avail.error ?? "未知"}）：run 级验证跳过（未验证 ≠ 通过）` };
+            }
+            const hostDbName = `cf_verify_${Date.now().toString(36)}`;
+            const created = await createHostDatabase(hostDbName, cfg);
+            evidence.push({
+                step: "host_db", cmd: created.cmd, exitCode: created.ok ? 0 : 1, durationMs: created.durationMs,
+                ok: created.ok, logFile: null,
+                excerpt: created.ok ? `宿主验证（host）：已建空库 ${hostDbName}` : created.error?.slice(0, 200),
+            });
+            if (!created.ok) {
+                failures.push(`宿主 MySQL 建库失败：${created.error ?? "未知"}`);
+                return { outcome: "env_error", checked: true, evidence, failures, summary: "环境问题：宿主 MySQL 建库失败" };
+            }
+            ctx.dbMode = "host";
+            ctx.hostDbName = hostDbName;
+            dsn = { url: jdbcUrl(cfg, hostDbName), user: cfg.user, password: cfg.password };
+        } else {
+            const dbPort = o.dbPort ?? pickPort(33000);
+            const t0 = Date.now();
+            const db = await startMysql({
+                name: dbName, port: dbPort, database: "app", user: "app", password: "app",
+            }, docker);
+            evidence.push({ step: "mysql", cmd: `docker run --name ${dbName} -p 127.0.0.1:${dbPort}:3306`, exitCode: db.ok ? 0 : 1, durationMs: Date.now() - t0, ok: db.ok, logFile: null, excerpt: db.error?.slice(0, 200) });
+            if (!db.ok) {
+                failures.push(`数据库容器启动失败：${db.error ?? "未知"}`);
+                return { outcome: "env_error", checked: true, evidence, failures, summary: "环境问题：MySQL 容器起不来" };
+            }
+            ctx.dbMode = "docker";
+            // 等 MySQL 就绪：★ 用 TCP 探连接（MySQL 不说 HTTP，用 HTTP GET 会永远失败）
+            const ready = await waitForTcp("127.0.0.1", dbPort, { timeoutMs: 60_000, intervalMs: 1_500 });
+            evidence.push({ step: "mysql_ready", cmd: `tcp wait 127.0.0.1:${dbPort}`, exitCode: ready.ok ? 0 : 1, durationMs: ready.durationMs, ok: ready.ok, logFile: null, excerpt: `attempts=${ready.attempts}` });
+            if (!ready.ok) {
+                failures.push(`MySQL 在 60s 内未就绪（端口 ${dbPort}）`);
+                return { outcome: "env_error", checked: true, evidence, failures, summary: "环境问题：数据库未就绪" };
+            }
+            dsn = { url: `jdbc:mysql://127.0.0.1:${dbPort}/app?useSSL=false&serverTimezone=UTC&allowPublicKeyRetrieval=true`, user: "app", password: "app" };
         }
     }
 
     // 2) 起应用（宿主）
     const t1 = Date.now();
     const app = o.startApp
-        ? await o.startApp({ projectDir: o.projectDir, dbPort, port: appPort })
-        : await defaultStartApp(o, dbPort, appPort, logDir);
+        ? await o.startApp({ projectDir: o.projectDir, dbPort: 0, port: appPort })
+        : await defaultStartApp(o, dsn, appPort, logDir);
     ctx.appPid = app.pid;
     evidence.push({ step: "app_start", cmd: app.cmd, exitCode: app.started ? 0 : 1, durationMs: Date.now() - t1, ok: app.started, logFile: app.logFile });
     if (!app.started) {
@@ -230,6 +274,7 @@ export function renderRunVerifyReport(r: RunVerifyResult): string {
     const lines = [
         `# run 级验证报告`,
         `- 结论：${r.outcome}${r.checked ? "" : "（未验证）"}`,
+        `- 数据库来源：${r.dbMode === "host" ? "**宿主验证（host）**——宿主 MySQL + 本机 JVM，非容器隔离" : r.dbMode === "docker" ? "容器（docker）" : "无（跳过）"}`,
         `- 摘要：${r.summary}`,
         `- 清理：${r.cleaned ? "已完成（进程与容器已回收）" : "未完成——需人工检查"}`,
         "",

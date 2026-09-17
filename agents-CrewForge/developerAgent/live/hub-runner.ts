@@ -413,8 +413,9 @@ let rounds = 0;
 while (state && state.status === "waiting_test") {
     if (++rounds > MAX_TEST_ROUNDS) { console.error("[hub-runner] 等待-回测超 8 轮，收手"); break; }
     const wait = handle.ledger.getTestWait();
-    const hardDeadline = (wait?.deadlineAt ?? Date.now() + 900_000) + 60_000;
-    // 止损④：test_request 发出后 15 分钟无结果回包 = 验收空转 → kill
+    const hardDeadline = (wait?.deadlineAt ?? Date.now() + 1_350_000) + 60_000;
+    // 止损④：test_request 发出后 ~22.5 分钟无结果回包 = 验收空转 → kill
+    //（9/16 用户指令 ×1.5：与 graph.ts waitTestTimeoutMs 兜底同源同值）
     while (true) {
         if (station.hasPending(ORCH)) {
             const m = await station.waitForMessage(ORCH);

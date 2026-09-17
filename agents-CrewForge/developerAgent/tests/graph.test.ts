@@ -139,9 +139,20 @@ describe("graph / 路由", () => {
         expect(routeAfterLocalChecks(s)).toBe("developerBlocked");
     });
 
-    it("预算超限 → developerBlocked", () => {
-        const s = initialDeveloperState({ status: "implementing", error: null, llmCallsCompleted: 99 });
+    it("预算超限 + 工作项未完 → developerBlocked（没干完也没额度，诚实停）", () => {
+        const s = initialDeveloperState({
+            status: "implementing", error: null, llmCallsCompleted: 99,
+            workItems: [{ id: "w1", kind: "backend" }],
+        });
         expect(routeAfterLocalChecks(s, 40)).toBe("developerBlocked");
+    });
+
+    it("预算超限但工作项全做完且无错 → 仍送检（全绿放行，s4c 教训：全绿不能死在送检前）", () => {
+        const s = initialDeveloperState({
+            status: "implementing", error: null, llmCallsCompleted: 99,
+            workItems: [{ id: "w1", kind: "backend" }], completedWorkItems: ["w1"],
+        });
+        expect(routeAfterLocalChecks(s, 40)).toBe("requestTest");
     });
 
     it("test_passed → developerReady", () => {

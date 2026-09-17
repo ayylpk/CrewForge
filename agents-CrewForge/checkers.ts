@@ -528,3 +528,62 @@ export async function checkBatch(files: { path: string; content: string }[], kno
 export function gateFeedback(attempt: number, problems: CheckProblems): string {
     return `\n\n## 编译闸门打回（第 ${attempt} 次）：上一次产出的文件未通过编译校验，按错误修正后重新输出目标文件完整源代码（不要围栏、JSON 或说明）\n${problems.join("；").slice(0, 600)}`;
 }
+
+
+// ============================================================
+// 需求栈 ↔ 架构师选型一致性闸（搬运⑤，2026-09-17）
+//
+//   治什么病（s4 实弹）：需求原文写明「Node + Express + SQLite」，
+//   architectStack 仍按默认兼容组合选了 Spring Boot 3 + sqlite-jdbc，
+//   地基按错栈铺、developer 再逐项纠正——整条链白烧。
+//   机制：stackSchema 强制模型先**逐字摘录**需求里的栈声明（requirementStack.quote），
+//   本函数对比「声明 ↔ 决策」；冲突即 zod addIssue → 走既有 OUTPUT_PARSE 有界重试，
+//   报错原文（含出路）自动喂回重选。
+//
+//   铁律同上：纯函数零 LLM；**宁漏不误杀**——只判"明确写了 A 却选了 B"的硬冲突，
+//   需求没写栈（quote=未指定）一律放行。
+// ============================================================
+
+/** 已知后端系别：命中即归到该系（用于"跨系冲突"判定） */
+const BACKEND_FAMILIES: { family: string; claim: RegExp; marker: RegExp }[] = [
+    { family: "Spring/JVM", claim: /spring\s?boot|spring mvc|mybatis/i, marker: /spring|mybatis|java(?!script)/i },
+    { family: "Node 系", claim: /node|express|koa|fastify|nest(\.js)?/i, marker: /express|koa|fastify|nest(\.js)?|node(\.js)?\s*\+/i },
+    { family: "Python 系", claim: /django|flask|fastapi/i, marker: /django|flask|fastapi/i },
+    { family: "Go 系", claim: /\bgin\b|\becho\b|\bfiber\b/i, marker: /\bgin\b|\becho\b|\bfiber\b/i },
+];
+
+/** 已知数据库系别 */
+const DB_FAMILIES: { family: string; claim: RegExp; marker: RegExp }[] = [
+    { family: "SQLite", claim: /sqlite/i, marker: /sqlite/i },
+    { family: "MySQL", claim: /mysql/i, marker: /mysql/i },
+    { family: "PostgreSQL", claim: /postgres/i, marker: /postgres|pg\b/i },
+    { family: "MongoDB", claim: /mongo/i, marker: /mongo/i },
+];
+
+function conflictOf(claimText: string, decisionText: string, families: { family: string; claim: RegExp; marker: RegExp }[]): string | null {
+    const claimFamily = families.find(f => f.claim.test(claimText));
+    if (!claimFamily) return null;
+    // 决策文本里出现了**别的系**的标记、且没有出现需求声明的系的标记 → 硬冲突
+    const others = families.filter(f => f.family !== claimFamily.family);
+    const drifted = others.filter(f => f.marker.test(decisionText)).map(f => f.family);
+    if (drifted.length > 0 && !claimFamily.marker.test(decisionText)) {
+        return "需求声明 " + claimFamily.family + "，而选型偏向 " + drifted.join("/") + "；回到需求原文重新选型";
+    }
+    return null;
+}
+
+/**
+ * 对比「需求原文摘录 ↔ 栈决策文本」，返回人读冲突短句（空数组=绿/未声明=放行）。
+ * @param quote    requirementStack.quote（模型从需求原文逐字摘的栈声明；"未指定"=放行）
+ * @param decision 决策文本：techniques.database.type/why + moduleTech[].backend + why 拼接
+ */
+export function checkStackConsistency(quote: string, decision: string): CheckProblems {
+    const q = (quote ?? "").trim();
+    if (!q || /未指定|none|n\/a/i.test(q)) return [];
+    const out: CheckProblems = [];
+    const be = conflictOf(q, decision, BACKEND_FAMILIES);
+    if (be) out.push(be);
+    const db = conflictOf(q, decision, DB_FAMILIES);
+    if (db) out.push(db);
+    return out;
+}

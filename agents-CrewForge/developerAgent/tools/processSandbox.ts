@@ -89,11 +89,12 @@ export interface SandboxConfig {
     docker?: DockerBackendOptions;
 }
 
+// 与 graph.ts EXEC_TIMEOUT_DEFAULTS 同源（9/16 用户指令 ×1.5）——改一处必改另一处+两份 policy+测试
 export const DEFAULT_TIMEOUTS: SandboxTimeouts = {
-    commandMs: 2 * 60_000,     // 普通命令 2 分钟
-    buildMs: 10 * 60_000,      // 前后端构建 10 分钟
-    startMs: 2 * 60_000,       // 服务启动等待 2 分钟
-    httpMs: 30_000,            // HTTP 请求 30 秒
+    commandMs: 3 * 60_000,     // 普通命令 3 分钟（原 2）
+    buildMs: 15 * 60_000,      // 前后端构建 15 分钟（原 10）
+    startMs: 3 * 60_000,       // 服务启动等待 3 分钟（原 2）
+    httpMs: 45_000,            // HTTP 请求 45 秒（原 30）
 };
 
 export const DEFAULT_NETWORK_POLICY: NetworkPolicy = {

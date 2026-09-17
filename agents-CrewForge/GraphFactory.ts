@@ -17,7 +17,7 @@ import { SystemMessage } from "@langchain/core/messages";
 import { Annotation, StateGraph, START, END, MemorySaver, type GraphNode } from "@langchain/langgraph";
 import { type Node, type Edge } from "./Node";
 import { initModels } from "./models";
-import { invokeWithTimeout, DEFAULT_TIMEOUT_MS, DEFAULT_RETRIES } from "./llm";
+import { invokeWithTimeout, retryStructuredResult, StructuredOutputFailure, DEFAULT_TIMEOUT_MS } from "./llm";
 
 // ---------- 注册表 ----------
 
@@ -44,6 +44,22 @@ export class SchemaRegistry {
     }
 }
 export const schemaRegistry = new SchemaRegistry();
+
+// ============================================================
+// 节点级输出校验器（搬运⑤修订，2026-09-17）
+//   schema 管形状，这里管"值与上下文的一致性"——校验器能拿到**图状态**
+//   （需求原文在 state 里，不依赖模型自觉吐新字段，那是 s4b 炸掉的写法）。
+//   返回问题短句列表（空=绿）；非空 → llmNode 在重试回调内抛错，
+//   报错原文带出路喂回模型，走既有 OUTPUT_PARSE 有界重试。
+// ============================================================
+export type NodeOutputValidator = (value: any, state: any) => string[] | Promise<string[]>;
+const nodeValidators = new Map<string, NodeOutputValidator>();
+export function registerNodeValidator(schemaKey: string, fn: NodeOutputValidator): void {
+    nodeValidators.set(schemaKey, fn);
+}
+function nodeValidatorOf(schemaKey: string | null | undefined): NodeOutputValidator | null {
+    return schemaKey ? nodeValidators.get(schemaKey) ?? null : null;
+}
 
 export type CondFn = (state: any) => boolean;
 
@@ -136,30 +152,40 @@ function llmNode(row: Node): GraphNode<any> {
     let schemaReady = false;
 
     return async (state: any) => {
-        if (!model) model = initModels(row.model || "{}", graphRoleOf(row));
-        if (!schemaReady) {
-            schema = row.schemaKey ? schemaRegistry.get(row.schemaKey) : null;
-            schemaReady = true;
-        }
-        let feedback = "";
-        for (let attempt = 1; attempt <= DEFAULT_RETRIES; attempt++) {
-            try {
+        // ★ 阶段 1 提交 1：模型/schema 解析也放进重试回调里——否则 initModels 抛错会绕过
+        //   "有界重试 + 结构化失败"，又变成裸异常冒泡（正是 s2 的死法）。
+        const res = await retryStructuredResult<any>(
+            `llm:${row.nodeName}`,
+            async (feedback, sig) => {
+                if (!model) model = initModels(row.model || "{}", graphRoleOf(row));
+                if (!schemaReady) {
+                    schema = row.schemaKey ? schemaRegistry.get(row.schemaKey) : null;
+                    schemaReady = true;
+                }
                 const prompt = `${row.systemPrompt}\n\n## 输入\n${JSON.stringify(state, null, 2)}` + feedback;
                 const messages = [new SystemMessage(prompt)];
-                const res = await invokeWithTimeout<any>(row.nodeName, timeoutMs, (sig) =>
+                const out = await invokeWithTimeout<any>(row.nodeName, timeoutMs, (s) =>
                     schema
-                        ? model!.withStructuredOutput(schema, { method: "jsonMode", name: `extract_${row.nodeName}` }).invoke(messages, { signal: sig })
-                        : model!.invoke(messages, { signal: sig }),
+                        ? model!.withStructuredOutput(schema, { method: "jsonMode", name: `extract_${row.nodeName}` }).invoke(messages, { signal: s })
+                        : model!.invoke(messages, { signal: s }),
                 );
-                return { [output]: schema ? res : extractJson(res.content), llmCalls: 1 };
-            } catch (e) {
-                // 每次失败必须留痕（9/2 血泪：静默重试导致 20 分钟看似死锁无从判断）
-                console.warn(`[llm:${row.nodeName}] 第 ${attempt}/${DEFAULT_RETRIES} 次失败: ${(e as Error).message.slice(0, 120)}`);
-                if (attempt === DEFAULT_RETRIES) throw e;
-                feedback = `\n\n## 上次输出校验失败，必须修正后重新输出（只输出合法 JSON）\n${(e as Error).message.slice(0, 400)}`;
-            }
-        }
-        throw new Error(`节点 ${row.nodeName} 重试耗尽`);
+                // 无 schema 的节点自己抠 JSON：抠失败也归 OUTPUT_PARSE，同样进有界重试
+                const value = schema ? out : extractJson(out.content);
+                // ★ 节点级校验器（搬运⑤）：形状过了再验"值↔上下文一致性"。
+                //   抛错发生在重试回调内 → 报错原文进 feedback，模型带着出路重试（有界）。
+                const validator = nodeValidatorOf(row.schemaKey);
+                if (validator) {
+                    const problems = (await validator(value, state)) ?? [];
+                    if (problems.length > 0) {
+                        throw new Error(`Failed to parse. STACK/CONTEXT 校验未过：${problems.join("；").slice(0, 400)}`);
+                    }
+                }
+                return value;
+            },
+            { timeoutMs },
+        );
+        if (!res.ok) throw new StructuredOutputFailure(res.failure);
+        return { [output]: res.value, llmCalls: 1 };
     };
 }
 

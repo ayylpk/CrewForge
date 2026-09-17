@@ -23,7 +23,7 @@ import { initModels } from "./models";
 import { retryStructured } from "./llm";
 import {
     stitch, runWithInteraction,
-    codeRegistry, schemaRegistry, condRegistry,
+    codeRegistry, schemaRegistry, condRegistry, registerNodeValidator,
     type StateNodeFn, type CondFn,
 } from "./GraphFactory";
 import { type Node, type Edge, saveArchitectOutput, readProjectFile, getProjectConfirmMode } from "./Node";
@@ -33,7 +33,29 @@ import { ensureTasksForPhase, getTasksByStatus, updateStatusByExt } from "./task
 import { pickQuestioner } from "./confirm";
 import { dispatchArchitectTaskBatched } from "./architectTaskBuilder";
 import { createRealLlm } from "./developerAgent/realLlm";
-import { buildKnown, checkBatch } from "./checkers";
+import { matchScaffolds } from "./developerAgent/scaffold";
+
+/**
+ * 脚手架接管维度计算（2026-09-17 修订）：state.stack 有两种形状——
+ *   ① 消息路径语义栈：{frontend:"...", backend:"..."}；
+ *   ② 图路径 stackSchema 输出：{techniques, moduleTech:[{backend,frontend}], ...}。
+ * s6 首跑实测：只查顶层字段在形状②下扑空 → 骨架照铺 13 件 → 脚手架被架空。
+ * 统一聚合出前/后端栈文本再交给 matchScaffolds 判定。
+ */
+function computeScaffoldSkip(stack: unknown): ("frontend" | "backend")[] {
+    const st = (stack ?? {}) as any;
+    const frontText = typeof st.frontend === "string" && st.frontend
+        ? st.frontend
+        : Array.isArray(st.moduleTech) ? st.moduleTech.map((m: any) => String(m?.frontend ?? "")).join(" ") : "";
+    const backText = typeof st.backend === "string" && st.backend
+        ? st.backend
+        : Array.isArray(st.moduleTech) ? st.moduleTech.map((m: any) => String(m?.backend ?? "")).join(" ") : "";
+    if (!frontText && !backText) return [];
+    return matchScaffolds({ frontend: frontText, backend: backText } as any)
+        .filter(m => m.candidates.length > 0)
+        .map(m => m.dimension);
+}
+import { buildKnown, checkBatch, checkStackConsistency } from "./checkers";
 import { publishContracts } from "./contracts";
 import { enforceEngineFoundation, tidyExecTasks, bannedDependencyList } from "./foundation";
 import { installSkeleton, missingSkeletonFiles } from "./engine/workspace/skeleton/install";
@@ -99,6 +121,8 @@ export const stack_prompt: string = `
 ${ARCHITECT_BASELINE}
 
 ## 任务
+0. 需求原文里如果明确写了技术栈（语言/框架/数据库），那是硬约束——选型必须与之一致；
+   校验器会把你的决策与需求原文比对，冲突会打回重选。
 1. 只选择当前阶段实际需要的中间件，并说明每项用途；不要为了完整而堆叠技术。
 2. 将 dataNeeds 落成可实现的表和字段，字段类型、必填性和业务含义必须明确，避免重复存储和无法验证的字段。
 3. 为每个业务模块绑定服务端和客户端技术。backend 只写服务端框架、ORM、数据库访问等；frontend 只写前端框架、UI 和请求库等。
@@ -243,6 +267,10 @@ export const detailedPlanSchema = z.object({
 });
 
 export const stackSchema = z.object({
+    // ★ 搬运⑤（2026-09-17 修订）：一致性闸**不进 schema**——s4b 实弹证明 DB 节点声明里的
+    //   旧 prompt 不会带新指令，要求模型吐新字段只会 3 连拒炸整个进程（项目零产出）。
+    //   改为外部校验：GraphFactory 的 registerNodeValidator 在解析成功后，
+    //   直接拿图状态（state.plan）里的需求原文跑 checkStackConsistency，冲突走有界重试。
     techniques: z.object({
         middleware: z.array(z.object({ name: z.string(), purpose: z.string() })),
         database: z.object({ type: z.string(), why: z.string() }),
@@ -547,30 +575,45 @@ const bootstrapNode: StateNodeFn = async (state, node) => {
             { timeoutMs: 300_000 },
         );
         const files = parsed?.files ?? [];
+        // ★ 脚手架接管的维度：basePlan 里该侧的初始化文件同样不铺（与骨架同规则）
+        const scaffoldSkip0 = computeScaffoldSkip(state?.stack);
+        let laid = 0;
         for (const f of files) {
             if (!f?.path) continue;
+            const dim = f.path.startsWith("frontend/") ? "frontend" : f.path.startsWith("backend/") ? "backend" : null;
+            if (dim && scaffoldSkip0.includes(dim)) {
+                console.log(`[architect] 地基文件跳过（脚手架接管 ${dim}）：${f.path}`);
+                continue;
+            }
             try {
                 writeWorkspace(f.path, f.content ?? "");
+                laid++;
                 console.log(`[architect] 地基文件已写入：${f.path}`);
             } catch (e) {
                 console.warn(`[architect] 地基文件写入失败（跳过）：${f.path} - ${(e as Error).message}`);
             }
         }
-        console.log(`[architect] 地基落地完成：${files.length} 个文件`);
+        console.log(`[architect] 地基落地完成：${laid} 个文件`);
 
         // ★ 阶段 1 提交 2：**引擎骨架直出**最后一个落盘（覆盖 LLM 同名文件）。
         //   治的病：s3 前端没有 index.html（vite 直接构建失败）、s1 后端空库启动无表可查、
         //   p9 全树没有 main.ts/App.vue。这些文件归引擎所有，写盘前已在 ownership 层拒绝任务产出。
         const pidForSkeleton = currentProjectId();
         if (pidForSkeleton != null) {
+            // ★ 脚手架接管（2026-09-17）：栈命中官方脚手架候选的维度，骨架不预铺该侧文件，
+            //   初始化交给 Developer 走 `npm create vite` / `npm init`（bootstrap-project 技能已引导）。
+            //   s4d 实测：骨架先行导致 `npm create` 0 次调用，脚手架被架空。
+            const scaffoldSkip = computeScaffoldSkip(state?.stack);
+            if (scaffoldSkip.length > 0) console.log(`[architect] 脚手架接管维度：${scaffoldSkip.join("、")}（该侧不铺骨架）`);
             try {
                 const sk = installSkeleton({
                     appName: "crewforge-app",
                     title: "CrewForge 应用",
                     ddl: (state?.basePlan as { ddl?: string } | null | undefined)?.ddl ?? null,
+                    ...(scaffoldSkip.length ? { skip: scaffoldSkip } : {}),
                 });
-                console.log(`[architect] 引擎骨架已落盘：${sk.written.length} 个引擎拥有件${sk.markerPatched ? "（补了路由登记缝 {{ROUTES}}）" : ""}${sk.skipped.length ? `；写盘失败 ${sk.skipped.length} 个：${sk.skipped.join("；")}` : ""}`);
-                const missing = missingSkeletonFiles(pidForSkeleton);
+                console.log(`[architect] 引擎骨架已落盘：${sk.written.length} 个引擎拥有件${sk.markerPatched ? "（补了路由登记缝 {{ROUTES}}）" : ""}${sk.skipped.length ? `；跳过/失败 ${sk.skipped.length} 个：${sk.skipped.join("；")}` : ""}`);
+                const missing = missingSkeletonFiles(pidForSkeleton, scaffoldSkip);
                 if (missing.length > 0) console.warn(`[architect] ⚠️ 骨架仍缺件：${missing.join("、")}（缺件 = 前端/后端起不来的直接来源）`);
             } catch (e) {
                 console.error("[architect] ❌ 引擎骨架落盘失败:", (e as Error).message);
@@ -673,14 +716,16 @@ function makeDispatchNode(station: TransferStation): StateNodeFn {
                     type: "tasks_declared", phase: phaseNo, pairIds: [taskIdStr], final: true,
                 }));
             }
-            // 真机 LLM 档位照抄 live/architect-cli.ts：maxTokens 32768 / timeoutMs 900s
-            // （8192 实测被截断；p7 一步整包 480s 自掐的标定还在）
+            // 真机 LLM 档位照抄 live/architect-cli.ts：maxTokens 32768 / timeoutMs 1350s
+            // （8192 实测被截断；9/16 p7 实弹 w5 撞 900s 超时整次作废后，
+            //   用户指令全部超时 ×1.5：900s → 1350s——architect-cli.ts 已改，
+            //   9/16 p20 首跑团队线漏 bump 在同一处猝死，今补上）
             const outcome = await dispatchArchitectTaskBatched({
                 station,
                 requirement,
                 projectId: projectIdStr,
                 taskId: taskIdStr,
-                llm: createRealLlm({ maxTokens: 32768, timeoutMs: 900_000 }),
+                llm: createRealLlm({ maxTokens: 32768, timeoutMs: 1_350_000 }),
                 // 断点重放目录：RUNS_ROOT/p{N}/_tasks/{taskId}/（runEnv.projectDir 定根）
                 ...(pidNum != null ? { taskDir: `${projectDir(pidNum)}/_tasks/${taskIdStr}` } : {}),
                 onEvent: (ev) => console.log(`[architect] ${ev.type}`
@@ -925,6 +970,30 @@ export class Architect extends BaseAgent {
     private build(nodes: Node[], edges: Edge[]): void {
         schemaRegistry.register("architect_detailed_plan", detailedPlanSchema);
         schemaRegistry.register("architect_stack", stackSchema);
+        // ★ 搬运⑤：栈一致性外部校验——需求原文取自图状态（plan 是 PM 消化后的需求全文，
+        //   含各 feature 描述），决策文本取自 stack 产出。冲突短句由 checkStackConsistency 给出，
+        //   在 llmNode 重试回调内抛出 → 有界重试带反馈重选（s4b 的接线教训：不靠模型吐新字段）。
+        registerNodeValidator("architect_stack", async (value: any, state: any) => {
+            // ★ 需求原文的权威来源是 sys_project.description（冻结需求）——state.plan 是 PM
+            //   消化后的功能清单，栈关键词可能被洗掉（s4c 实测：PM 转述写了 Express，
+            //   plan JSON 里没有 → 校验器空放行 → 又滑回 Spring Boot）。读库失败回退 plan。
+            let requirement = "";
+            try {
+                const pid = currentProjectId();
+                if (pid != null) requirement = await getProjectRequirement(pid);
+            } catch { /* 读不到就走回退 */ }
+            if (!requirement) {
+                requirement = typeof state?.plan === "object" && state.plan !== null
+                    ? JSON.stringify(state.plan)
+                    : String(state?.plan ?? "");
+            }
+            const v = value ?? {};
+            const decision = [
+                v?.techniques?.database?.type, v?.techniques?.database?.why, v?.why,
+                ...(Array.isArray(v?.moduleTech) ? v.moduleTech.map((m: any) => `${m?.backend ?? ""} ${m?.frontend ?? ""}`) : []),
+            ].join("\n");
+            return checkStackConsistency(requirement, decision);
+        });
         schemaRegistry.register("architect_base", baseSchema);
         schemaRegistry.register("architect_bootstrap", bootstrapSchema);
         schemaRegistry.register("architect_resolution", resolutionSchema);

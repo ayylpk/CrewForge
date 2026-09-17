@@ -95,22 +95,38 @@ export const SPRING_VUE: StackProfile = {
             "## 技术栈规约（强制，与上文冲突时以本节为准）",
             ...componentRuleText(b, rules),
             `- 业务请求只能 import ${b.frontend.requestPath}；不得另起 services/api.js、utils/request.js 或其他 axios/fetch 封装。`,
+            "- 后端 API 前缀由引擎骨架的 `server.servlet.context-path: /api` 承担：Controller 只写**去掉前缀后**的路径（如 `@GetMapping(\"/notes\")`），**绝不要再写 /api**，否则真实 URL 会变成 /api/api/...。",
+            "- 后端建表脚本由引擎直出到 `backend/src/main/resources/schema.sql`，并由 `spring.sql.init.mode=always` 在启动时真实执行：业务代码不许自己建库建表、不许硬编码数据库地址/账号/密码（只从 `SPRING_DATASOURCE_*` 环境变量取）。",
             "- 颜色/圆角/间距引用 frontend/src/style.css 的 --cf-* 变量；硬编码色值最多 5 处。",
         ].join("\n");
     },
     componentRules: componentRulesOf,
+    /**
+     * ★ 阶段 1：引擎拥有件扩容到**真骨架**——入口、路由、构建文件、后端启动件、
+     *   数据库初始化脚本全部由引擎直出，任务写盘前机械拒绝。
+     *   （历史病：p9 全树没有 main.ts/App.vue；s3 前端没有 index.html；后端 app 同名类起不来）
+     */
     engineOwnedFiles: [
         "frontend/index.html",
+        "frontend/package.json",
+        "frontend/vite.config.ts",
+        "frontend/tsconfig.json",
         "frontend/src/main.ts",
         "frontend/src/App.vue",
         "frontend/src/router/index.ts",
         "frontend/src/style.css",
+        "frontend/src/utils/request.ts",
+        "backend/pom.xml",
+        "backend/src/main/java/com/crewforge/Application.java",
+        "backend/src/main/resources/application.yml",
+        "backend/src/main/resources/schema.sql",
     ],
     skeletonFiles: [
         "frontend/index.html", "frontend/package.json", "frontend/vite.config.ts", "frontend/tsconfig.json",
         "frontend/src/main.ts", "frontend/src/App.vue", "frontend/src/router/index.ts", "frontend/src/style.css",
         "frontend/src/utils/request.ts",
-        "backend/pom.xml", "backend/src/main/resources/application.yml", "backend/ddl.sql",
+        "backend/pom.xml", "backend/src/main/java/com/crewforge/Application.java",
+        "backend/src/main/resources/application.yml", "backend/src/main/resources/schema.sql",
     ],
     verify: { compile: "mvnw -B -DskipTests compile", boot: true, testInjection: "http-cases" },
 };

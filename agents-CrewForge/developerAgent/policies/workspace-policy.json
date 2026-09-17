@@ -59,7 +59,7 @@
     },
     "networkPolicy": { "allowHosts": ["localhost", "127.0.0.1", "::1"], "allowExternal": false },
     "limits": { "maxOutputBytes": 262144, "maxProcessCount": 8, "watchIntervalMs": 1000 },
-    "timeoutsMs": { "commandMs": 120000, "buildMs": 600000, "startMs": 120000, "httpMs": 30000 },
+    "timeoutsMs": { "commandMs": 180000, "buildMs": 900000, "startMs": 180000, "httpMs": 45000 },
     "truncation": {
       "note": "输出超过 maxOutputBytes：对外只回上限内的切片并标 truncated=true，退出后把完整 stdout/stderr 重写到 rawOutputPath。",
       "rawLogDir": "<os.tmpdir()>/crewforge-developer-logs"

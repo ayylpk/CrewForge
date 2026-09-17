@@ -636,8 +636,11 @@ export function createDeveloperAgent(o: DeveloperAgentOptions): DeveloperAgentHa
      * 分批模式（9/15）：架构师批次到达的恢复入口——resumeFromTestMessage 的镜像闸门：
      *   ① 必须有任务快照且 status=waiting_item（其他状态不接受批，防止拿批乱推状态）；
      *   ② 消息必须是 architect_batch 且身份对上（协议只管形状，这里管投递合法性）；
-     *   ③ **严格在序**：itemId 必须等于首个未达项——乱序 / 跳批 / 已到重投全部拒绝。
-     *     （前缀闭合由此闸维护，路由里"已到 pending 与未达不会打架"的前提靠它。）
+     *   ③ **严格在序**：itemId 必须等于首个未达项——乱序 / 跳批拒绝（9/15 拍板②）；
+     *     **已到重投例外**（9/16 p20 补）：批到过后又被原样推一遍 = 重复确认，
+     *     留 batch_duplicate_ignored 原地返回——acceptBatch 合并本就幂等，
+     *     把它判成协议异常会连累整次跑作废（信封种子批与拆分流各发一次 w1 的惨案）。
+     *     （前缀闭合仍由该闸维护：被忽略的重投不产生任何状态移动。）
      * 通过后与测试恢复同一个重注入形状：消息进 messages、从 acceptBatch 节点复活，
      * 不重跑已完成阶段；判据合并与 hash 重算全在图内 acceptBatch 节点做。
      */
@@ -663,6 +666,13 @@ export function createDeveloperAgent(o: DeveloperAgentOptions): DeveloperAgentHa
                 reason: `身份不匹配：入口 ${o.projectId}/${o.taskId}，批次 ${msg.projectId}/${msg.taskId}`,
             });
             return "rejected";
+        }
+        // 已到重投（itemId 已进 arrived/completed）：幂等忽略，不进乱序闸、不作废。
+        // 放在身份闸之后、在序闸之前——只有"形状与身份都对"的批才配被忽略。
+        if (current.arrivedItems.includes(msg.itemId)
+            || current.completedWorkItems.includes(msg.itemId)) {
+            ledger.appendEvent("batch_duplicate_ignored", { itemId: msg.itemId });
+            return current;
         }
         const expected = nextUnarrivedWorkItem(current);
         if (msg.itemId !== (expected?.id ?? "")) {

@@ -22,7 +22,7 @@ process.env.DB_NAME = "crewforge_smoke_no_such_db";   // writeWorkspace 的落�
 const {
     enforceEngineFoundation, tidyExecTasks, bannedDependencyList,
     registerRoutes, pairIntegrationCheck, rebaseBackendPath, isEngineOwned,
-    canonicalizeRoot, ROUTER_INDEX_TS, ENGINE_OWNED,
+    canonicalizeRoot, ROUTER_INDEX_TS, ENGINE_OWNED, engineOwnedFiles,
 } = await import("./foundation");
 
 let pass = 0, fail = 0;
@@ -48,10 +48,13 @@ async function main() {
     ok(!!batch.find(f => f.path === "frontend/src/App.vue") && !!batch.find(f => f.path === "frontend/src/router/index.ts"), "App.vue + router 模板补位");
     ok(!batch.some(f => f.path === "backend/src/app.js"), "Spring Boot 后端不注入 Express app.js");
     ok(!!batch.find(f => f.path === "backend/src/controllers/auth.js") && !!batch.find(f => f.path === "backend/src/routers/auth.js"), "backend 路径归一到 src/ 下");
-    const fePkg = JSON.parse(batch.find(f => f.path === "frontend/package.json")!.content);
-    ok(!!fePkg.dependencies["vue-router"], "前端包合并 vue-router");
-    ok(!!fePkg.dependencies["element-plus"], "前端包合并 Element Plus");
-    ok(!!fePkg.dependencies["axios"], "前端包合并 axios（唯一 request 封装的运行时依赖）");
+    // ★ 阶段 1：构建文件与真骨架全部归引擎（单一事实来源 = StackProfile.engineOwnedFiles）
+    ok(!batch.some(f => f.path === "frontend/package.json"), "package.json 归引擎骨架：LLM 批次里被剔除（不再让模型决定依赖表）");
+    ok(!batch.some(f => f.path === "backend/pom.xml"), "pom.xml 归引擎骨架：LLM 批次里被剔除");
+    const owned = engineOwnedFiles();
+    ok(owned.some(p => p.toLowerCase() === "frontend/index.html"), "引擎拥有件含 index.html（s3 前端构建失败的根因）");
+    ok(owned.some(p => p.toLowerCase() === "backend/src/main/resources/schema.sql"), "引擎拥有件含 schema.sql（s1 空库无表的根因）");
+    ok(owned.some(p => p.toLowerCase() === "backend/src/main/java/com/crewforge/application.java") || owned.some(p => p === "backend/src/main/java/com/crewforge/Application.java"), "引擎拥有件含 Application.java（启动入口）");
     ok(!!batch.find(f => f.path === "frontend/src/style.css"), "引擎补齐 Element Plus 项目视觉 token 文件");
     ok(!!batch.find(f => f.path === "frontend/src/main.ts" && f.content.includes("./style.css")), "main.ts 引入唯一视觉 token 文件");
     // Node 后端文件不再被当成 CrewForge 的默认地基
@@ -68,14 +71,14 @@ async function main() {
     // 根 src/ 歪树（p3 二轮实锤：模型把后端写在工程根 src/，backend/ 规则罩不住）
     const skew = [
         { path: "frontend/package.json", content: JSON.stringify({ dependencies: { vue: "^3", vite: "^7" } }) },
-        { path: "frontend/index.html", content: "<html><body></body></html>" },
+        { path: "frontend/src/views/Home.vue", content: "<template><div/></template>" },
         { path: "src/app.ts", content: "// Nest 姿势歪入口" },
         { path: "src/routes/index.ts", content: "// 歪树路由" },
     ];
     enforceEngineFoundation(skew);
     ok(!!skew.find(f => f.path === "backend/src/routes/index.ts"), "根 src/** 收编进 backend/src/**");
     ok(!skew.find(f => f.path === "backend/src/app.ts") && !skew.find(f => f.path === "backend/src/app.js"), "后端歪入口不注入 Express 模板");
-    ok(!!skew.find(f => f.path === "frontend/index.html"), "非歪件不误伤");
+    ok(!!skew.find(f => f.path === "frontend/src/views/Home.vue"), "非歪件不误伤（普通业务页面原样保留）");
 
     // 根名一统（p4 首战补刀，9/9）：模型爱用 server/、web/ 当工程根，引擎模板锚定 frontend/+backend/
     console.log("--- canonicalizeRoot（根名方言归一） ---");
@@ -129,7 +132,9 @@ async function main() {
     const n1 = await registerRoutes(908, ftask, contractMd);
     const routerFile = path.join(TMP, "p908", "frontend/src/router/index.ts");
     const rtxt = fs.existsSync(routerFile) ? fs.readFileSync(routerFile, "utf-8") : "";
-    ok(n1 === 1 && rtxt.includes('path: "/login"') && rtxt.includes('import("../views/Login.vue")'), "无中生长出路由表并登记 1 条", rtxt.slice(0, 80));
+    // ★ 阶段 1：登记 2 条 = 契约页面路径 + **主页面到 `/` 的别名**（s1 白屏根因：/ 没有匹配项）
+    ok(n1 === 2 && rtxt.includes('path: "/login"') && rtxt.includes('import("../views/Login.vue")'), "无中生长出路由表并登记 2 条（含 / 别名）", rtxt.slice(0, 80));
+    ok(rtxt.includes('path: "/"'), "★ `/` 是真实注册路由（不再让首页白屏）");
     ok(rtxt.includes("// {{ROUTES}}"), "登记缝保留");
     const n2 = await registerRoutes(908, ftask, contractMd);
     ok(n2 === 0 && fs.existsSync(routerFile), "重复登记幂等（同 view 不再追加）");

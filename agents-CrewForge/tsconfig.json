@@ -27,5 +27,7 @@
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
   },
-  "exclude": ["node_modules", "runs", "workspaces"]
+  // 阶段 0 基线：eval/baseline/ 下是**评测产物与日志**（生成出来的前端/后端代码、原始日志），
+  // 不是本仓库的源码，必须排除在类型检查之外，否则 bun x tsc --noEmit 会被生成物污染。
+  "exclude": ["node_modules", "runs", "workspaces", "eval/baseline"]
 }

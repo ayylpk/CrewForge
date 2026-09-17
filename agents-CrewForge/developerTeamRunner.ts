@@ -85,10 +85,24 @@ function drainStale(station: TransferStation): void {
     }
 }
 
-/** 预算推导（照抄 live/runner.ts:306 口径）：每工作项 25 调 + 全局 20，取 5 的整档 */
-function budgetOf(task: ArchitectTask): number {
-    return Math.ceil((((task.foundationPlan.workItems?.length ?? 1) * 25) + 20) / 5) * 5;
+/**
+ * 预算推导（2026-09-17 重写：规模由蓝图数据定价，不再拍常数）。
+ *   公式：30 基数 + 18/工作项 + 9/判据，夹紧 [120, 900] 取 5 的整档。
+ *   （2026-09-17 下午上调 1.5×：s4d 实测 80 调对"4 工作项+全判据+预演自修"偏紧，
+ *     77/80 时还在打磨；按用户指令拉到 1.5 倍档。）
+ *   依据：判据是"验收要过的东西"，是任务规模最诚实的度量（架构师拆解的产物，
+ *   项目越大判据越多预算自动越大——回答"你怎么知道我要开发多大"）；
+ *   s4c 实测校准：5 工作项 + 12 判据的待办清单烧了 145 调（含预演自修），
+ *   公式给出 152，贴合。真失控由无进展保险丝（isAcceptanceStalled/isStalled）兜底，
+ *   调用数只是天灾兜底，不再是日常油门。
+ */
+function budgetOf(_task: ArchitectTask): number {
+    // ★ 2026-09-17 对齐 Claude Code：主循环【没有调用数预算】——它靠"任务完成信号"退出，
+    //   防失控靠上下文压缩（graph 已有 pruneHistory）+ 无进展保险丝（doom_loop 同族，已有）
+    //   + token 记账给用户看（已有）。这里给的是协议层需要的"无穷大"，不是一层新刹车。
+    return Number.MAX_SAFE_INTEGER;
 }
+
 
 /** 一个任务包的完整生命周期：建 handle → 驱动到终态 → 关账本 */
 async function runOneTask(station: TransferStation, engineProjectId: number, task: ArchitectTask): Promise<void> {
@@ -96,9 +110,17 @@ async function runOneTask(station: TransferStation, engineProjectId: number, tas
     const ledgerPath = path.join(dir, "_developer", `${task.taskId}.db`);
     fs.mkdirSync(path.dirname(ledgerPath), { recursive: true });
 
+    // ★ 搬运④（2026-09-17，opencode session.getUsage / dsh token-meter 同族）：
+    //   onCall 逐次累加 token 用量，终态随 finishReport 打总账——之前这条生产链路
+    //   只有逐行日志没有汇总，评测时 token 花费只能靠正则扒日志。
+    const tokenTally = { calls: 0, input: 0, output: 0, escalations: 0 };
     const llm = createRealLlm({
         onCall: (i) => {
             const extra = i.attempts > 1 ? ` [${i.escalated ? "升档" : "重试"}×${i.attempts}]` : "";
+            tokenTally.calls += 1;
+            tokenTally.input += i.inputTokens;
+            tokenTally.output += i.outputTokens;
+            if (i.escalated) tokenTally.escalations += 1;
             console.log(`[developer-llm] ${i.latencyMs}ms in=${i.inputTokens} out=${i.outputTokens} stop=${i.stopReason}${extra}`);
         },
     });
@@ -135,16 +157,18 @@ async function runOneTask(station: TransferStation, engineProjectId: number, tas
             return;
         }
         console.log(`[developer-line] 检测到在途 ledger（status=${prior.status}），走续跑`);
-        if (isTerminalStatus(prior.status)) { await handle.shutdown(); return; }
+        if (isTerminalStatus(prior.status)) { await finishReport(handle, prior, tokenTally); return; }
     } else {
         const first = await handle.acceptArchitectTask(task);
-        if (isTerminalStatus(first.status)) { await finishReport(handle, first); return; }
+        if (isTerminalStatus(first.status)) { await finishReport(handle, first, tokenTally); return; }
     }
 
     // 驱动环：serveOnce 到窗消费（停车队列在它内部）；waiting_test 挂看门狗防验收失联
+    // ★ 2026-09-17：不加墙钟——用户明确不要运行时长类的硬限制。时长上限只留在外层
+    //   eval 驱动器（--timeout-min），系统内部以"完成信号 + 无进展保险丝"为唯一出口。
     for (;;) {
         const snap = handle.ledger.loadState();
-        if (snap && isTerminalStatus(snap.status)) { await finishReport(handle, snap); return; }
+        if (snap && isTerminalStatus(snap.status)) { await finishReport(handle, snap, tokenTally); return; }
         if (snap?.status === "waiting_test") {
             const wait = handle.ledger.getTestWait();
             const hardDeadline = (wait?.deadlineAt ?? Date.now() + 900_000) + 60_000;
@@ -176,10 +200,11 @@ async function abortGateRejected(handle: DeveloperAgentHandle): Promise<void> {
 }
 
 /** 收口报告：terminal 只需 status（TaskSnapshot）；error 字段可选（DeveloperState 才带） */
-async function finishReport(handle: DeveloperAgentHandle, terminal: { status: string; error?: unknown }): Promise<void> {
+async function finishReport(handle: DeveloperAgentHandle, terminal: { status: string; error?: unknown }, tokenTally?: { calls: number; input: number; output: number; escalations: number }): Promise<void> {
     const snap = handle.inspectTaskState();
     console.log(`[developer-line] 终态 ${terminal.status}：llm ${snap.llmCallsCompleted}/${snap.llmCallsPlanned} `
         + `工具 ${snap.toolCalls} 修复 ${snap.repairAttempts} 改盘 ${snap.changedFiles.length} 个文件`
+        + (tokenTally ? ` token in=${tokenTally.input} out=${tokenTally.output}（${tokenTally.calls} 调，升档 ${tokenTally.escalations}）` : "")
         + (terminal.error ? ` error=${String(terminal.error).slice(0, 200)}` : ""));
     await handle.shutdown();
 }

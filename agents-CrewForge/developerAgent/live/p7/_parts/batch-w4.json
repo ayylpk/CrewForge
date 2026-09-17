@@ -1,0 +1,533 @@
+{
+  "type": "architect_batch",
+  "projectId": "p7",
+  "taskId": "p7-t1",
+  "itemId": "w4",
+  "detail": "在 backend/src/routes/projects.js 实现项目 CRUD：POST /api/projects（owner=当前 X-User-Id 用户，写库时同步插入 membership 角色 owner，缺 name→400）、GET /api/projects（仅返回公开项目 + 当前用户为成员的私密项目）、GET /api/projects/{id}（返回带 isMember/isOwner，私密且非成员→403）、PUT /api/projects/{id}（仅 owner，否则 403）、DELETE /api/projects/{id}（仅 owner，否则 403，依赖 w2 外键级联清掉 memberships/tasks/tags/task_tag/comments）。认证统一复用 w3 中间件（缺头或指向不存在用户→401），身份只信 X-User-Id 头、忽略 body/query 自称字段。返回体统一 {data}/{error:{message}}，字段 camelCase（isPrivate/ownerUserId/createdAt ISO8601）。可见性与 owner 判定基于 membership 表与 project.ownerUserId 比对，不信任任何客户端入参。",
+  "checks": [
+    {
+      "id": "ac-10",
+      "kind": "CONTRACT",
+      "method": "POST",
+      "path": "/api/projects",
+      "expectedStatus": 201,
+      "resetPaths": [
+        "backend/data/team-tasks.db"
+      ],
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "OwnerA"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "oid",
+            "from": "data.id"
+          }
+        }
+      ],
+      "headers": {
+        "X-User-Id": "{oid}"
+      },
+      "body": {
+        "name": "Proj A",
+        "description": "hello",
+        "isPrivate": false
+      },
+      "assertJson": [
+        {
+          "path": "data.name",
+          "equals": "Proj A"
+        },
+        {
+          "path": "data.isPrivate",
+          "equals": false
+        },
+        {
+          "path": "data.ownerUserId",
+          "exists": true
+        },
+        {
+          "path": "data.id",
+          "exists": true
+        }
+      ],
+      "expected": "创建项目成功，owner 取当前身份并自动成成员"
+    },
+    {
+      "id": "ac-11",
+      "kind": "CONTRACT",
+      "method": "POST",
+      "path": "/api/projects",
+      "expectedStatus": 400,
+      "resetPaths": [
+        "backend/data/team-tasks.db"
+      ],
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "OwnerB"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "oid",
+            "from": "data.id"
+          }
+        }
+      ],
+      "headers": {
+        "X-User-Id": "{oid}"
+      },
+      "body": {
+        "description": "no name here"
+      },
+      "assertJson": [
+        {
+          "path": "error.message",
+          "exists": true
+        }
+      ],
+      "expected": "缺 name 返回 400 错误壳"
+    },
+    {
+      "id": "ac-12",
+      "kind": "CONTRACT",
+      "method": "GET",
+      "path": "/api/projects",
+      "expectedStatus": 200,
+      "resetPaths": [
+        "backend/data/team-tasks.db"
+      ],
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "OwnerC"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "oid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "Stranger"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "sid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects",
+          "body": {
+            "name": "PublicP",
+            "isPrivate": false
+          },
+          "headers": {
+            "X-User-Id": "{oid}"
+          },
+          "expectedStatus": 201
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects",
+          "body": {
+            "name": "PrivateP",
+            "isPrivate": true
+          },
+          "headers": {
+            "X-User-Id": "{oid}"
+          },
+          "expectedStatus": 201
+        }
+      ],
+      "headers": {
+        "X-User-Id": "{sid}"
+      },
+      "assertJson": [
+        {
+          "path": "data",
+          "minLength": 1
+        },
+        {
+          "path": "data",
+          "each": {
+            "path": "isPrivate",
+            "equals": false
+          }
+        }
+      ],
+      "expected": "非成员列表只含公开项目，私密项目不外泄"
+    },
+    {
+      "id": "ac-13",
+      "kind": "CONTRACT",
+      "method": "GET",
+      "path": "/api/projects/{id}",
+      "expectedStatus": 200,
+      "resetPaths": [
+        "backend/data/team-tasks.db"
+      ],
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "OwnerD"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "oid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects",
+          "body": {
+            "name": "P3",
+            "isPrivate": true
+          },
+          "headers": {
+            "X-User-Id": "{oid}"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "id",
+            "from": "data.id"
+          }
+        }
+      ],
+      "headers": {
+        "X-User-Id": "{oid}"
+      },
+      "assertJson": [
+        {
+          "path": "data.isOwner",
+          "equals": true
+        },
+        {
+          "path": "data.isMember",
+          "equals": true
+        },
+        {
+          "path": "data.name",
+          "equals": "P3"
+        }
+      ],
+      "expected": "owner 看私密项目详情返回权限标记"
+    },
+    {
+      "id": "ac-14",
+      "kind": "CONTRACT",
+      "method": "GET",
+      "path": "/api/projects/{id}",
+      "expectedStatus": 403,
+      "resetPaths": [
+        "backend/data/team-tasks.db"
+      ],
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "OwnerE"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "oid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "Outsider"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "sid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects",
+          "body": {
+            "name": "SecretP",
+            "isPrivate": true
+          },
+          "headers": {
+            "X-User-Id": "{oid}"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "id",
+            "from": "data.id"
+          }
+        }
+      ],
+      "headers": {
+        "X-User-Id": "{sid}"
+      },
+      "assertJson": [
+        {
+          "path": "error.message",
+          "exists": true
+        }
+      ],
+      "expected": "私密项目非成员读详情 403"
+    },
+    {
+      "id": "ac-15",
+      "kind": "CONTRACT",
+      "method": "PUT",
+      "path": "/api/projects/{id}",
+      "expectedStatus": 200,
+      "resetPaths": [
+        "backend/data/team-tasks.db"
+      ],
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "OwnerF"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "oid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects",
+          "body": {
+            "name": "Before"
+          },
+          "headers": {
+            "X-User-Id": "{oid}"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "id",
+            "from": "data.id"
+          }
+        }
+      ],
+      "headers": {
+        "X-User-Id": "{oid}"
+      },
+      "body": {
+        "name": "Renamed",
+        "isPrivate": true
+      },
+      "assertJson": [
+        {
+          "path": "data.name",
+          "equals": "Renamed"
+        },
+        {
+          "path": "data.isPrivate",
+          "equals": true
+        },
+        {
+          "path": "data.ownerUserId",
+          "exists": true
+        }
+      ],
+      "expected": "owner 更新项目成功"
+    },
+    {
+      "id": "ac-16",
+      "kind": "CONTRACT",
+      "method": "PUT",
+      "path": "/api/projects/{id}",
+      "expectedStatus": 403,
+      "resetPaths": [
+        "backend/data/team-tasks.db"
+      ],
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "OwnerG"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "oid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "NotOwner"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "hid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects",
+          "body": {
+            "name": "OwnerOnlyP"
+          },
+          "headers": {
+            "X-User-Id": "{oid}"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "id",
+            "from": "data.id"
+          }
+        }
+      ],
+      "headers": {
+        "X-User-Id": "{hid}"
+      },
+      "body": {
+        "name": "hacked"
+      },
+      "assertJson": [
+        {
+          "path": "error.message",
+          "exists": true
+        }
+      ],
+      "expected": "非 owner 改项目 403"
+    },
+    {
+      "id": "ac-17",
+      "kind": "CONTRACT",
+      "method": "DELETE",
+      "path": "/api/projects/{id}",
+      "expectedStatus": 200,
+      "resetPaths": [
+        "backend/data/team-tasks.db"
+      ],
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "OwnerH"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "oid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects",
+          "body": {
+            "name": "ToDel"
+          },
+          "headers": {
+            "X-User-Id": "{oid}"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "id",
+            "from": "data.id"
+          }
+        }
+      ],
+      "headers": {
+        "X-User-Id": "{oid}"
+      },
+      "assertJson": [
+        {
+          "path": "data.deleted",
+          "equals": true
+        },
+        {
+          "path": "data.id",
+          "exists": true
+        }
+      ],
+      "expected": "owner 删除项目返回 deleted 标记"
+    },
+    {
+      "id": "ac-18",
+      "kind": "CONTRACT",
+      "method": "DELETE",
+      "path": "/api/projects/{id}",
+      "expectedStatus": 403,
+      "resetPaths": [
+        "backend/data/team-tasks.db"
+      ],
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "OwnerI"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "oid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "Deleter"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "hid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects",
+          "body": {
+            "name": "ProtectedP"
+          },
+          "headers": {
+            "X-User-Id": "{oid}"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "id",
+            "from": "data.id"
+          }
+        }
+      ],
+      "headers": {
+        "X-User-Id": "{hid}"
+      },
+      "assertJson": [
+        {
+          "path": "error.message",
+          "exists": true
+        }
+      ],
+      "expected": "非 owner 删项目 403"
+    }
+  ]
+}

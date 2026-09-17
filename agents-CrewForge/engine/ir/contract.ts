@@ -189,15 +189,24 @@ function evaluate(actual, p) {
 }
 
 let failed = 0;
+// ★ 阶段 1 提交 3：跨请求变量（capture + {var} 占位替换）——没有它"删除后 404"无法机器执行
+const VARS = {};
+function subst(v) {
+  if (typeof v === "string") return v.replace(/\\{(\\w+)\\}/g, (m, k) => (VARS[k] === undefined ? m : String(VARS[k])));
+  if (Array.isArray(v)) return v.map(subst);
+  if (v && typeof v === "object") { const o = {}; for (const [k, x] of Object.entries(v)) o[k] = subst(x); return o; }
+  return v;
+}
+
 for (const c of CASES) {
   if (c.kind !== "http") { console.log("[skip] " + c.kind + " " + c.id); continue; }
-  const url = BASE + c.request.path;
+  const url = BASE + subst(c.request.path);
   let status = 0, json = null, err = null;
   try {
     const res = await fetch(url, {
       method: c.request.method,
-      headers: { "Content-Type": "application/json", ...(c.request.headers || {}) },
-      body: c.request.body === undefined ? undefined : JSON.stringify(c.request.body),
+      headers: { "Content-Type": "application/json", ...subst(c.request.headers || {}) },
+      body: c.request.body === undefined ? undefined : JSON.stringify(subst(c.request.body)),
     });
     status = res.status;
     const text = await res.text();
@@ -211,6 +220,14 @@ for (const c of CASES) {
     for (const [p, pred] of Object.entries(c.expect.jsonPath || {})) {
       const reason = evaluate(get(json, p), pred);
       if (reason) problems.push(p + "：" + reason);
+    }
+  }
+  // 捕获：只在该条断言全过时登记（失败的响应不可信，不能污染后续断言）
+  if (!err && problems.length === 0 && c.capture) {
+    for (const [name, p] of Object.entries(c.capture)) {
+      const got = get(json, p);
+      if (got.found && (typeof got.value === "string" || typeof got.value === "number")) VARS[name] = got.value;
+      else problems.push("capture " + name + "（" + p + "）未取到值");
     }
   }
   if (problems.length) { failed++; console.log("[FAIL] " + c.id + " -> " + problems.join(" | ")); }

@@ -262,6 +262,24 @@ describe("sandbox / 路径与写保护边界", () => {
         expect(ws.checkPath(path.resolve(import.meta.dir, "..", "workspace.ts"))).toBe("CONTROL_PLANE");
     });
 
+    it("projectDir 落在控制平面内（9/16 团队线 runs/pXX 的真实形态）→ 项目内放行，引擎文件仍 CONTROL_PLANE", () => {
+        // 9/16 p20 首跑母病：checkPath 把 CONTROL_PLANE 判在项目根包含检查之前，
+        // 而团队线产物树 runs/pXX 就住在 agents-CrewForge/ 里 → 全项目路径被误判，
+        // 11 个工具调用 0 通过、改盘 0 个文件。修复 = 先问「在项目内吗」再问「碰引擎了吗」。
+        const cpRoot = path.resolve(import.meta.dir, "..", "..");   // agents-CrewForge/
+        const projDir = path.join(cpRoot, "runs", "p999");          // 纯路径算术，不真建目录
+        const ws = new Workspace({ projectDir: projDir, allowedRoots: ["backend", "frontend"] });
+        // 项目内：放行（这才是生成项目的日常路径）
+        expect(ws.checkPath(path.join(projDir, "backend", "src", "main", "App.java"))).toBeNull();
+        expect(ws.resolveRead("backend")).toBe(path.join(projDir, "backend"));
+        // 项目内命中内置禁区：按项目语义判码，而不是退化成 CONTROL_PLANE
+        expect(ws.checkPath(path.join(projDir, ".git", "config"))).toBe("GIT");
+        // 越出项目、落进引擎地盘：仍 CONTROL_PLANE（控制平面保护不降级）
+        expect(ws.checkPath(path.join(cpRoot, "architect.ts"))).toBe("CONTROL_PLANE");
+        // 既不在项目也不在控制平面：ESCAPE 不变
+        expect(ws.checkPath(path.resolve(root, "..", "outside.txt"))).toBe("ESCAPE");
+    });
+
     it("子进程删改 Ledger 行 → 完整性探针发现计数下降并留违规", async () => {
         const dir = newProject("ledger-tamper");
         const ledgerPath = path.join(dir, "ledger.db");

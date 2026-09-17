@@ -13,6 +13,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { runCommand, type RunResult } from "../run";
+import { resolveBunExe } from "../tools";
 import { renderAcceptanceRunner } from "../../ir/contract";
 import type { Acceptance } from "../../ir/acceptance";
 
@@ -166,8 +167,8 @@ export async function runContractTests(opts: {
     const script = path.join(verifyDir, "contract-test.ts");
     fs.writeFileSync(script, renderAcceptanceRunner(opts.cases, `run@${path.basename(opts.projectDir)}`), "utf-8");
 
-    const bun = process.platform === "win32" ? "bun.exe" : "bun";
-    const r = await runCommand(bun, [script], {
+    const bunResolved = resolveBunExe();
+    const r = await runCommand(bunResolved.cmd, [script], {
         cwd: opts.projectDir,
         timeoutMs: opts.timeoutMs ?? 180_000,
         logDir: verifyDir,
@@ -176,7 +177,7 @@ export async function runContractTests(opts: {
     });
     const parsed = parseContractOutput(r.output);
     if (r.spawnError && r.exitCode === -1) {
-        return { outcome: "tool_error", total: 0, failed: 0, failures: [], logFile: r.logFile, output: r.output, durationMs: r.durationMs };
+        return { outcome: "tool_error", total: 0, failed: 0, failures: [`契约测试脚本 spawn 失败（bun=${bunResolved.cmd}；${bunResolved.source}）：${r.spawnError}`], logFile: r.logFile, output: r.output, durationMs: r.durationMs };
     }
     if (r.timedOut) {
         return { outcome: "env_error", total: parsed.total, failed: parsed.failed, failures: parsed.failures, logFile: r.logFile, output: r.output, durationMs: r.durationMs };

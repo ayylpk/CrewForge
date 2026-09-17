@@ -4,7 +4,7 @@
   "maxRepairAttempts": 2,
   "maxLlmCalls": 40,
   "maxStepsPerLoop": 12,
-  "waitTestTimeoutMs": 900000,
+  "waitTestTimeoutMs": 1350000,
   "stopOnRepeatedFailureSignature": true,
   "stopOnBudgetExceeded": true,
   "stopOnStalledRepair": true,

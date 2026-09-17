@@ -1,0 +1,8 @@
+{
+  "type": "architect_batch",
+  "projectId": "p7",
+  "taskId": "p7-t1",
+  "itemId": "w10",
+  "detail": "本项是送检前自检（pre-test），不新增代码文件，只在 backend/ 内跑一遍端到端冒烟。步骤：先删除 backend/data/ 下的 sqlite 文件（含 team-tasks.db 及 -wal/-shm）回到空库，然后 PORT=<临时端口> node backend/server.js 一键启动，确认 /api/health 返回 {data:{ok:true}}。再用 curl 按多身份串主链路：POST /api/users 造 A/B/C 三个用户（引导接口，无需头），随后所有请求带 X-User-Id；A 建公开项目与私密项目各一，A 加 B 为成员、重复加 B 期望 400；A 建 todo/doing/done 三状态任务并给其中一条指派 B、给非成员指派期望 400；A 建标签、重名标签期望 400、跨项目打标签期望 400、重复打标签期望 400；B 给任务评论、C 删 B 的评论期望 403、B 自删期望 200；GET /api/tasks 逐条核对 projectId/status/assigneeId/tagId 组合过滤不混入杂质；GET /api/projects/{id}/stats 核对 total/todo/doing/done 与造出的数据逐一相等。最后跑权限负例：无头 / 头指向不存在用户 401，私密项目非成员读写 403，非 owner 改删项目/加删成员 403，owner 移除自己 400。自检只用于暴露问题，发现偏差要回到对应 w3~w9 修源码后重跑，而不是在本项里改契约或绕开校验。",
+  "checks": []
+}

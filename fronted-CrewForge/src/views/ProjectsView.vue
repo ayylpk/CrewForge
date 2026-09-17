@@ -172,17 +172,15 @@
             </div>
             <div class="provider-row">
               <span class="provider-label">模型名</span>
-              <input v-model="cfg.modelName" class="input" type="text" list="cf-model-presets"
-                     placeholder="如 deepseek-v4-flash" />
-              <datalist id="cf-model-presets">
-                <option v-for="m in MODEL_PRESETS" :key="m" :value="m" />
-              </datalist>
+              <!-- 模型名纯手动填写：不预设不校验，填什么原样透传给端点，对错由端点反馈 -->
+              <input v-model="cfg.modelName" class="input" type="text"
+                     placeholder="自填，以端点支持的名称为准" />
             </div>
             <!-- T3 模型分层双档：pro 档模型名 + 角色档位（留空=不启用分层，全员走上面全局模型名） -->
             <div class="provider-row">
               <span class="provider-label">Pro 档模型</span>
-              <input v-model="cfg.modelPro" class="input" type="text" list="cf-model-presets"
-                     placeholder="留空=不分层；填了则 pro 角色用它（如 deepseek-v4-pro）" />
+              <input v-model="cfg.modelPro" class="input" type="text"
+                     placeholder="留空=不分层；填了则 pro 角色用它（自填）" />
             </div>
             <div class="provider-row">
               <span class="provider-label">角色档位</span>
@@ -256,7 +254,6 @@ import type { Project, ProjectStatus } from '../types/project'
 const router = useRouter()
 
 // ===== API 设置（阶段 2 起接服务端 sys_settings；Key 存服务器，引擎直读） =====
-const MODEL_PRESETS = ['deepseek-v4-flash', 'deepseek-v4-pro', 'qwen3-flash', 'glm-4.6-flash', 'kimi-k2']
 
 const showApiSettings = ref(false)
 const cfg = ref<RuntimeSettings>({ modelKind: 'deepseek' })
@@ -323,11 +320,15 @@ async function saveApiSettings() {
             apiKey: cfg.value.apiKey?.trim() || prev.find((p) => p?.apiKey)?.apiKey || '',
             enabled: true,
             builtin: true,
-            models: MODEL_PRESETS,
+            // 模型列表只镜像用户实际填过的名字，系统不再塞预设
+            models: [cfg.value.modelName?.trim(), cfg.value.modelPro?.trim()].filter(Boolean),
           },
         ]),
       )
-      localStorage.setItem('cf_default_model', `${cfg.value.modelKind}/${cfg.value.modelName || 'deepseek-v4-flash'}`)
+      // 默认模型只在用户填了模型名时更新，避免用假名字覆盖旧值
+      if (cfg.value.modelName?.trim()) {
+        localStorage.setItem('cf_default_model', `${cfg.value.modelKind}/${cfg.value.modelName.trim()}`)
+      }
     } catch { /* 镜像坏了不影响服务端为准 */ }
     ElMessage.success('已保存——引擎最多 30 秒热加载生效')
     maskedKey.value = (await fetchSettings().catch(() => ({} as RuntimeSettings))).apiKey || '未配置'

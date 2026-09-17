@@ -245,9 +245,12 @@ export const planSchema = z.object({
         name: z.string(),
         goal: z.string(),
         features: z.array(z.string()),
-        dependencies: z.array(z.string()),
-        relative_effort: z.string(),
-        risk: z.string(),
+        // ★ 宽容+机械回填（2026-09-17，s5 教训）：jsonMode 模型把依赖写成阶段号 [1] 而非
+        //   阶段名 → 严格 string[] 3 连拒 → 整个进程死在 PM 阶段、零产出。
+        //   dependencies 目前无下游真实消费（纯信息字段），coerce 成字符串即可，不值得死刑。
+        dependencies: z.array(z.coerce.string()).default([]),
+        relative_effort: z.coerce.string(),
+        risk: z.coerce.string(),
     })),
     mvp_scope: z.array(z.string()),
     risks: z.array(z.string()),

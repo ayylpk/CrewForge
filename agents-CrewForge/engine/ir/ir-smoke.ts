@@ -87,12 +87,19 @@ console.log("=== ③ 契约 → 可执行验收 ===");
     ok(!bad.ok && bad.errors.some(e => e.includes("必须以 / 开头")) && bad.errors.some(e => e.includes("重复")),
         "非法契约给两类错误：path 前缀、接口重复");
 
-    const cases = acceptanceFromContract(c.value!, { apiPrefix: PROJECT_BASELINE.apiPrefix, successCode: PROJECT_BASELINE.response.successCode });
+    // ★ 阶段 1 提交 3：成功码必须由调用方（需求/场景规格）给，引擎不再自带默认值
+    const cases = acceptanceFromContract(c.value!, { apiPrefix: PROJECT_BASELINE.apiPrefix, successCode: 200 });
     ok(cases.length === 1, "每个接口生成一条验收");
     const http = cases[0] as Extract<typeof cases[number], { kind: "http" }>;
     ok(http.request.path === "/api/auth/login" && http.request.method === "POST", "前缀与 method 归一正确");
-    ok(http.expect.jsonPath!["$.code"]!.op === "equals", "断言成功码");
+    ok(http.expect.jsonPath!["$.code"]!.op === "equals" && (http.expect.jsonPath!["$.code"] as { value: unknown }).value === 200, "断言成功码取自传入值（200），不是引擎默认值");
     ok(http.expect.jsonPath!["$.data.token"]!.op === "type", "★ 响应字段生成 data 路径类型断言");
+
+    // 不给成功码 → 不发明 $.code 断言
+    const noCode = acceptanceFromContract(c.value!, { apiPrefix: "/api" });
+    const httpNoCode = noCode[0] as Extract<typeof cases[number], { kind: "http" }>;
+    ok(!httpNoCode.expect.jsonPath || !("$.code" in httpNoCode.expect.jsonPath),
+        "★ 未提供成功码时不发明 $.code 断言（判据只能来自需求）");
 
     const doc = renderContractDoc(c.value!);
     ok(doc.includes("/api/auth/login") && doc.includes("token"), "契约文档可读（人读用，不进判据）");

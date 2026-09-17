@@ -1,0 +1,90 @@
+{
+  "schemaVersion": "crewforge.eval.scenario/1",
+  "id": "s1-crud-min",
+  "title": "最小 CRUD：便签管理",
+  "kind": "crud",
+  "expectFailure": false,
+  "frozenAt": "2026-09-11",
+  "inputFile": "input.md",
+  "stack": { "frontend": "Vue 3 + Vite", "backend": "Spring Boot 3", "database": "MySQL 8" },
+  "artifactLayout": {
+    "frontendDir": "frontend",
+    "backendDir": "backend",
+    "frontendEntryCandidates": ["frontend/src/main.ts", "frontend/src/main.js", "frontend/index.html"],
+    "backendJarDir": "backend/target"
+  },
+  "buildExpectations": [
+    { "id": "frontend.build", "cwd": "frontend", "cmd": "npm run build", "expectExitCode": 0, "required": true },
+    { "id": "backend.build", "cwd": "backend", "cmd": "mvnw -B -DskipTests package", "expectExitCode": 0, "required": true }
+  ],
+  "startExpectations": [
+    {
+      "id": "backend.boot",
+      "cwd": "backend",
+      "cmd": "java -jar backend/target/*.jar (SERVER_PORT=<port>, SPRING_DATASOURCE_* 指向宿主 MySQL)",
+      "healthPath": "/api/notes",
+      "expectReadyTimeoutMs": 180000,
+      "required": true
+    }
+  ],
+  "httpAssertions": [
+    {
+      "id": "note.create",
+      "method": "POST",
+      "path": "/api/notes",
+      "body": { "title": "baseline-note", "content": "phase0" },
+      "expectStatus": 200,
+      "expectJsonPath": { "code": { "op": "equals", "value": 200 }, "data.id": { "op": "type", "value": "number" } },
+      "capture": { "noteId": "data.id" }
+    },
+    {
+      "id": "note.list",
+      "method": "GET",
+      "path": "/api/notes",
+      "expectStatus": 200,
+      "expectJsonPath": { "code": { "op": "equals", "value": 200 }, "data": { "op": "type", "value": "array" }, "data[0].title": { "op": "exists" } }
+    },
+    {
+      "id": "note.get",
+      "method": "GET",
+      "path": "/api/notes/{noteId}",
+      "expectStatus": 200,
+      "expectJsonPath": { "data.title": { "op": "type", "value": "string" } }
+    },
+    {
+      "id": "note.update",
+      "method": "PUT",
+      "path": "/api/notes/{noteId}",
+      "body": { "title": "baseline-note-updated", "content": "phase0" },
+      "expectStatus": 200,
+      "expectJsonPath": { "code": { "op": "equals", "value": 200 } }
+    },
+    {
+      "id": "note.delete",
+      "method": "DELETE",
+      "path": "/api/notes/{noteId}",
+      "expectStatus": 200,
+      "expectJsonPath": { "code": { "op": "equals", "value": 200 } }
+    },
+    {
+      "id": "note.getAfterDelete",
+      "method": "GET",
+      "path": "/api/notes/{noteId}",
+      "expectStatus": 404,
+      "expectJsonPath": {}
+    }
+  ],
+  "renderAssertions": [
+    {
+      "id": "page.home",
+      "route": "/",
+      "mustContainText": ["便签"],
+      "mustContainHtml": ["<input"],
+      "minTextLength": 10
+    }
+  ],
+  "honesty": {
+    "mustNotClaimVerifiedUnlessAllAssertionsPass": true,
+    "note": "任何 http/render 断言失败时，系统若仍报 verified=true 即视为『假通过』，必须在报告中标注"
+  }
+}

@@ -4,6 +4,8 @@ import { writeWorkspace } from "./common";
 import type { ExecTask } from "./common";
 import { projectDir } from "./runEnv";
 import { baselinePromptBlock, CANONICAL_REQUEST_PATH, PROJECT_BASELINE, resolveProjectBaseline, type ProjectBaseline } from "./baseline";
+import { resolveStackProfile } from "./engine/stacks/profile";
+import { SKELETON_PATHS } from "./engine/workspace/skeleton/springVueMysql";
 
 /** Engine-owned Vue bootstrap files. A legacy backend entry is retained only for cleanup. */
 export const ENGINE_OWNED = [
@@ -161,14 +163,25 @@ function addFrontendDependencies(content: string, baseline: ProjectBaseline): st
     }
 }
 
-/** Normalize model output before any task or artifact reaches a worker. */
+/**
+ * Normalize model output before any task or artifact reaches a worker.
+ *
+ * ★ 阶段 1 修复：单一事实来源 = StackProfile.engineOwnedFiles（真骨架 13 件 + 历史遗留件）。
+ *   历史病（s1 实测）：写盘闸门用 profile 清单、规划期裁剪用本文件的 ENGINE_OWNED 常量，
+ *   两处不同源 → 架构师仍把 vite.config.ts 列进任务 files → 工位写它被机械拒绝 → 3 轮后任务被放弃。
+ *   清单只能有一份。
+ */
 export function engineOwnedFiles(baselineOrStack: unknown = PROJECT_BASELINE): readonly string[] {
     const baseline = resolveProjectBaseline(baselineOrStack);
+    const profile = resolveStackProfile(baseline);
+    const fromProfile = profile.engineOwnedFiles ?? [];
     if (/^react\b/i.test(baseline.frontend.framework)) {
-        return ["frontend/src/main.tsx", "frontend/src/App.tsx", "frontend/src/style.css"];
+        return [...new Set([...fromProfile, "frontend/src/main.tsx", "frontend/src/App.tsx", "frontend/src/style.css"])];
     }
-    if (/^vue\b/i.test(baseline.frontend.framework)) return ENGINE_OWNED;
-    return [];
+    if (/^vue\b/i.test(baseline.frontend.framework)) {
+        return [...new Set([...fromProfile, ...ENGINE_OWNED, ...SKELETON_PATHS])];
+    }
+    return [...fromProfile];
 }
 
 export function enforceEngineFoundation(files: { path: string; content: string }[], baselineOrStack: unknown = PROJECT_BASELINE): void {
@@ -289,6 +302,19 @@ export async function registerRoutes(pid: number | null, task: ExecTask, contrac
         if (source.includes(`import(\"${relative}\")`)) continue;
         const name = entry.path.replace(/^\/+/, "").replace(/[^\w]+/g, "-") || "page";
         lines.push(`  { path: \"${entry.path}\", name: \"${name}\", component: () => import(\"${relative}\") },`);
+    }
+    // ★ 阶段 1 修复（s1 白屏根因）：契约登记的页面路径是 LLM 起的名（s1 是 /note/list），
+    //   而需求写的是"只有一个路由 /"。`/` 没有匹配项 → router-view 空白 → 渲染审读到 8 元素/4 字，
+    //   模型拿不到 URL 上下文，返工 4 次都在改同一个 widget。这里机械保证：主页面同时挂到 `/`。
+    const primary = own[0];
+    if (primary) {
+        let primaryRel = path.posix.relative("frontend/src/router", primary.file);
+        if (!primaryRel.startsWith(".")) primaryRel = `./${primaryRel}`;
+        const hasRoot = /path:\s*["']\/["']/.test(source);
+        if (!hasRoot && primary.path !== "/") {
+            lines.push(`  { path: \"/\", name: \"home\", component: () => import(\"${primaryRel}\") },`);
+            console.log(`[foundation] 路由铁律：主页面 ${primary.path} 同时登记到 /（需求里的首页路由必须有真实匹配项）`);
+        }
     }
     if (lines.length === 0) return 0;
     source = source.replace("// {{ROUTES}}", `// {{ROUTES}}\n${lines.join("\n")}`);

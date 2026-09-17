@@ -1,0 +1,76 @@
+{
+  "schemaVersion": "crewforge.eval.scenario/1",
+  "id": "s2-auth",
+  "title": "登录与鉴权：JWT 闭环",
+  "kind": "auth",
+  "expectFailure": false,
+  "frozenAt": "2026-09-11",
+  "inputFile": "input.md",
+  "stack": { "frontend": "Vue 3 + Vite", "backend": "Spring Boot 3", "database": "MySQL 8" },
+  "artifactLayout": {
+    "frontendDir": "frontend",
+    "backendDir": "backend",
+    "frontendEntryCandidates": ["frontend/src/main.ts", "frontend/src/main.js", "frontend/index.html"],
+    "backendJarDir": "backend/target"
+  },
+  "buildExpectations": [
+    { "id": "frontend.build", "cwd": "frontend", "cmd": "npm run build", "expectExitCode": 0, "required": true },
+    { "id": "backend.build", "cwd": "backend", "cmd": "mvnw -B -DskipTests package", "expectExitCode": 0, "required": true }
+  ],
+  "startExpectations": [
+    {
+      "id": "backend.boot",
+      "cwd": "backend",
+      "cmd": "java -jar backend/target/*.jar (SERVER_PORT=<port>, SPRING_DATASOURCE_* 指向宿主 MySQL)",
+      "healthPath": "/api/auth/login",
+      "expectReadyTimeoutMs": 180000,
+      "required": true
+    }
+  ],
+  "httpAssertions": [
+    {
+      "id": "auth.login.ok",
+      "method": "POST",
+      "path": "/api/auth/login",
+      "body": { "username": "admin", "password": "123456" },
+      "expectStatus": 200,
+      "expectJsonPath": { "code": { "op": "equals", "value": 200 }, "data.token": { "op": "nonEmpty" } },
+      "capture": { "token": "data.token" }
+    },
+    {
+      "id": "auth.me.withToken",
+      "method": "GET",
+      "path": "/api/auth/me",
+      "headers": { "Authorization": "Bearer {token}" },
+      "expectStatus": 200,
+      "expectJsonPath": { "data.username": { "op": "equals", "value": "admin" } }
+    },
+    {
+      "id": "auth.me.withoutToken",
+      "method": "GET",
+      "path": "/api/auth/me",
+      "expectStatus": 401,
+      "expectJsonPath": {}
+    },
+    {
+      "id": "auth.login.badPassword",
+      "method": "POST",
+      "path": "/api/auth/login",
+      "body": { "username": "admin", "password": "definitely-wrong" },
+      "expectStatus": 401,
+      "expectJsonPath": {}
+    }
+  ],
+  "renderAssertions": [
+    {
+      "id": "page.login",
+      "route": "/login",
+      "mustContainText": ["登录"],
+      "mustContainHtml": ["<input"],
+      "minTextLength": 5
+    }
+  ],
+  "honesty": {
+    "mustNotClaimVerifiedUnlessAllAssertionsPass": true
+  }
+}

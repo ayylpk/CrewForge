@@ -25,8 +25,8 @@ export interface ProjectBaseline {
     auth: string;
     apiPrefix: string;
     response: {
-        successCode: number;
-        errorCode: number;
+        successCode: number | null;
+        errorCode: number | null;
         messageField: string;
     };
 }
@@ -49,8 +49,13 @@ export const PROJECT_BASELINE: ProjectBaseline = {
     auth: "JWT",
     apiPrefix: "/api",
     response: {
-        successCode: 1,
-        errorCode: 0,
+        /**
+         * ★ 阶段 1 提交 3：**引擎不再定义业务响应码**。
+         *   null = 未知，必须由需求/冻结场景规格提供（见 engine/ir/scenarioSpec.ts）。
+         *   历史上这里写死 1，与冻结需求的 code=200 冲突——判据不能从引擎默认值里长出来。
+         */
+        successCode: null,
+        errorCode: null,
         messageField: "msg",
     },
 };
@@ -147,7 +152,9 @@ export function baselinePromptBlock(baseline: ProjectBaseline = PROJECT_BASELINE
         `- 数据库：${baseline.database}`,
         `- 认证：${baseline.auth}；认证 token 通过 Authorization 请求头发送（若架构师明确选择其他协议，必须在契约中说明）`,
         `- API 前缀：${baseline.apiPrefix}`,
-        `- 响应：{ code, msg, data }；成功 code=${baseline.response.successCode}，失败 code=${baseline.response.errorCode}`,
+        `- 响应：{ code, msg, data }；${baseline.response.successCode != null
+            ? `成功 code=${baseline.response.successCode}，失败 code=${baseline.response.errorCode}`
+            : "**成功码以需求原文为准**（引擎不提供默认业务响应码；需求未写明时不得自行发明）"}`,
         `- 请求封装唯一标准路径：${baseline.frontend.requestPath}；业务文件只能 import 它，不得另起 api/services/request wrapper`,
     ].join("\n");
 }

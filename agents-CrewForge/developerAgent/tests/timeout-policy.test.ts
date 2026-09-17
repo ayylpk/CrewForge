@@ -113,12 +113,12 @@ describe("timeout / 超时延长的裁决规则", () => {
         expect(r.allowed).toBe(true);
     });
 
-    it("默认超时值符合规格（命令 2min / 构建 10min / HTTP 30s）", () => {
-        expect(EXEC_TIMEOUT_DEFAULTS["runCommand"]).toBe(120_000);
-        expect(EXEC_TIMEOUT_DEFAULTS["runBuild"]).toBe(600_000);
-        expect(EXEC_TIMEOUT_DEFAULTS["httpRequest"]).toBe(30_000);
-        expect(EXEC_TIMEOUT_DEFAULTS["startProcess"]).toBe(120_000);
-        expect(EXEC_TIMEOUT_DEFAULTS["shell"]).toBe(120_000);
+    it("默认超时值符合规格（9/16 p7 联跑指令 ×1.5：命令 3min / 构建 15min / HTTP 45s）", () => {
+        expect(EXEC_TIMEOUT_DEFAULTS["runCommand"]).toBe(180_000);
+        expect(EXEC_TIMEOUT_DEFAULTS["runBuild"]).toBe(900_000);
+        expect(EXEC_TIMEOUT_DEFAULTS["httpRequest"]).toBe(45_000);
+        expect(EXEC_TIMEOUT_DEFAULTS["startProcess"]).toBe(180_000);
+        expect(EXEC_TIMEOUT_DEFAULTS["shell"]).toBe(180_000);
     });
 });
 

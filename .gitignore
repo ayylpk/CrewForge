@@ -55,3 +55,8 @@ agents-CrewForge/developerAgent/live/ts-site-v2/
 
 # ===== WorkBuddy 本地笔记（不提交）=====
 .workbuddy/
+
+# ===== eval 机器产物（基线/运行留档 800MB+，不进库）=====
+agents-CrewForge/eval/baseline/
+fronted-CrewForge/.impeccable/
+todo-ui-preview.png

@@ -1,0 +1,23 @@
+{
+  "type": "architect_batch",
+  "projectId": "p7",
+  "taskId": "p7-t1",
+  "itemId": "w1",
+  "detail": "w1 在 backend/ 内建立最小可启动骨架：backend/package.json 声明 Node、Express、better-sqlite3 依赖与 node server.js 启动方式；backend/server.js 读取 process.env.PORT，缺省 3000 后监听服务。backend/src/app.js 创建 Express 应用并启用 JSON 解析，统一挂载 /api，接入 GET /api/health 探活（不校验身份）以及全局 JSON 错误壳；backend/src/middleware 预留 X-User-Id 认证中间件挂载点，约定后续路由使用：缺失或非法身份返回 401，错误体包含 error.message。backend/src/db 仅预留空目录与路径工具指向 backend/data/，真实建表与迁移交给 w2；本项不实现业务路由细节，只保证空库目录可创建、服务可一键启动、健康检查返回 data.ok 为 true。",
+  "checks": [
+    {
+      "id": "ac-2",
+      "kind": "CONTRACT",
+      "method": "GET",
+      "path": "/api/health",
+      "expectedStatus": 200,
+      "expected": "服务启动后探活接口可无身份访问，返回结构化成功壳。",
+      "assertJson": [
+        {
+          "path": "data.ok",
+          "equals": true
+        }
+      ]
+    }
+  ]
+}
