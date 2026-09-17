@@ -62,6 +62,10 @@ fronted-CrewForge/.impeccable/
 todo-ui-preview.png
 
 # ===== 只放源码：测试夹具/运行留档/文档不入库（文件保留在磁盘）=====
-agents-CrewForge/eval/
+# ★ 9/17 收窄：原来排除整个 eval/，连"尺子"的实现（harness/*.ts）一起被挡在版本管理之外——
+#   而尺子是源码（决定了 pass/fail 怎么判），按"只放源码"的原则它必须进库。
+#   所以只排除**数据与产物**：baseline/（机器产物 800MB+）与 scenarios/（冻结夹具数据）。
+agents-CrewForge/eval/baseline/
+agents-CrewForge/eval/scenarios/
 agents-CrewForge/developerAgent/live/p7/
 docs/
