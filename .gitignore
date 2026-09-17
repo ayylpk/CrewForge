@@ -60,3 +60,8 @@ agents-CrewForge/developerAgent/live/ts-site-v2/
 agents-CrewForge/eval/baseline/
 fronted-CrewForge/.impeccable/
 todo-ui-preview.png
+
+# ===== 只放源码：测试夹具/运行留档/文档不入库（文件保留在磁盘）=====
+agents-CrewForge/eval/
+agents-CrewForge/developerAgent/live/p7/
+docs/
