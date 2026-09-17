@@ -1,11 +1,28 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, nextTick } from 'vue'
-import { useRouter, useRoute } from 'vue-router'
-import { ElMessage } from 'element-plus'
-import CardShell from '../components/CardShell.vue'
-import GradientButton from '../components/GradientButton.vue'
+/* ============================================================
+   项目经理工作台（/projects/new 新建 ｜ /projects/:id/pm 澄清）
+   ------------------------------------------------------------
+   世界观：左 = 挂号栏（项目立项单逐项填写），右 = 会商席（与 Hina 对谈）。
+   逻辑与旧版逐字对齐：form 字段 undefined 语义、独立保存三件套
+   （名称/描述/模式选中即存）、功能清单校验文案、创建前确认单。
+   聊天仍是本地 mock（用户消息只上屏不接 LLM——与旧版一致，不造假回复）。
+   ============================================================ */
+import { computed, nextTick, onMounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import {
+  IconCheck,
+  IconCircle,
+  IconFile,
+  IconPlus,
+  IconSend,
+  IconUpload,
+  IconX,
+} from '@tabler/icons-vue'
+import AppModal from '../components/ui/AppModal.vue'
+import TopBar from '../components/ui/TopBar.vue'
 import { createProject as createProjectApi, fetchProjectById, updateProject } from '../api/project'
-import type { ConfirmMode ,ProjectCreateDTO} from '../types/project'
+import type { ConfirmMode, ProjectCreateDTO } from '../types/project'
+import { toast } from '../utils/toast'
 
 const router = useRouter()
 const route = useRoute()
@@ -14,13 +31,11 @@ const route = useRoute()
  * 双模式工作台：
  * · /projects/new      新建模式 —— 定项目描述 → 创建项目
  * · /projects/:id/pm   澄清模式 —— 加载项目 → 确认具体功能 → 保存
- *
- * ⚠️ 砍掉团队功能后：移除团队模式相关逻辑
  */
 const isEdit = computed(() => !!route.params.id)
 const projectId = Number(route.params.id || 0)
 
-// ===== 表单 =====（类型 = 后端 ProjectDTO 白名单，全字段集中在这，保存统一走 saveProject）
+// ===== 表单 =====（类型 = 后端 ProjectDTO 白名单，全字段集中在这，保存统一走 updateProject）
 // ⚠️ 可选字段不能给 ''：空字符串会被后端 updateById 当真值覆盖；undefined 才表示"不修改"
 const form = ref<ProjectCreateDTO>({
   name: '',
@@ -119,7 +134,7 @@ async function saveDescription() {
 async function saveName() {
   const name = form.value.name.trim()
   if (!name) {
-    alert('项目名称不能为空')
+    toast.warning('项目名称不能为空')
     return
   }
   nameSaving.value = true
@@ -130,7 +145,7 @@ async function saveName() {
   }
 }
 
-/** 澄清模式：确认模式下拉选中即保存（复用统一 updateProject，confirmMode 转数字在 api 层） */
+/** 澄清模式：确认模式下拉选中即保存（confirmMode 转数字在 api 层） */
 async function saveConfirmMode() {
   modeSaving.value = true
   try {
@@ -140,10 +155,10 @@ async function saveConfirmMode() {
   }
 }
 
-/** 澄清模式：保存功能清单（校验 → 把 features 组装成 JSON 写进 form → 统一调 updateProject） */
+/** 澄清模式：保存功能清单（校验 → features 组装 JSON 写进 form → 统一 updateProject） */
 async function saveFeatures() {
   if (!features.value.length) {
-    ElMessage.warning('还没有确认任何功能')
+    toast.warning('还没有确认任何功能')
     return
   }
   saving.value = true
@@ -181,7 +196,7 @@ function onPick(e: Event) {
   files.value.push(...Array.from((e.target as HTMLInputElement).files || []))
 }
 
-// ===== 对话区 =====
+// ===== 对话区（本地 mock：只上屏用户消息，不接 LLM——与旧版一致） =====
 interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
@@ -209,7 +224,6 @@ const draft = ref('')
 const thinking = ref(false)
 const chatBody = ref<HTMLElement | null>(null)
 
-
 function send() {
   const text = draft.value.trim()
   if (!text || thinking.value) return
@@ -220,8 +234,8 @@ function send() {
   working.value = true
   scrollToBottom()
 
-    working.value = false
-    scrollToBottom()
+  working.value = false
+  scrollToBottom()
 }
 
 function scrollToBottom() {
@@ -246,13 +260,13 @@ const showConfirm = ref(false)
 /** 检查未完成项 → 弹确认框 */
 function tryCreate() {
   if (!form.value.name.trim()) {
-    alert('请先填写项目名称')
+    toast.warning('请先填写项目名称')
     return
   }
   showConfirm.value = true
 }
 
-/** 返回：澄清模式放弃修改，直接回项目概览的「功能清单 + 开发计划」（不调 update）；新建模式回项目列表 */
+/** 返回：澄清模式直接回项目概览（不调 update）；新建模式回项目列表 */
 function goOverview() {
   router.push({ name: 'project-detail', params: { id: String(projectId) }, hash: '#overview' })
 }
@@ -276,379 +290,288 @@ async function confirmCreate() {
 </script>
 
 <template>
-  <div class="create">
-    <!-- 顶栏 -->
-    <header class="topbar">
-      <button class="btn-back" @click="isEdit ? goOverview() : router.push('/projects')">
-        {{ isEdit ? '← 返回' : '← 项目列表' }}
-      </button>
-      <div class="topbar-title">
-        <span class="dim">{{ isEdit ? '需求对话 ·' : '新建项目 ·' }}</span>
-        <span>{{ isEdit ? form.name : '项目经理工作台' }}</span>
-      </div>
-      <div class="topbar-right">
-        <GradientButton :loading="isEdit ? saving : creating" @click="isEdit ? saveFeatures() : tryCreate()">
-          {{ isEdit ? '保存功能清单' : '创建项目' }}
-          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M5 12h14M12 5l7 7-7 7" />
-          </svg>
-        </GradientButton>
-      </div>
-    </header>
+  <div class="view">
+    <TopBar>
+      <template #context>
+        <button class="tb-back btn btn-sm btn-ghost" @click="isEdit ? goOverview() : router.push('/projects')">
+          ← {{ isEdit ? '返回' : '项目列表' }}
+        </button>
+        <span class="tb-title">
+          <span class="dim">{{ isEdit ? '需求对话 ·' : '新建项目 ·' }}</span>
+          {{ isEdit ? form.name || '未命名项目' : '项目经理工作台' }}
+        </span>
+        <span class="sheet-no">{{ isEdit ? `PRJ-${String(projectId).padStart(4, '0')}-B` : 'FORM-A02' }}</span>
+      </template>
+      <template #right>
+        <button class="btn btn-primary" :disabled="isEdit ? saving : creating" @click="isEdit ? saveFeatures() : tryCreate()">
+          {{ isEdit ? (saving ? '保存中…' : '保存功能清单') : creating ? '创建中…' : '创建项目' }}
+        </button>
+      </template>
+    </TopBar>
 
-    <main class="main">
-      <!-- ===== 左侧：项目经理工作台 ===== -->
-      <div class="left">
-        <!-- 项目经理角色卡 -->
-        <CardShell class="pm-card">
-          <div class="pm-head">
-            <div class="pm-avatar">
-              <img src="../assets/agent-manager.png" alt="AI 项目经理" />
-            </div>
+    <main class="page desk">
+      <!-- ===== 左：挂号栏 ===== -->
+      <div class="desk-left">
+        <!-- 项目经理值班牌 -->
+        <section class="pm panel">
+          <header class="pm-head">
+            <img class="pm-avatar" src="../assets/agent-manager.png" alt="AI 项目经理" />
             <div class="pm-meta">
-              <h3>AI 项目经理 <span class="pm-badge">Hina</span></h3>
-              <p class="pm-duty">
+              <h2 class="pm-name">AI 项目经理 <span class="pm-badge sheet-no">HINA</span></h2>
+              <p class="pm-duty dim">
                 {{ phaseLabel }} · 正在{{ working ? '整理你的描述...' : '确认项目功能' }}
               </p>
             </div>
-            <span class="pm-status" :class="{ on: working }">
-              <span class="pm-dot"></span>{{ working ? '工作中' : '待命' }}
+            <span class="pm-status">
+              <span class="lamp" :class="working ? 'lamp-on lamp-live' : ''"></span>
+              <i class="faint">{{ working ? '工作中' : '待命' }}</i>
             </span>
-          </div>
-          <!-- 职责说明 -->
-          <div class="pm-tasks">
-            <div class="pm-task" :class="{ done: featureDone }">
-              <span class="pm-check">{{ featureDone ? '✓' : '○' }}</span>
-              <span>{{ isEdit ? '确认具体功能' : '描述项目需求' }}</span>
-            </div>
-            <div class="pm-task" :class="{ done: nameDone }">
-              <span class="pm-check">{{ nameDone ? '✓' : '○' }}</span>
-              <span>确定项目名称</span>
-            </div>
-            <div class="pm-task" :class="{ done: modeDone }">
-              <span class="pm-check">{{ modeDone ? '✓' : '○' }}</span>
-              <span>选择确认模式</span>
-            </div>
-            <div class="pm-task" :class="{ done: files.length > 0 }">
-              <span class="pm-check">{{ files.length > 0 ? '✓' : '○' }}</span>
-              <span>收集参考文件</span>
-            </div>
-          </div>
-        </CardShell>
+          </header>
+          <!-- 职责清单：会签核对项 -->
+          <ul class="duty rows">
+            <li class="row" :class="{ done: featureDone }">
+              <IconCheck v-if="featureDone" :size="15" :stroke-width="1.75" class="dico ok" />
+              <IconCircle v-else :size="15" :stroke-width="1.75" class="dico" />
+              {{ isEdit ? '确认具体功能' : '描述项目需求' }}
+            </li>
+            <li class="row" :class="{ done: nameDone }">
+              <IconCheck v-if="nameDone" :size="15" :stroke-width="1.75" class="dico ok" />
+              <IconCircle v-else :size="15" :stroke-width="1.75" class="dico" />
+              确定项目名称
+            </li>
+            <li class="row" :class="{ done: modeDone }">
+              <IconCheck v-if="modeDone" :size="15" :stroke-width="1.75" class="dico ok" />
+              <IconCircle v-else :size="15" :stroke-width="1.75" class="dico" />
+              选择确认模式
+            </li>
+            <li class="row" :class="{ done: files.length > 0 }">
+              <IconCheck v-if="files.length > 0" :size="15" :stroke-width="1.75" class="dico ok" />
+              <IconCircle v-else :size="15" :stroke-width="1.75" class="dico" />
+              收集参考文件
+            </li>
+          </ul>
+        </section>
 
         <!-- 项目名称 -->
-        <CardShell class="block">
-          <div class="block-head">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <rect x="3" y="3" width="18" height="18" rx="3" />
-              <path d="M3 9h18M9 21V9" />
-            </svg>
-            <h3 class="block-title">项目名称</h3>
+        <section class="panel block">
+          <header class="panel-head">
+            <h3 class="panel-title">项目名称</h3>
             <!-- 澄清模式：名称可修改，独立保存（不依赖「保存功能清单」） -->
-            <button v-if="isEdit" class="btn-save-desc" :disabled="nameSaving" @click="saveName()">
+            <button v-if="isEdit" class="btn btn-sm" :disabled="nameSaving" @click="saveName()">
               {{ nameSaving ? '保存中...' : '保存名称' }}
             </button>
+          </header>
+          <div class="block-body">
+            <input v-model="form.name" class="input" type="text" placeholder="如：CRM 客户管理系统" />
           </div>
-          <input
-            v-model="form.name"
-            class="input"
-            type="text"
-            placeholder="如：CRM 客户管理系统"
-          />
-        </CardShell>
+        </section>
 
         <!-- 项目描述（要做什么样子的项目） -->
-        <CardShell class="block">
-          <div class="block-head">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-              <polyline points="14 2 14 8 20 8" />
-            </svg>
-            <h3 class="block-title">项目描述</h3>
-            <span class="hint">这个项目要做什么</span>
-            <!-- 澄清模式：描述可修改，独立保存（不依赖「保存功能清单」） -->
-            <button v-if="isEdit" class="btn-save-desc" :disabled="descSaving" @click="saveDescription()">
+        <section class="panel block">
+          <header class="panel-head">
+            <h3 class="panel-title">项目描述</h3>
+            <span class="hint faint">这个项目要做什么</span>
+            <button v-if="isEdit" class="btn btn-sm" :disabled="descSaving" @click="saveDescription()">
               {{ descSaving ? '保存中...' : '保存描述' }}
             </button>
+          </header>
+          <div class="block-body">
+            <textarea
+              v-model="form.description"
+              class="textarea"
+              rows="5"
+              placeholder="描述这个项目要做什么样子的项目，如：为企业做一个 CRM 客户管理系统，管理客户档案、跟进销售过程、生成统计报表"
+            ></textarea>
           </div>
-          <textarea
-            v-model="form.description"
-            class="desc-input"
-            rows="5"
-            placeholder="描述这个项目要做什么样子的项目，如：为企业做一个 CRM 客户管理系统，管理客户档案、跟进销售过程、生成统计报表"
-          ></textarea>
-        </CardShell>
+        </section>
 
-        <!-- 已确认功能（仅澄清模式：项目经理确认的具体功能） -->
-        <CardShell v-if="isEdit" class="block">
-          <div class="block-head">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14" />
-              <polyline points="22 4 12 14.01 9 11.01" />
-            </svg>
-            <h3 class="block-title">已确认功能</h3>
-            <span class="hint">{{ features.length }} 项</span>
-          </div>
-          <div v-if="features.length" class="feature-list">
-            <div v-for="(f, i) in features" :key="i" class="feature-item">
-              <span class="feature-check">✓</span>
-              <span class="feature-text">{{ f }}</span>
-              <button class="feature-remove" @click="features.splice(i, 1)">✕</button>
+        <!-- 已确认功能（仅澄清模式） -->
+        <section v-if="isEdit" class="panel block">
+          <header class="panel-head">
+            <h3 class="panel-title">已确认功能</h3>
+            <span class="hint mono faint">{{ features.length }} 项</span>
+          </header>
+          <div class="block-body">
+            <ul v-if="features.length" class="rows feat-list">
+              <li v-for="(f, i) in features" :key="i" class="row feat">
+                <IconCheck :size="15" :stroke-width="1.75" class="dico ok" />
+                <span class="feat-text">{{ f }}</span>
+                <button class="feat-x" aria-label="移除该功能" @click="features.splice(i, 1)">
+                  <IconX :size="13" :stroke-width="1.75" />
+                </button>
+              </li>
+            </ul>
+            <p v-else class="faint empty-tip">还没有确认功能——在右侧对话中澄清，或手动添加</p>
+
+            <!-- 手动新增 -->
+            <div class="feat-add">
+              <input
+                v-model="featureDraft"
+                class="input"
+                type="text"
+                placeholder="输入功能点，如：报表导出 Excel"
+                @keyup.enter="addFeature"
+              />
+              <button class="btn" @click="addFeature">
+                <IconPlus :size="14" :stroke-width="1.75" />
+                添加
+              </button>
             </div>
           </div>
-          <p v-else class="empty-tip">还没有确认功能——在右侧对话中澄清，或手动添加</p>
-
-          <!-- 手动新增 -->
-          <div class="feature-add">
-            <input
-              v-model="featureDraft"
-              class="feature-input"
-              type="text"
-              placeholder="输入功能点，如：报表导出 Excel"
-              @keyup.enter="addFeature"
-            />
-            <button class="feature-add-btn" @click="addFeature">
-              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <line x1="12" y1="5" x2="12" y2="19" />
-                <line x1="5" y1="12" x2="19" y2="12" />
-              </svg>
-              添加
-            </button>
-          </div>
-        </CardShell>
+        </section>
 
         <!-- 确认模式 -->
-        <CardShell class="block">
-          <div class="block-head">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
-            </svg>
-            <h3 class="block-title">确认模式</h3>
+        <section class="panel block">
+          <header class="panel-head">
+            <h3 class="panel-title">确认模式</h3>
+          </header>
+          <div class="block-body">
+            <div v-if="!isEdit" class="mode-list" role="radiogroup" aria-label="确认模式">
+              <button
+                v-for="m in modes"
+                :key="m.value"
+                class="mode-item"
+                :class="{ active: form.confirmMode === m.value }"
+                role="radio"
+                :aria-checked="form.confirmMode === m.value"
+                @click="form.confirmMode = m.value"
+              >
+                <span class="mode-label">{{ m.label }}</span>
+                <span class="mode-desc dim">{{ m.desc }}</span>
+              </button>
+            </div>
+            <!-- 澄清模式：下拉重新选择，选中即保存 -->
+            <div v-else class="field">
+              <select v-model="form.confirmMode" class="select" :disabled="modeSaving" @change="saveConfirmMode()">
+                <option v-for="m in modes" :key="m.value" :value="m.value">{{ m.label }}</option>
+              </select>
+              <span class="field-hint">选中即保存 · 当前：{{ MODE_LABELS[form.confirmMode] }}</span>
+            </div>
           </div>
-          <div v-if="!isEdit" class="mode-list">
-            <button
-              v-for="m in modes"
-              :key="m.value"
-              class="mode-item"
-              :class="{ active: form.confirmMode === m.value }"
-              @click="form.confirmMode = m.value"
-            >
-              <span class="mode-label">{{ m.label }}</span>
-              <span class="mode-desc">{{ m.desc }}</span>
-            </button>
-          </div>
-          <!-- 澄清模式：下拉重新选择，选中即保存 -->
-          <div v-else class="mode-select-wrap">
-            <select
-              v-model="form.confirmMode"
-              class="mode-select"
-              :disabled="modeSaving"
-              @change="saveConfirmMode()"
-            >
-              <option v-for="m in modes" :key="m.value" :value="m.value">{{ m.label }}</option>
-            </select>
-            <span class="mode-select-desc">选中即保存 · 当前：{{ MODE_LABELS[form.confirmMode] }}</span>
-          </div>
-        </CardShell>
+        </section>
 
         <!-- 参考文件 -->
-        <CardShell class="block">
-          <div class="block-head">
-            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-              <polyline points="17 8 12 3 7 8" />
-              <line x1="12" y1="3" x2="12" y2="15" />
-            </svg>
-            <h3 class="block-title">参考文件</h3>
-            <span class="hint">可选</span>
-          </div>
-          <div
-            class="upload-zone"
-            :class="{ dragging: isDragging }"
-            @dragover.prevent="isDragging = true"
-            @dragleave.prevent="isDragging = false"
-            @drop.prevent="onDrop"
-            @click="pickFile"
-          >
-            <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-              <polyline points="17 8 12 3 7 8" />
-              <line x1="12" y1="3" x2="12" y2="15" />
-            </svg>
-            <p>拖拽文件到这里，或点击选择</p>
-          </div>
-          <div v-if="files.length" class="file-list">
-            <div v-for="(f, i) in files" :key="i" class="file-item">
-              <span class="file-name">{{ f.name }}</span>
-              <button class="file-remove" @click.stop="files.splice(i, 1)">✕</button>
+        <section class="panel block">
+          <header class="panel-head">
+            <h3 class="panel-title">参考文件</h3>
+            <span class="hint faint">可选</span>
+          </header>
+          <div class="block-body">
+            <div
+              class="upload-zone"
+              :class="{ dragging: isDragging }"
+              role="button"
+              tabindex="0"
+              @dragover.prevent="isDragging = true"
+              @dragleave.prevent="isDragging = false"
+              @drop.prevent="onDrop"
+              @click="pickFile"
+              @keydown.enter="pickFile"
+            >
+              <IconUpload :size="22" :stroke-width="1.75" />
+              <p>拖拽文件到这里，或点击选择</p>
             </div>
+            <ul v-if="files.length" class="rows file-list">
+              <li v-for="(f, i) in files" :key="i" class="row file-item">
+                <IconFile :size="14" :stroke-width="1.75" class="dico" />
+                <span class="file-name mono">{{ f.name }}</span>
+                <button class="feat-x" aria-label="移除文件" @click.stop="files.splice(i, 1)">
+                  <IconX :size="13" :stroke-width="1.75" />
+                </button>
+              </li>
+            </ul>
+            <input ref="fileInput" type="file" multiple hidden @change="onPick" />
           </div>
-          <input ref="fileInput" type="file" multiple hidden @change="onPick" />
-        </CardShell>
-
+        </section>
       </div>
 
-      <!-- ===== 右侧：与项目经理对话 ===== -->
-      <div class="right">
-        <div class="chat">
-          <div class="chat-head">
-            <span>与项目经理沟通需求</span>
-            <span class="chat-head-hint">{{ isEdit ? '对话澄清 → 左侧确认功能清单' : '描述项目 → 确认项目描述' }}</span>
+      <!-- ===== 右：会商席 ===== -->
+      <aside class="desk-right panel chat">
+        <header class="panel-head chat-head">
+          <span class="panel-title">与项目经理沟通需求</span>
+          <span class="hint faint">{{ isEdit ? '对话澄清 → 左侧确认功能清单' : '描述项目 → 确认项目描述' }}</span>
+        </header>
+        <div ref="chatBody" class="chat-body">
+          <div v-for="(m, i) in messages" :key="i" class="msg" :class="m.role">
+            <img v-if="m.role === 'assistant'" class="msg-avatar" src="../assets/agent-manager.png" alt="Hina" />
+            <div class="msg-bubble">{{ m.content }}</div>
           </div>
-          <!-- 消息列表 -->
-          <div ref="chatBody" class="chat-body">
-            <div
-              v-for="(m, i) in messages"
-              :key="i"
-              class="msg"
-              :class="m.role"
-            >
-              <div v-if="m.role === 'assistant'" class="msg-avatar">
-                <img src="../assets/agent-manager.png" alt="Hina" />
-              </div>
-              <div class="msg-bubble">{{ m.content }}</div>
-            </div>
-            <div v-if="thinking" class="msg assistant">
-              <div class="msg-avatar">
-                <img src="../assets/agent-manager.png" alt="Hina" />
-              </div>
-              <div class="msg-bubble typing">
-                <span class="dot"></span>
-                <span class="dot"></span>
-                <span class="dot"></span>
-              </div>
-            </div>
-          </div>
-
-          <!-- 输入区 -->
-          <div class="chat-input">
-            <textarea
-              v-model="draft"
-              rows="2"
-              placeholder="描述这个项目要做什么，如：做一个选课系统，让学生选课、教师管理课程...（Enter 发送）"
-              @keydown.enter.exact.prevent="send"
-            ></textarea>
-            <button class="btn-send" :disabled="!draft.trim() || thinking" @click="send">
-              <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M22 2 11 13" />
-                <path d="M22 2 15 22l-4-9-9-4z" />
-              </svg>
-            </button>
+          <div v-if="thinking" class="msg assistant">
+            <img class="msg-avatar" src="../assets/agent-manager.png" alt="Hina" />
+            <div class="msg-bubble typing"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span></div>
           </div>
         </div>
-      </div>
+        <div class="chat-input">
+          <textarea
+            v-model="draft"
+            class="textarea ci-area"
+            rows="2"
+            placeholder="描述这个项目要做什么，如：做一个选课系统，让学生选课、教师管理课程...（Enter 发送）"
+            @keydown.enter.exact.prevent="send"
+          ></textarea>
+          <button class="btn btn-primary ci-send" :disabled="!draft.trim() || thinking" aria-label="发送" @click="send">
+            <IconSend :size="16" :stroke-width="1.75" />
+          </button>
+        </div>
+      </aside>
     </main>
 
-    <!-- 创建确认弹窗 -->
-    <div v-if="showConfirm" class="modal-mask" @click.self="showConfirm = false">
-      <div class="modal">
-        <h2>确认创建项目？</h2>
-        <p class="modal-name">「{{ form.name }}」</p>
-
-        <div class="confirm-list">
-          <div v-for="c in confirmItems" :key="c.label" class="confirm-item">
-            <span class="confirm-check" :class="{ no: !c.done }">{{ c.done ? '✓' : '○' }}</span>
-            <span class="confirm-label" :class="{ pending: !c.done }">{{ c.label }}</span>
-            <span class="confirm-state" :class="{ no: !c.done }">{{ c.done ? '已完成' : '未完成' }}</span>
-          </div>
-        </div>
-
-        <p v-if="hasPending" class="modal-warn">
-          以下内容未完成，创建后可在项目详情中继续补充
-        </p>
-
-        <div class="modal-actions">
-          <button class="btn-cancel" @click="showConfirm = false">再看看</button>
-          <GradientButton @click="confirmCreate">确认创建</GradientButton>
-        </div>
-      </div>
-    </div>
+    <!-- 创建确认弹窗（出图前核对单） -->
+    <AppModal v-if="showConfirm" title="确认创建项目？" sheet="FORM-A02" width="460px" @close="showConfirm = false">
+      <p class="cm-name">「{{ form.name }}」</p>
+      <ul class="rows cm-list">
+        <li v-for="c in confirmItems" :key="c.label" class="row cm-item">
+          <IconCheck v-if="c.done" :size="15" :stroke-width="1.75" class="dico ok" />
+          <IconCircle v-else :size="15" :stroke-width="1.75" class="dico" />
+          <span class="cm-label" :class="{ pending: !c.done }">{{ c.label }}</span>
+          <span class="cm-state faint" :class="{ no: !c.done }">{{ c.done ? '已完成' : '未完成' }}</span>
+        </li>
+      </ul>
+      <p v-if="hasPending" class="cm-warn">以下内容未完成，创建后可在项目详情中继续补充</p>
+      <template #footer>
+        <button class="btn btn-sm" @click="showConfirm = false">再看看</button>
+        <button class="btn btn-sm btn-primary" @click="confirmCreate">确认创建</button>
+      </template>
+    </AppModal>
   </div>
 </template>
 
 <style scoped>
-.create {
+.view {
   position: relative;
   z-index: 1;
-  min-height: 100vh;
-}
-
-/* ===== 顶栏 ===== */
-.topbar {
+  min-height: 100dvh;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 48px;
-  height: 56px;
-  border-bottom: 1px solid var(--border);
-  background: rgba(15, 19, 31, 0.85);
-  backdrop-filter: blur(12px);
+  flex-direction: column;
 }
-.btn-back {
-  padding: 7px 14px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text2);
-  font-size: 13px;
-  cursor: pointer;
-  transition: all 0.2s;
+.tb-back {
+  flex: none;
 }
-.btn-back:hover {
-  border-color: var(--border2);
-  color: var(--text);
-}
-.topbar-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 14px;
+.tb-title {
   font-weight: 600;
-}
-.dim {
-  color: var(--text3);
-  font-weight: 400;
-}
-.topbar-right .avatar {
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
-  background: var(--bg4);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 12px;
-  color: var(--blue);
-  border: 1px solid var(--border2);
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-/* ===== 主区域：左工作台 + 右对话 ===== */
-.main {
-  display: flex;
-  gap: 20px;
-  width: 100%;
-  height: calc(100vh - 56px);
-  padding: 20px 48px 24px;
+/* ===== 双栏绘图台 ===== */
+.desk {
+  display: grid;
+  grid-template-columns: minmax(0, 1.08fr) minmax(0, 0.92fr);
+  gap: 18px;
+  align-items: start;
 }
-.left {
-  flex: 3;
+.desk-left {
   display: flex;
   flex-direction: column;
-  gap: 16px;
-  overflow-y: auto;
-  padding-right: 4px;
-}
-.right {
-  flex: 2;
-  display: flex;
-  flex-direction: column;
-  min-width: 380px;
+  gap: 14px;
+  min-width: 0;
 }
 
-/* ===== 项目经理角色卡 ===== */
-.pm-card {
-  padding: 18px 20px;
-  border-left: 3px solid var(--blue);
+/* ===== 值班牌 ===== */
+.pm {
+  padding: 16px 18px 6px;
 }
 .pm-head {
   display: flex;
@@ -658,295 +581,102 @@ async function confirmCreate() {
 .pm-avatar {
   width: 48px;
   height: 48px;
-  border-radius: 12px;
-  overflow: hidden;
-  flex-shrink: 0;
-  background: var(--bg3);
-  border: 1px solid var(--border);
-}
-.pm-avatar img {
-  width: 100%;
-  height: 100%;
+  border-radius: 50%; /* 圆章式头像 */
+  border: 1px solid var(--line-2);
   object-fit: cover;
+  flex: none;
 }
 .pm-meta {
   flex: 1;
+  min-width: 0;
 }
-.pm-meta h3 {
-  font-size: 15px;
+.pm-name {
+  font-size: 16px;
   font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 .pm-badge {
-  display: inline-block;
-  margin-left: 6px;
-  padding: 2px 8px;
-  border-radius: 10px;
-  background: rgba(69, 184, 255, 0.12);
-  border: 1px solid rgba(69, 184, 255, 0.3);
-  color: var(--blue);
-  font-size: 11px;
-  font-weight: 600;
-  vertical-align: middle;
+  font-size: 10px;
+  border: 1px solid currentColor;
+  padding: 0 5px;
+  border-radius: var(--r-xs);
 }
 .pm-duty {
-  font-size: 12px;
-  color: var(--text2);
-  margin-top: 3px;
+  font-size: var(--fs-meta);
+  margin-top: 2px;
 }
 .pm-status {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
-  color: var(--text3);
-  flex-shrink: 0;
+  flex: none;
 }
-.pm-status.on {
-  color: var(--green);
+.pm-status i {
+  font-style: normal;
+  font-size: var(--fs-meta);
 }
-.pm-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: currentColor;
-  animation: pulse 1.2s infinite;
+.duty {
+  margin-top: 10px;
 }
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.3; }
-}
-
-/* 职责清单 */
-.pm-tasks {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 14px;
-  padding-top: 14px;
-  border-top: 1px solid var(--border);
-}
-.pm-task {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--text3);
-  padding: 4px 10px;
-  border-radius: 14px;
-  background: var(--bg3);
-  border: 1px solid var(--border);
-  transition: all 0.2s;
-}
-.pm-task.done {
-  color: var(--green);
-  border-color: rgba(94, 203, 138, 0.3);
-  background: rgba(94, 203, 138, 0.06);
-}
-.pm-check {
-  font-size: 11px;
-}
-
-/* ===== 区块 ===== */
-.block {
-  padding: 18px 20px;
-}
-.block-head {
+.duty .row {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 14px;
-  color: var(--text2);
+  padding: 7px 4px;
+  font-size: 13px;
+  color: var(--ink-2);
 }
-.block-title {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--text);
+.duty .row.done {
+  color: var(--ink);
+}
+.dico {
+  color: var(--ink-3);
+  flex: none;
+}
+.dico.ok {
+  color: var(--pass-ink);
+}
+
+/* ===== 表单块 ===== */
+.block-body {
+  padding: 14px 16px 16px;
 }
 .hint {
-  font-size: 11.5px;
-  color: var(--text3);
+  font-size: var(--fs-meta);
   margin-left: auto;
 }
-.btn-save-desc {
-  margin-left: auto;
-  padding: 5px 12px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text2);
-  font-size: 12px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-.btn-save-desc:hover {
-  border-color: var(--green);
-  color: var(--green);
-}
-.btn-save-desc:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.mode-select-wrap {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.mode-select {
-  padding: 8px 12px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--bg3);
-  color: var(--text);
-  font-size: 13px;
-  cursor: pointer;
-  outline: none;
-  transition: border-color 0.2s;
-}
-.mode-select:hover {
-  border-color: var(--green);
-}
-.mode-select:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-.mode-select-desc {
-  font-size: 11.5px;
-  color: var(--text3);
-}
-
-/* 输入 */
-.input {
-  width: 100%;
-  height: 42px;
-  padding: 0 14px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  background: var(--bg3);
-  color: var(--text);
-  font-size: 14px;
-  outline: none;
-  transition: border-color 0.2s;
-}
-/* 只读展示（澄清模式） */
-.static-text {
-  font-size: 13.5px;
-  color: var(--text2);
-  line-height: 1.7;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.empty-tip {
-  font-size: 12.5px;
-  color: var(--text3);
-  padding: 10px 0;
-}
-/* 项目描述多行输入 */
-.desc-input {
-  width: 100%;
-  padding: 10px 14px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  background: var(--bg3);
-  color: var(--text);
-  font-size: 13.5px;
-  font-family: inherit;
-  line-height: 1.7;
-  outline: none;
-  resize: vertical;
-  transition: border-color 0.2s;
-}
-.input:focus {
-  border-color: var(--blue);
-}
-.input::placeholder {
-  color: var(--text3);
+.panel-head .btn {
+  margin-left: 8px;
 }
 
 /* 功能清单 */
-.feature-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.feature-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 9px 12px;
-  border-radius: 9px;
-  background: var(--bg3);
-  border: 1px solid var(--border);
-  font-size: 13px;
-  color: var(--text);
-  animation: feature-in 0.3s var(--ease);
-}
-@keyframes feature-in {
-  from { opacity: 0; transform: translateX(-8px); }
-  to { opacity: 1; transform: translateX(0); }
-}
-.feature-check {
-  color: var(--green);
-  font-weight: 700;
-  flex-shrink: 0;
-}
-.feature-text {
+.feat-text {
   flex: 1;
+  min-width: 0;
+  font-size: 13px;
 }
-.feature-remove {
-  border: none;
-  background: transparent;
-  color: var(--text3);
-  cursor: pointer;
-  font-size: 12px;
+.feat-x {
+  color: var(--ink-3);
+  padding: 2px;
+  border-radius: var(--r-xs);
 }
-.feature-remove:hover {
-  color: var(--red);
+.feat-x:hover {
+  color: var(--void-ink);
+  background: var(--void-wash);
 }
-
-/* 手动新增功能 */
-.feature-add {
+.empty-tip {
+  font-size: 13px;
+  margin-bottom: 10px;
+}
+.feat-add {
   display: flex;
   gap: 8px;
-  margin-top: 12px;
+  margin-top: 10px;
 }
-.feature-input {
+.feat-add .input {
   flex: 1;
-  height: 38px;
-  padding: 0 12px;
-  border-radius: 9px;
-  border: 1px dashed var(--border2);
-  background: transparent;
-  color: var(--text);
-  font-size: 13px;
-  outline: none;
-  transition: all 0.2s;
-}
-.feature-input:focus {
-  border-color: var(--blue);
-  border-style: solid;
-  background: rgba(69, 184, 255, 0.04);
-}
-.feature-input::placeholder {
-  color: var(--text3);
-}
-.feature-add-btn {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  padding: 0 14px;
-  height: 38px;
-  border-radius: 9px;
-  border: 1px solid var(--border);
-  background: var(--bg3);
-  color: var(--text2);
-  font-size: 13px;
-  cursor: pointer;
-  transition: all 0.2s;
-  flex-shrink: 0;
-}
-.feature-add-btn:hover {
-  border-color: var(--blue);
-  color: var(--blue);
 }
 
 /* 确认模式 */
@@ -959,329 +689,205 @@ async function confirmCreate() {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 3px;
-  padding: 11px 14px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  background: var(--bg3);
-  color: var(--text2);
-  cursor: pointer;
+  gap: 2px;
   text-align: left;
-  transition: all 0.2s;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  background: var(--paper);
+  transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease);
 }
 .mode-item:hover {
-  border-color: var(--border2);
+  border-color: var(--cyan);
 }
 .mode-item.active {
-  border-color: var(--blue);
-  background: rgba(69, 184, 255, 0.08);
+  border-color: var(--cyan);
+  background: var(--cyan-wash);
+  box-shadow: inset 3px 0 0 var(--cyan); /* 左侧压青轨：选中即归档 */
 }
 .mode-label {
-  font-size: 13.5px;
   font-weight: 600;
-  color: var(--text);
+  font-size: 13px;
 }
 .mode-item.active .mode-label {
-  color: var(--blue);
+  color: var(--cyan);
 }
 .mode-desc {
-  font-size: 12px;
-  color: var(--text3);
+  font-size: var(--fs-meta);
 }
 
-/* 上传 */
+/* 上传区 */
 .upload-zone {
   display: flex;
   flex-direction: column;
   align-items: center;
-  justify-content: center;
   gap: 8px;
-  padding: 22px 0;
-  border: 1.5px dashed var(--border2);
-  border-radius: 12px;
-  color: var(--text2);
-  font-size: 13px;
+  padding: 26px 16px;
+  border: 1.5px dashed var(--line-2);
+  border-radius: var(--r);
+  color: var(--ink-2);
   cursor: pointer;
-  transition: all 0.2s;
+  transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease);
 }
 .upload-zone:hover,
 .upload-zone.dragging {
-  border-color: var(--blue);
-  color: var(--blue);
-  background: rgba(69, 184, 255, 0.05);
+  border-color: var(--cyan);
+  background: var(--cyan-wash);
+  color: var(--cyan);
+}
+.upload-zone p {
+  font-size: 13px;
 }
 .file-list {
-  margin-top: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.file-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 12px;
-  border-radius: 8px;
-  background: var(--bg3);
-  font-size: 12.5px;
-  color: var(--text2);
+  margin-top: 8px;
 }
 .file-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.file-remove {
-  border: none;
-  background: transparent;
-  color: var(--text3);
-  cursor: pointer;
-  font-size: 12px;
-}
-.file-remove:hover {
-  color: var(--red);
-}
 
-/* ===== 创建确认弹窗 ===== */
-.modal-mask {
-  position: fixed;
-  inset: 0;
-  z-index: 100;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(8, 11, 17, 0.7);
-  backdrop-filter: blur(4px);
-}
-.modal {
-  width: 420px;
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: 28px;
-}
-.modal h2 {
-  font-size: 18px;
-  font-weight: 700;
-}
-.modal-name {
-  font-size: 14px;
-  color: var(--blue);
-  margin-top: 6px;
-  margin-bottom: 20px;
-}
-.confirm-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.confirm-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 9px 12px;
-  border-radius: 9px;
-  background: var(--bg3);
-  font-size: 13px;
-}
-.confirm-check {
-  color: var(--green);
-  font-weight: 700;
-}
-.confirm-check.no {
-  color: var(--yellow);
-}
-.confirm-label {
-  flex: 1;
-  color: var(--text);
-}
-.confirm-label.pending {
-  color: var(--text2);
-}
-.confirm-state {
-  font-size: 11.5px;
-  color: var(--green);
-}
-.confirm-state.no {
-  color: var(--yellow);
-}
-.modal-warn {
-  margin-top: 14px;
-  font-size: 12.5px;
-  color: var(--yellow);
-  line-height: 1.6;
-}
-.modal-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-  margin-top: 24px;
-}
-.btn-cancel {
-  padding: 0 20px;
-  height: 40px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text2);
-  font-size: 14px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-.btn-cancel:hover {
-  border-color: var(--border2);
-  color: var(--text);
-}
-
-/* ===== 对话区 ===== */
+/* ===== 会商席 ===== */
 .chat {
-  flex: 1;
+  position: sticky;
+  top: 74px;
   display: flex;
   flex-direction: column;
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
+  height: calc(100dvh - 102px);
+  min-height: 420px;
   overflow: hidden;
 }
-.chat-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 16px;
-  border-bottom: 1px solid var(--border);
-  font-size: 13px;
-  font-weight: 600;
-}
-.chat-head-hint {
-  font-size: 11px;
-  font-weight: 400;
-  color: var(--text3);
+.chat-head .hint {
+  margin-left: 0;
 }
 .chat-body {
   flex: 1;
   overflow-y: auto;
-  padding: 20px;
+  padding: 16px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
 }
-
 .msg {
   display: flex;
-  gap: 10px;
-  max-width: 92%;
+  gap: 9px;
+  align-items: flex-start;
 }
 .msg.user {
-  align-self: flex-end;
-  flex-direction: row-reverse;
+  justify-content: flex-end;
 }
 .msg-avatar {
-  width: 32px;
-  height: 32px;
-  border-radius: 10px;
-  overflow: hidden;
-  flex-shrink: 0;
-  background: var(--bg3);
-  border: 1px solid var(--border);
-}
-.msg-avatar img {
-  width: 100%;
-  height: 100%;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: 1px solid var(--line-2);
+  flex: none;
   object-fit: cover;
 }
 .msg-bubble {
-  padding: 11px 14px;
-  border-radius: 12px;
-  font-size: 13.5px;
+  max-width: 78%;
+  padding: 10px 13px;
+  border-radius: 2px 10px 10px 10px;
+  background: var(--paper-deep);
+  border: 1px solid var(--line);
+  font-size: 13px;
   line-height: 1.7;
-  white-space: pre-line;
+  white-space: pre-wrap;
   word-break: break-word;
 }
-.msg.assistant .msg-bubble {
-  background: var(--bg3);
-  border: 1px solid var(--border);
-  color: var(--text);
-  border-top-left-radius: 4px;
-}
 .msg.user .msg-bubble {
-  background: var(--grad1);
-  color: #fff;
-  border-top-right-radius: 4px;
+  background: var(--cyan); /* 我方发言：章面压青，白字 */
+  border-color: var(--cyan);
+  color: #f3f6f8;
+  border-radius: 10px 2px 10px 10px;
 }
-
-/* 打字动画 */
 .typing {
   display: flex;
-  align-items: center;
   gap: 5px;
-  padding: 14px 18px;
+  padding: 13px;
 }
-.typing .dot {
-  width: 7px;
-  height: 7px;
+.tdot {
+  width: 6px;
+  height: 6px;
   border-radius: 50%;
-  background: var(--text3);
-  animation: blink 1.4s infinite;
+  background: var(--ink-3);
+  animation: tdot 1.1s var(--ease) infinite;
 }
-.typing .dot:nth-child(2) {
-  animation-delay: 0.2s;
+.tdot:nth-child(2) {
+  animation-delay: 0.15s;
 }
-.typing .dot:nth-child(3) {
-  animation-delay: 0.4s;
+.tdot:nth-child(3) {
+  animation-delay: 0.3s;
 }
-@keyframes blink {
-  0%, 80%, 100% { opacity: 0.25; }
-  40% { opacity: 1; }
+@keyframes tdot {
+  35% {
+    transform: translateY(-4px);
+    opacity: 0.5;
+  }
 }
-
-/* 输入区 */
 .chat-input {
   display: flex;
+  gap: 8px;
+  padding: 12px;
+  border-top: 1px solid var(--line);
+  background: var(--paper);
   align-items: flex-end;
-  gap: 10px;
-  padding: 12px 14px;
-  border-top: 1px solid var(--border);
-  background: var(--bg2);
 }
-.chat-input textarea {
+.ci-area {
   flex: 1;
-  padding: 10px 12px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  background: var(--bg3);
-  color: var(--text);
-  font-size: 13.5px;
-  line-height: 1.6;
-  outline: none;
-  resize: none;
-  font-family: inherit;
-  transition: border-color 0.2s;
+  min-height: 44px;
+  max-height: 120px;
 }
-.chat-input textarea:focus {
-  border-color: var(--blue);
+.ci-send {
+  height: 44px;
+  width: 44px;
+  padding: 0;
+  flex: none;
 }
-.chat-input textarea::placeholder {
-  color: var(--text3);
+
+/* ===== 确认单弹窗 ===== */
+.cm-name {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 10px;
 }
-.btn-send {
-  width: 40px;
-  height: 40px;
-  border: none;
-  border-radius: 10px;
-  background: var(--grad1);
-  color: #fff;
-  cursor: pointer;
+.cm-list {
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 2px 12px;
+  background: var(--paper);
+}
+.cm-item {
   display: flex;
   align-items: center;
-  justify-content: center;
-  transition: opacity 0.2s;
-  flex-shrink: 0;
+  gap: 9px;
+  font-size: 13px;
 }
-.btn-send:hover:not(:disabled) {
-  opacity: 0.9;
+.cm-label {
+  flex: 1;
 }
-.btn-send:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
+.cm-label.pending {
+  color: var(--ink-3);
+}
+.cm-state.no {
+  color: var(--wait-ink);
+}
+.cm-warn {
+  margin-top: 12px;
+  font-size: var(--fs-meta);
+  color: var(--wait-ink);
+}
+
+@media (max-width: 980px) {
+  .desk {
+    grid-template-columns: 1fr;
+  }
+  .chat {
+    position: static;
+    height: 520px;
+  }
 }
 </style>

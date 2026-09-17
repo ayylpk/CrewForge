@@ -9,6 +9,9 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@fontsource/jetbrains-mono": "^5.3.0",
+    "@fontsource/oswald": "^5.3.0",
+    "@tabler/icons-vue": "^3.46.0",
     "axios": "^1.19.0",
     "element-plus": "^2.14.3",
     "monaco-editor": "^0.56.0",

@@ -1,5 +1,5 @@
 import axios from 'axios'
-import { ElMessage } from 'element-plus'
+import { toast } from '../utils/toast'
 
 /**
  * axios 统一封装
@@ -33,7 +33,7 @@ request.interceptors.response.use(
     if (res instanceof Blob) return res
     // 后端统一格式 { code: 1(成功) / 0(失败), msg, data }
     if (res.code === 0) {
-      ElMessage.error(res.msg || '请求失败')
+      toast.error(res.msg || '请求失败')
       return Promise.reject(new Error(res.msg || '请求失败'))
     }
     // 统一解包：调用方拿到的直接是业务数据（如 LoginVO），不用自己拆 Result
@@ -44,16 +44,16 @@ request.interceptors.response.use(
       const { status } = error.response
       if (status === 401) {
         localStorage.removeItem('cf_token')
-        ElMessage.error('登录已过期，请重新登录')
+        toast.error('登录已过期，请重新登录')
         // 跳转登录页（避免在登录页重复跳转）
         if (window.location.pathname !== '/login') {
           window.location.href = '/login'
         }
       } else {
-        ElMessage.error(error.response.data?.msg || `请求错误 ${status}`)
+        toast.error(error.response.data?.msg || `请求错误 ${status}`)
       }
     } else {
-      ElMessage.error('网络异常，请检查连接')
+      toast.error('网络异常，请检查连接')
     }
     return Promise.reject(error)
   },

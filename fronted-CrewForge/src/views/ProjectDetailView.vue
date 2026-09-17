@@ -1,162 +1,33 @@
-<template>
-  <div class="overview">
-    <!-- 顶栏 -->
-    <header class="topbar">
-      <button class="btn-back" @click="goBack">← {{ backLabel }}</button>
-      <div class="topbar-title">
-        <span class="dim">项目 ·</span>
-        <span>{{ projectName }}</span>
-      </div>
-      <div class="topbar-right">
-        <!-- 阶段 2 点火：开工/停止（对账器状态来自 /api/project-run/{id}） -->
-        <span v-if="runStatus?.running" class="run-hint">
-          ⚙ 引擎运行中（pid {{ runStatus.pid }}{{ runStatus.restartCount ? ` · 续拉 ${runStatus.restartCount}` : '' }}）
-        </span>
-        <button v-if="canStop" class="btn-stop" :disabled="stopping" @click="stopWork">
-          {{ stopping ? '停止中…' : '停止' }}
-        </button>
-        <GradientButton v-if="canStart" :disabled="starting" @click="startWork">
-          {{ starting ? '拉起中…' : startLabel }}
-        </GradientButton>
-        <GradientButton @click="router.push({ name: 'execution', params: { id: route.params.id } })">
-          进入执行面板
-        </GradientButton>
-      </div>
-    </header>
-
-    <main class="main">
-      <!-- 头部信息 -->
-      <div class="head-card">
-        <div class="head-left">
-          <h1>{{ projectName }} <span class="status-badge" :style="{ color: statusColor }">
-            <span class="status-dot" :style="{ background: statusColor }"></span>{{ statusLabel }}
-          </span></h1>
-          <p class="desc">{{ project?.description || '暂无描述' }}</p>
-        </div>
-      </div>
-
-      <!-- 功能入口（项目工作台） -->
-      <div class="entry-grid">
-        <button class="entry-card" @click="router.push({ name: 'execution', params: { id: route.params.id } })">
-          <span class="entry-ico" style="background: rgba(69, 184, 255, 0.12); color: var(--blue)">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <polygon points="5 3 19 12 5 21 5 3" />
-            </svg>
-          </span>
-          <span class="entry-name">执行面板</span>
-          <span class="entry-desc">Agent 任务流水线</span>
-        </button>
-
-        <button class="entry-card" @click="router.push({ name: 'pm', params: { id: route.params.id } })">
-          <span class="entry-ico" style="background: rgba(240, 112, 160, 0.12); color: var(--pink)">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
-              <circle cx="9" cy="7" r="4" />
-              <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
-              <path d="M16 3.13a4 4 0 0 1 0 7.75" />
-            </svg>
-          </span>
-          <span class="entry-name">需求对话</span>
-          <span class="entry-desc">项目经理 · 改功能</span>
-        </button>
-
-        <button class="entry-card" @click="router.push({ name: 'architect', params: { id: route.params.id }, query: { role: 'architect' } })">
-          <span class="entry-ico" style="background: rgba(167, 107, 255, 0.12); color: var(--purple)">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="10" />
-              <polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76" />
-            </svg>
-          </span>
-          <span class="entry-name">技术方案</span>
-          <span class="entry-desc">架构师 · 技术选型</span>
-        </button>
-
-        <button class="entry-card" @click="router.push({ name: 'team', params: { id: route.params.id } })">
-          <span class="entry-ico" style="background: rgba(94, 203, 138, 0.12); color: var(--green)">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
-            </svg>
-          </span>
-          <span class="entry-name">Agent 团队</span>
-          <span class="entry-desc">成员 · 模型 · 提示词</span>
-        </button>
-
-        <button class="entry-card" @click="downloadZip">
-          <span class="entry-ico" style="background: rgba(94, 200, 192, 0.12); color: var(--cyan)">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-              <polyline points="7 10 12 15 17 10" />
-              <line x1="12" y1="15" x2="12" y2="3" />
-            </svg>
-          </span>
-          <span class="entry-name">下载项目</span>
-          <span class="entry-desc">zip 打包</span>
-        </button>
-
-        <button class="entry-card" @click="scrollTo('overview')">
-          <span class="entry-ico" style="background: rgba(240, 192, 96, 0.12); color: var(--yellow)">
-            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-              <polyline points="14 2 14 8 20 8" />
-              <line x1="16" y1="13" x2="8" y2="13" />
-              <line x1="16" y1="17" x2="8" y2="17" />
-            </svg>
-          </span>
-          <span class="entry-name">项目概览</span>
-          <span class="entry-desc">功能 · 接口 · 版本</span>
-        </button>
-      </div>
-
-      <!-- 功能清单 + 开发计划（数据来自后端 businessModules / devPlan，没有就显示空态） -->
-      <div id="overview" class="grid-2">
-        <CardShell class="card">
-          <h3 class="card-title">已确认功能</h3>
-          <div v-if="features.length" class="feature-list">
-            <div v-for="(f, i) in features" :key="i" class="feature-item">
-              <span class="feature-check">✓</span>{{ f }}
-            </div>
-          </div>
-          <p v-else class="empty-tip">暂无已确认功能</p>
-        </CardShell>
-
-        <!-- 开发计划 -->
-        <CardShell class="card">
-          <h3 class="card-title">开发计划</h3>
-          <div v-if="plan.length" class="plan-list">
-            <div v-for="(p, i) in plan" :key="i" class="plan-item">
-              <span class="plan-phase"><span class="plan-dot"></span>阶段 {{ i + 1 }} · {{ p.name }}</span>
-              <div v-if="p.tasks?.length" class="plan-tasks">
-                <span v-for="t in p.tasks" :key="t" class="plan-task-tag">{{ t }}</span>
-              </div>
-            </div>
-          </div>
-          <p v-else class="empty-tip">暂无开发计划</p>
-        </CardShell>
-      </div>
-
-      <!-- 操作区 -->
-      <div class="actions">
-        <button class="act-btn primary" @click="downloadZip">
-          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-            <polyline points="7 10 12 15 17 10" />
-            <line x1="12" y1="15" x2="12" y2="3" />
-          </svg>
-          下载项目 zip
-        </button>
-      </div>
-    </main>
-  </div>
-</template>
-
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
-import { useRouter, useRoute } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
-import CardShell from '../components/CardShell.vue'
-import GradientButton from '../components/GradientButton.vue'
-import { fetchProjectById, downloadProjectZip } from '../api/project'
-import { startProjectRun, stopProjectRun, fetchRunStatus, type RunStatus } from '../api/projectRun'
+/* ============================================================
+   项目详情页（/projects/:id/overview）= 项目总图首页
+   ------------------------------------------------------------
+   世界观：一张项目图纸的"首页"——标题栏 + 图别目录（六个入口）+
+   功能清单/开发计划两栏 + 底部出图（下载 zip）。
+   开工/停止 = 引擎点火台，进程判活由后端两级完成，前端只看结论；
+   10s 轻轮询：项目状态 + 进程账本（开工→跑完→done 全程无人肉刷新）。
+   旧版页尾 module/team/api/version 四段样式为死代码（模板未用），已清理。
+   ============================================================ */
+import { computed, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
+import {
+  IconCheck,
+  IconCompass,
+  IconDownload,
+  IconFileText,
+  IconFlame,
+  IconPlayerPlay,
+  IconStar,
+  IconUsers,
+} from '@tabler/icons-vue'
+import TopBar from '../components/ui/TopBar.vue'
+import StampSeal from '../components/ui/StampSeal.vue'
+import { downloadProjectZip, fetchProjectById } from '../api/project'
+import { fetchRunStatus, startProjectRun, stopProjectRun, type RunStatus } from '../api/projectRun'
+import { usePolling } from '../composables/usePolling'
+import { projectStatusMeta } from '../constants/status'
+import { confirmDialog } from '../utils/confirm'
+import { toast } from '../utils/toast'
 import type { Project, ProjectStatus } from '../types/project'
 
 const router = useRouter()
@@ -198,18 +69,8 @@ const plan = computed<PlanPhase[]>(() => {
   }
 })
 
-// ===== 项目状态 =====
-const STATUS_META: Record<ProjectStatus, { label: string; color: string }> = {
-  draft: { label: '草稿', color: '#8890a8' },
-  clarifying: { label: '澄清中', color: '#f0c060' },
-  planning: { label: '规划中', color: '#45b8ff' },
-  executing: { label: '执行中', color: '#5ecb8a' },
-  paused: { label: '已暂停', color: '#f09050' },
-  done: { label: '已完成', color: '#a76bff' },
-  failed: { label: '失败', color: '#f26060' },
-}
-const statusLabel = computed(() => STATUS_META[project.value?.status || 'draft'].label)
-const statusColor = computed(() => STATUS_META[project.value?.status || 'draft'].color)
+// ===== 项目状态（图章口径：颜色走 constants/status 单一来源） =====
+const statusMeta = computed(() => projectStatusMeta(project.value?.status || ('draft' as ProjectStatus)))
 const projectName = computed(() => project.value?.name || '项目 #' + route.params.id)
 
 /** 返回项目列表 */
@@ -223,7 +84,6 @@ function goBack() {
 const runStatus = ref<RunStatus | null>(null)
 const starting = ref(false)
 const stopping = ref(false)
-let pollTimer: ReturnType<typeof setInterval> | null = null
 
 async function refreshProject() {
   project.value = await fetchProjectById(Number(route.params.id))
@@ -249,14 +109,14 @@ const canStart = computed(() => {
 const canStop = computed(() => isRunning.value || project.value?.status === 'executing')
 const startLabel = computed(() => {
   const s = project.value?.status
-  return s === 'paused' || s === 'failed' || (s === 'executing' && runStatus.value?.runState === 'stopped') ? '继续开工' : '🔥 开工'
+  return s === 'paused' || s === 'failed' || (s === 'executing' && runStatus.value?.runState === 'stopped') ? '继续开工' : '开工'
 })
 
 async function startWork() {
   starting.value = true
   try {
     await startProjectRun(Number(route.params.id))
-    ElMessage.success('引擎已拉起，流水线开跑——去执行面板看任务流转')
+    toast.success('引擎已拉起，流水线开跑——去执行面板看任务流转')
     await Promise.all([refreshProject(), refreshRunStatus()])
     router.push({ name: 'execution', params: { id: route.params.id } })
   } finally {
@@ -265,42 +125,38 @@ async function startWork() {
 }
 
 async function stopWork() {
-  try {
-    await ElMessageBox.confirm(
-      '将终止引擎进程并暂停续拉（在途任务停在当前粒度，续开工从断点接上）。确定停止？',
-      '停止运行',
-      { type: 'warning', confirmButtonText: '停止', cancelButtonText: '再想想' },
-    )
-  } catch {
-    return
-  }
+  const ok = await confirmDialog({
+    title: '停止运行',
+    body: '将终止引擎进程并暂停续拉（在途任务停在当前粒度，续开工从断点接上）。确定停止？',
+    ok: '停止',
+    cancel: '再想想',
+    danger: true,
+  })
+  if (!ok) return
   stopping.value = true
   try {
     await stopProjectRun(Number(route.params.id))
-    ElMessage.success('已停止（对账器不会再自动续拉，点「继续开工」可恢复）')
+    toast.success('已停止（对账器不会再自动续拉，点「继续开工」可恢复）')
     await Promise.all([refreshProject(), refreshRunStatus()])
   } finally {
     stopping.value = false
   }
 }
 
-onMounted(async () => {
-  try {
-    await refreshProject()
-  } finally {
-    loading.value = false
-  }
-  await refreshRunStatus()
-  // 10s 轻轮询：项目状态 + 进程账本（开工→跑完→done 全程无人肉刷新）
-  pollTimer = setInterval(() => {
-    void refreshProject().catch(() => {})
-    void refreshRunStatus()
-  }, 10_000)
-})
+/** 10s 轻轮询：项目状态 + 进程账本（不接住 start 表就不走——9/17 自查逮住；卸载自动停表） */
+const { start: startPolling } = usePolling(() => {
+  void refreshProject().catch(() => {})
+  void refreshRunStatus()
+}, 10_000)
+startPolling()
 
-onBeforeUnmount(() => {
-  if (pollTimer) clearInterval(pollTimer)
-})
+// 首帧：先取项目（结束骨架），再探进程账本
+void refreshProject()
+  .catch(() => {})
+  .finally(() => {
+    loading.value = false
+  })
+void refreshRunStatus()
 
 /** 概览锚点滚动 */
 function scrollTo(id: string) {
@@ -325,234 +181,284 @@ async function downloadZip() {
 }
 </script>
 
+<template>
+  <div class="view">
+    <TopBar>
+      <template #context>
+        <button class="tb-back btn btn-sm btn-ghost" @click="goBack">← {{ backLabel }}</button>
+        <span class="tb-title">
+          <span class="dim">项目 ·</span>
+          <span>{{ projectName }}</span>
+        </span>
+        <span class="sheet-no">PRJ-{{ String(route.params.id).padStart(4, '0') }}-O</span>
+      </template>
+      <template #right>
+        <!-- 阶段 2 点火：开工/停止（对账器状态来自 /api/project-run/{id}） -->
+        <span v-if="runStatus?.running" class="run-hint">
+          <span class="lamp lamp-on lamp-live"></span>
+          引擎运行中（pid {{ runStatus.pid }}{{ runStatus.restartCount ? ` · 续拉 ${runStatus.restartCount}` : '' }}）
+        </span>
+        <button v-if="canStop" class="btn btn-sm btn-danger" :disabled="stopping" @click="stopWork">
+          {{ stopping ? '停止中…' : '停止' }}
+        </button>
+        <button v-if="canStart" class="btn btn-primary" :disabled="starting" @click="startWork">
+          <IconFlame v-if="!starting" :size="15" :stroke-width="1.75" />
+          {{ starting ? '拉起中…' : startLabel }}
+        </button>
+        <button class="btn btn-primary" @click="router.push({ name: 'execution', params: { id: route.params.id } })">
+          进入执行面板
+        </button>
+      </template>
+    </TopBar>
+
+    <main class="page">
+      <template v-if="loading && !project">
+        <!-- 骨架：与真实版式同形（标题栏 / 六入口 / 双栏） -->
+        <div class="skeleton sk-head"></div>
+        <div class="entry-grid">
+          <div v-for="i in 6" :key="i" class="skeleton sk-entry"></div>
+        </div>
+        <div class="grid-2">
+          <div class="skeleton sk-panel"></div>
+          <div class="skeleton sk-panel"></div>
+        </div>
+      </template>
+
+      <template v-else>
+        <!-- ===== 图纸标题栏 ===== -->
+        <section class="panel head-card">
+          <div class="head-main">
+            <h1 class="head-title">
+              {{ projectName }}
+              <StampSeal :label="statusMeta.label" :tone="statusMeta.tone" />
+            </h1>
+            <p class="desc">{{ project?.description || '暂无描述' }}</p>
+          </div>
+        </section>
+
+        <!-- ===== 图别目录（六个入口） ===== -->
+        <nav class="entry-grid" aria-label="项目工作台">
+          <button class="entry-card" @click="router.push({ name: 'execution', params: { id: route.params.id } })">
+            <span class="entry-ico"><IconPlayerPlay :size="19" :stroke-width="1.75" /></span>
+            <span class="entry-name">执行面板</span>
+            <span class="entry-desc">Agent 任务流水线</span>
+          </button>
+
+          <button class="entry-card" @click="router.push({ name: 'pm', params: { id: route.params.id } })">
+            <span class="entry-ico"><IconUsers :size="19" :stroke-width="1.75" /></span>
+            <span class="entry-name">需求对话</span>
+            <span class="entry-desc">项目经理 · 改功能</span>
+          </button>
+
+          <button class="entry-card" @click="router.push({ name: 'architect', params: { id: route.params.id }, query: { role: 'architect' } })">
+            <span class="entry-ico"><IconCompass :size="19" :stroke-width="1.75" /></span>
+            <span class="entry-name">技术方案</span>
+            <span class="entry-desc">架构师 · 技术选型</span>
+          </button>
+
+          <button class="entry-card" @click="router.push({ name: 'team', params: { id: route.params.id } })">
+            <span class="entry-ico"><IconStar :size="19" :stroke-width="1.75" /></span>
+            <span class="entry-name">Agent 团队</span>
+            <span class="entry-desc">成员 · 模型 · 提示词</span>
+          </button>
+
+          <button class="entry-card" @click="downloadZip">
+            <span class="entry-ico"><IconDownload :size="19" :stroke-width="1.75" /></span>
+            <span class="entry-name">下载项目</span>
+            <span class="entry-desc">zip 打包</span>
+          </button>
+
+          <button class="entry-card" @click="scrollTo('overview')">
+            <span class="entry-ico"><IconFileText :size="19" :stroke-width="1.75" /></span>
+            <span class="entry-name">项目概览</span>
+            <span class="entry-desc">功能 · 开发计划</span>
+          </button>
+        </nav>
+
+        <!-- 功能清单 + 开发计划（数据来自后端 businessModules / devPlan，没有就显示空态） -->
+        <div id="overview" class="grid-2">
+          <section class="panel card">
+            <header class="panel-head">
+              <h3 class="panel-title">已确认功能</h3>
+            </header>
+            <div class="card-body">
+              <ul v-if="features.length" class="rows feature-list">
+                <li v-for="(f, i) in features" :key="i" class="row feature-item">
+                  <span class="fico"><IconCheck :size="14" :stroke-width="1.75" /></span>{{ f }}
+                </li>
+              </ul>
+              <p v-else class="empty-tip faint">暂无已确认功能</p>
+            </div>
+          </section>
+
+          <!-- 开发计划 -->
+          <section class="panel card">
+            <header class="panel-head">
+              <h3 class="panel-title">开发计划</h3>
+            </header>
+            <div class="card-body">
+              <div v-if="plan.length" class="plan-list">
+                <div v-for="(p, i) in plan" :key="i" class="plan-item">
+                  <span class="plan-phase"><span class="plan-dot"></span>阶段 {{ i + 1 }} · {{ p.name }}</span>
+                  <div v-if="p.tasks?.length" class="plan-tasks">
+                    <span v-for="t in p.tasks" :key="t" class="plan-task-tag mono">{{ t }}</span>
+                  </div>
+                </div>
+              </div>
+              <p v-else class="empty-tip faint">暂无开发计划</p>
+            </div>
+          </section>
+        </div>
+
+        <!-- 操作区 -->
+        <div class="actions">
+          <button class="btn btn-primary" @click="downloadZip">
+            <IconDownload :size="15" :stroke-width="1.75" />
+            下载项目 zip
+          </button>
+        </div>
+      </template>
+    </main>
+  </div>
+</template>
+
 <style scoped>
-.overview {
+.view {
   position: relative;
   z-index: 1;
-  min-height: 100vh;
-}
-
-/* ===== 顶栏 ===== */
-.topbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 48px;
-  height: 56px;
-  border-bottom: 1px solid var(--border);
-  background: rgba(15, 19, 31, 0.85);
-  backdrop-filter: blur(12px);
-}
-.btn-back {
-  padding: 7px 14px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text2);
-  font-size: 13px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-/* ===== 开工/停止按钮区 ===== */
-.topbar-right {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.run-hint {
-  font-size: 12px;
-  color: var(--green);
-  white-space: nowrap;
-}
-.btn-stop {
-  height: 40px;
-  padding: 0 16px;
-  border-radius: var(--radius-sm);
-  border: 1px solid rgba(242, 96, 96, 0.45);
-  background: rgba(242, 96, 96, 0.08);
-  color: #f26060;
-  font-size: 13px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-.btn-stop:hover:not(:disabled) {
-  background: rgba(242, 96, 96, 0.18);
-}
-.btn-stop:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-.btn-back:hover {
-  border-color: var(--border2);
-  color: var(--text);
-}
-.topbar-title {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 14px;
-  font-weight: 600;
-}
-.dim {
-  color: var(--text3);
-  font-weight: 400;
-}
-.topbar-right {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-
-/* ===== 主区域 ===== */
-.main {
-  width: 100%;
-  max-width: 1080px;
-  margin: 0 auto;
-  padding: 32px 48px 60px;
+  min-height: 100dvh;
   display: flex;
   flex-direction: column;
-  gap: 18px;
 }
-
-/* 头部 */
-.head-card {
-  display: flex;
-  justify-content: space-between;
-  gap: 20px;
-  padding: 24px;
-  border-radius: var(--radius-lg);
-  border: 1px solid var(--border);
-  background: var(--bg2);
+.tb-back {
+  flex: none;
 }
-.head-left h1 {
-  font-size: 22px;
-  font-weight: 700;
-  margin-bottom: 8px;
+.tb-title {
+  font-weight: 600;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.desc {
-  font-size: 13.5px;
-  color: var(--text2);
-  line-height: 1.7;
-  margin-bottom: 14px;
-}
-/* 状态徽章 */
-.status-badge {
+.run-hint {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  font-weight: 500;
-  padding: 3px 10px;
-  border-radius: 10px;
-  background: var(--bg3);
-  border: 1px solid var(--border);
-  vertical-align: middle;
-  margin-left: 8px;
-}
-.status-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
+  gap: 7px;
+  font-size: var(--fs-meta);
+  color: var(--pass-ink);
+  white-space: nowrap;
 }
 
-/* 功能入口网格 */
+/* ===== 骨架 ===== */
+.sk-head {
+  height: 108px;
+  border-radius: var(--r);
+  margin-bottom: 14px;
+}
+.sk-entry {
+  height: 116px;
+  border-radius: var(--r);
+}
+.sk-panel {
+  height: 220px;
+  border-radius: var(--r);
+}
+
+/* ===== 标题栏 ===== */
+.head-card {
+  padding: 22px 24px;
+  margin-bottom: 14px;
+}
+.head-title {
+  font-size: 22px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.desc {
+  margin-top: 8px;
+  font-size: 13.5px;
+  color: var(--ink-2);
+  line-height: 1.7;
+  max-width: 72ch;
+}
+
+/* ===== 入口格 ===== */
 .entry-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(158px, 1fr));
   gap: 12px;
+  margin-bottom: 14px;
 }
 .entry-card {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  padding: 18px 12px;
-  border-radius: var(--radius);
-  border: 1px solid var(--border);
-  background: var(--bg2);
+  align-items: flex-start;
+  gap: 6px;
+  padding: 16px 16px 14px;
+  text-align: left;
   cursor: pointer;
-  transition: all 0.2s var(--ease);
+  background: var(--paper-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease);
 }
 .entry-card:hover {
-  border-color: var(--border2);
-  transform: translateY(-2px);
-  box-shadow: var(--shadow-sm);
+  border-color: var(--cyan);
+}
+.entry-card:focus-visible {
+  outline: 2px solid var(--focus-cyan);
+  outline-offset: 1px;
 }
 .entry-ico {
-  width: 42px;
-  height: 42px;
-  border-radius: 12px;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-xs);
   display: flex;
   align-items: center;
   justify-content: center;
+  color: var(--cyan);
+  background: var(--cyan-wash);
+  margin-bottom: 4px;
 }
 .entry-name {
-  font-size: 13.5px;
+  font-size: 14px;
   font-weight: 600;
-  color: var(--text);
+  color: var(--ink);
 }
 .entry-desc {
-  font-size: 11px;
-  color: var(--text3);
+  font-size: var(--fs-meta);
+  color: var(--ink-3);
 }
 
-.head-right {
-  display: flex;
-  gap: 24px;
-  align-items: center;
-  flex-shrink: 0;
-}
-.stat {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-}
-.stat-num {
-  font-size: 24px;
-  font-weight: 700;
-  color: var(--text);
-}
-.stat-label {
-  font-size: 11.5px;
-  color: var(--text3);
-}
-
-/* 卡片 */
+/* ===== 双栏 ===== */
 .grid-2 {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 18px;
+  gap: 14px;
+  scroll-margin-top: 76px; /* 锚点滚动别钻到顶栏底下 */
 }
-.card {
-  padding: 20px;
-}
-.card-title {
-  font-size: 14px;
-  font-weight: 600;
-  margin-bottom: 14px;
+.card-body {
+  padding: 14px 16px 16px;
 }
 .empty-tip {
-  font-size: 12.5px;
-  color: var(--text3);
-  padding: 12px 0;
-}
-.feature-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.feature-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
   font-size: 13px;
-  color: var(--text2);
+  padding: 12px 2px;
 }
-.feature-check {
-  color: var(--green);
-  font-weight: 700;
+.feature-list .row {
+  font-size: 13px;
+  color: var(--ink-2);
 }
+.fico {
+  color: var(--pass-ink);
+  display: inline-flex;
+  flex: none;
+}
+
+/* 开发计划 */
 .plan-list {
   display: flex;
   flex-direction: column;
@@ -563,227 +469,50 @@ async function downloadZip() {
   flex-direction: column;
   gap: 6px;
   padding: 9px 12px;
-  border-radius: 9px;
-  background: var(--bg3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-xs);
+  background: var(--paper);
   font-size: 13px;
 }
 .plan-phase {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: var(--text);
+  color: var(--ink);
+  font-weight: 500;
 }
-/* 阶段任务标签 */
+.plan-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--cyan);
+  flex: none;
+}
 .plan-tasks {
   display: flex;
   flex-wrap: wrap;
   gap: 5px;
-  padding-left: 16px;
+  padding-left: 15px;
 }
 .plan-task-tag {
   padding: 2px 8px;
-  border-radius: 7px;
-  background: var(--bg4);
-  border: 1px solid var(--border);
+  border: 1px solid var(--line);
+  border-radius: var(--r-xs);
+  background: var(--paper-deep);
   font-size: 11px;
-  color: var(--text2);
-}
-.plan-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--text3);
-}
-.plan-phase.done .plan-dot {
-  background: var(--green);
-}
-.plan-phase.current .plan-dot {
-  background: var(--blue);
-  animation: pulse 1.2s infinite;
-}
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.3; }
-}
-.plan-state {
-  font-size: 11.5px;
-  color: var(--text3);
+  color: var(--ink-2);
 }
 
-/* 模块 */
-.module-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.module-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 9px 12px;
-  border-radius: 9px;
-  background: var(--bg3);
-  font-size: 13px;
-}
-.module-ico {
-  width: 26px;
-  height: 26px;
-  border-radius: 8px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-  flex-shrink: 0;
-}
-.module-name {
-  flex: 1;
-  color: var(--text);
-}
-.module-files {
-  font-size: 11.5px;
-  color: var(--text3);
-}
-.module-state {
-  font-size: 11.5px;
-  font-weight: 500;
-}
-
-/* 返回按钮 */
-.team-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.team-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 9px 12px;
-  border-radius: 9px;
-  background: var(--bg3);
-  font-size: 13px;
-}
-.team-avatar {
-  width: 26px;
-  height: 26px;
-  border-radius: 8px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-.team-name {
-  flex: 1;
-  color: var(--text);
-  font-weight: 500;
-}
-.team-roles {
-  font-size: 11.5px;
-  color: var(--text3);
-}
-
-/* 接口 */
-.api-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.api-item {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 12px;
-  border-radius: 8px;
-  background: var(--bg3);
-  font-size: 12.5px;
-  font-family: 'Consolas', monospace;
-}
-.api-method {
-  width: 60px;
-  text-align: center;
-  padding: 2px 6px;
-  border-radius: 6px;
-  font-size: 11px;
-  font-weight: 700;
-  flex-shrink: 0;
-}
-.api-method.get { background: rgba(94, 203, 138, 0.12); color: var(--green); }
-.api-method.post { background: rgba(69, 184, 255, 0.12); color: var(--blue); }
-.api-method.put { background: rgba(240, 192, 96, 0.12); color: var(--yellow); }
-.api-method.delete { background: rgba(242, 96, 96, 0.12); color: var(--red); }
-.api-path {
-  flex: 1;
-  color: var(--text2);
-}
-.api-desc {
-  font-size: 11.5px;
-  color: var(--text3);
-  font-family: inherit;
-}
-
-/* 版本 */
-.version-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.version-item {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 9px 12px;
-  border-radius: 9px;
-  background: var(--bg3);
-  font-size: 13px;
-}
-.version-tag {
-  padding: 2px 8px;
-  border-radius: 8px;
-  background: rgba(167, 107, 255, 0.12);
-  color: var(--purple);
-  font-size: 11.5px;
-  font-weight: 600;
-  flex-shrink: 0;
-}
-.version-log {
-  flex: 1;
-  color: var(--text2);
-}
-.version-time {
-  font-size: 11.5px;
-  color: var(--text3);
-  flex-shrink: 0;
-}
-
-/* 操作 */
+/* ===== 操作 ===== */
 .actions {
   display: flex;
   gap: 12px;
+  margin-top: 18px;
 }
-.act-btn {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  padding: 11px 20px;
-  border-radius: 10px;
-  border: 1px solid var(--border);
-  background: var(--bg3);
-  color: var(--text2);
-  font-size: 13.5px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-.act-btn:hover {
-  border-color: var(--border2);
-  color: var(--text);
-}
-.act-btn.primary {
-  background: var(--grad1);
-  border-color: transparent;
-  color: #fff;
-  font-weight: 600;
-}
-.act-btn.primary:hover {
-  opacity: 0.9;
+
+@media (max-width: 860px) {
+  .grid-2 {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

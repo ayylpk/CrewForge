@@ -1,425 +1,46 @@
-<template>
-  <div class="exec">
-    <!-- 顶栏 -->
-    <header class="topbar">
-      <button class="btn-back" @click="router.push(`/projects/${route.params.id}`)">← 返回</button>
-      <div class="topbar-title">
-        <span class="dim">{{ projectName }} ·</span>
-        <span>执行面板</span>
-        <span class="phase-badge">{{ currentPhase || '准备中' }}</span>
-      </div>
-      <div class="topbar-right">
-        <div class="quality-strip" title="基于当前已进入终态的任务统计">
-          <span class="quality-label">质量</span>
-          <strong>{{ qualitySummary.firstPassRate }}%</strong>
-          <span class="quality-muted">首次通过 · {{ qualitySummary.evaluated }} 个终态任务</span>
-          <span v-if="qualitySummary.totalRetries" class="quality-retry">↻ {{ qualitySummary.totalRetries }}</span>
-        </div>
-        <!-- 暂停/继续随假引擎退役（施工卡 1-4）：真执行无剧本，引擎侧控制=确认门（阶段 3） -->
-        <button v-if="done" class="btn-save" @click="viewOverview">查看项目</button>
-      </div>
-    </header>
-
-    <div class="body">
-      <!-- ===== 活动栏（VS Code 风格） ===== -->
-      <div class="activity-bar">
-        <button
-          class="activity-item"
-          :class="{ active: leftOpen && activeView === 'files' }"
-          title="资源管理器（文件树）"
-          @click="leftOpen && activeView === 'files' ? (leftOpen = false) : (activeView = 'files', leftOpen = true)"
-        >
-          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 7v11a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-6l-2-2H5a2 2 0 0 0-2 2z" />
-          </svg>
-        </button>
-        <button
-          class="activity-item"
-          :class="{ active: leftOpen && activeView === 'chat' }"
-          title="与项目经理对话"
-          @click="leftOpen && activeView === 'chat' ? (leftOpen = false) : (activeView = 'chat', leftOpen = true)"
-        >
-          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z" />
-          </svg>
-          <span v-if="chatUnread" class="activity-badge"></span>
-        </button>
-        <button
-          class="activity-item"
-          :class="{ active: rightOpen }"
-          title="任务看板"
-          @click="rightOpen = !rightOpen"
-        >
-          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="3" y="3" width="7" height="7" />
-            <rect x="14" y="3" width="7" height="7" />
-            <rect x="3" y="14" width="7" height="7" />
-            <rect x="14" y="14" width="7" height="7" />
-          </svg>
-        </button>
-        <button
-          class="activity-item"
-          :class="{ active: logOpen }"
-          title="执行日志"
-          @click="logOpen = !logOpen"
-        >
-          <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="4 17 10 11 4 5" />
-            <line x1="12" y1="19" x2="20" y2="19" />
-          </svg>
-        </button>
-      </div>
-
-      <!-- ===== 左侧边栏（文件树 / 对话） ===== -->
-      <aside v-if="leftOpen" class="sidebar" :style="{ width: sidebarWidth + 'px' }">
-        <!-- 文件树视图 -->
-        <template v-if="activeView === 'files'">
-          <div class="side-head">
-            <span>项目文件</span>
-            <span class="side-count">{{ fileCount }} 个</span>
-          </div>
-          <div class="side-scroll">
-            <FileTree :nodes="fileTree" :selected="activeFile?.path" @select="openFile" />
-          </div>
-        </template>
-
-        <!-- 对话视图（与项目经理） -->
-        <template v-else>
-          <div class="side-head">
-            <span>项目经理</span>
-            <span class="side-count">执行中随时提问</span>
-          </div>
-          <!-- 确认模式选择器 -->
-          <div class="mode-selector">
-            <div class="mode-label">
-              <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <circle cx="12" cy="12" r="10" />
-                <path d="M12 6v6l4 2" />
-              </svg>
-              确认模式
-            </div>
-            <div class="mode-options">
-              <button
-                v-for="m in MODES" :key="m.value"
-                class="mode-btn"
-                :class="{ active: confirmMode === m.value }"
-                :title="m.desc"
-                @click="setMode(m.value)"
-              >
-                <span class="mode-dot" :style="{ background: m.color }"></span>
-                {{ m.label }}
-              </button>
-            </div>
-            <div class="mode-hint">{{ MODES[confirmMode]?.desc }}</div>
-          </div>
-          <div class="chat-body">
-            <div v-for="(m, i) in chatMessages" :key="i" class="msg" :class="m.role">
-              <div v-if="m.role === 'assistant'" class="msg-avatar">
-                <img src="../assets/agent-manager.png" alt="Hina" />
-              </div>
-              <div class="msg-bubble">{{ m.content }}</div>
-            </div>
-            <div v-if="chatThinking" class="msg assistant">
-              <div class="msg-avatar">
-                <img src="../assets/agent-manager.png" alt="Hina" />
-              </div>
-              <div class="msg-bubble typing">
-                <span class="dot"></span>
-                <span class="dot"></span>
-                <span class="dot"></span>
-              </div>
-            </div>
-          </div>
-          <div class="chat-input">
-            <textarea
-              v-model="chatDraft"
-              rows="2"
-              placeholder="问项目经理：进度、代码、下一步..."
-              @keydown.enter.exact.prevent="sendChat"
-            ></textarea>
-            <button class="btn-send" :disabled="!chatDraft.trim() || chatThinking" @click="sendChat">
-              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                <path d="M22 2 11 13" />
-                <path d="M22 2 15 22l-4-9-9-4z" />
-              </svg>
-            </button>
-          </div>
-        </template>
-      </aside>
-
-      <!-- 左侧边栏拖拽手柄 -->
-      <div
-        v-if="leftOpen"
-        class="resize-handle v"
-        title="拖拽调整宽度"
-        @mousedown="startDrag($event, 'x', 'left')"
-      ></div>
-
-      <!-- ===== 编辑器（多 Tab） ===== -->
-      <div class="editor-area">
-        <div v-if="tabs.length" class="tabs">
-          <div
-            v-for="t in tabs"
-            :key="t.path"
-            class="tab"
-            :class="{ active: activeFile?.path === t.path }"
-            @click="activeFile = t"
-          >
-            <span class="tab-icon" :style="{ color: tabColor(t.path) }">
-              <svg v-html="tabIcon(t.path)" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></svg>
-            </span>
-            <span class="tab-name">{{ tabName(t.path) }}</span>
-            <span v-if="t.userModified" class="tab-modified">●</span>
-            <button class="tab-close" @click.stop="closeTab(t.path)">✕</button>
-          </div>
-        </div>
-        <div class="editor-wrap">
-          <!-- key 只含 path：曾把 userModified 编进 key（9/15 审计坑 F4），
-               用户敲第一字符→0变1→key 变→编辑器销毁重建，首字符被吞、光标/撤销栈重置。
-               注意：注释必须放标签外——塞进属性区会打断 Vue 模板解析（9/16 vue-tsc 实锤） -->
-          <MonacoEditor
-            v-if="activeFile"
-            :key="activeFile.path"
-            :language="langFor(activeFile.path)"
-            :value="activeFile.content || ''"
-            @change="onUserEdit"
-            @save="onSave"
-          />
-          <div v-else class="editor-empty">
-            <svg viewBox="0 0 24 24" width="42" height="42" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="16 18 22 12 16 6" />
-              <polyline points="8 6 2 12 8 18" />
-            </svg>
-            <p>从左侧文件树打开文件</p>
-            <p class="dim">Agent 生成的文件会实时出现在文件树中</p>
-          </div>
-        </div>
-      </div>
-
-      <!-- 右侧边栏拖拽手柄 -->
-      <div
-        v-if="rightOpen"
-        class="resize-handle v"
-        title="拖拽调整宽度"
-        @mousedown="startDrag($event, 'x', 'right')"
-      ></div>
-
-      <!-- ===== 右侧边栏（任务看板） ===== -->
-      <aside v-if="rightOpen" class="rightbar" :style="{ width: rightbarWidth + 'px' }">
-        <div class="side-head">
-          <span>任务看板</span>
-          <span class="side-count">{{ tasks.length }} 个任务</span>
-        </div>
-        <div class="quality-card">
-          <div class="quality-card-head"><span>产出质量</span><strong>{{ qualitySummary.firstPassRate }}%</strong></div>
-          <div class="quality-card-meta">通过 {{ qualitySummary.passed }} · 失败 {{ qualitySummary.failed }} · 重试 {{ qualitySummary.totalRetries }}</div>
-          <div v-if="qualitySummary.failureCategories.length" class="quality-failures">
-            <span v-for="item in qualitySummary.failureCategories.slice(0, 3)" :key="item.label">{{ item.label }} {{ item.count }}</span>
-          </div>
-        </div>
-        <div class="kanban">
-          <div class="kanban-col">
-            <div class="kanban-col-head" @click="toggleCol('todo')">
-              <span class="kanban-dot todo"></span>
-              <span>待办</span>
-              <span class="kanban-count">{{ taskCount('todo') }}</span>
-              <span class="kanban-arrow" :class="{ collapsed: collapsedCols.has('todo') }">▾</span>
-            </div>
-            <div v-show="!collapsedCols.has('todo')" class="kanban-list">
-              <div v-for="t in tasksBy('todo')" :key="t.id" class="kanban-card" @click="openTaskDetail(t)">
-                <span class="kanban-title">{{ t.title }}</span>
-                <span class="kanban-assignee">{{ t.assignee }}</span>
-              </div>
-            </div>
-          </div>
-          <div class="kanban-col">
-            <div class="kanban-col-head" @click="toggleCol('doing')">
-              <span class="kanban-dot doing"></span>
-              <span>执行中</span>
-              <span class="kanban-count">{{ taskCount('doing') }}</span>
-              <span class="kanban-arrow" :class="{ collapsed: collapsedCols.has('doing') }">▾</span>
-            </div>
-            <div v-show="!collapsedCols.has('doing')" class="kanban-list">
-              <div v-for="t in tasksBy('doing')" :key="t.id" class="kanban-card doing" @click="openTaskDetail(t)">
-                <span class="kanban-title">{{ t.title }}</span>
-                <span class="kanban-assignee">{{ t.assignee }}</span>
-              </div>
-            </div>
-          </div>
-          <div class="kanban-col">
-            <div class="kanban-col-head" @click="toggleCol('done')">
-              <span class="kanban-dot done"></span>
-              <span>已完成</span>
-              <span class="kanban-count">{{ taskCount('done') }}</span>
-              <span class="kanban-arrow" :class="{ collapsed: collapsedCols.has('done') }">▾</span>
-            </div>
-            <div v-show="!collapsedCols.has('done')" class="kanban-list">
-              <div v-for="t in tasksBy('done')" :key="t.id" class="kanban-card done" @click="openTaskDetail(t)">
-                <span class="kanban-title">{{ t.title }}</span>
-                <span class="kanban-assignee">{{ t.assignee }}</span>
-              </div>
-            </div>
-          </div>
-          <div class="kanban-col">
-            <div class="kanban-col-head" @click="toggleCol('failed')">
-              <span class="kanban-dot failed"></span>
-              <span>失败</span>
-              <span class="kanban-count">{{ taskCount('failed') }}</span>
-              <span class="kanban-arrow" :class="{ collapsed: collapsedCols.has('failed') }">▾</span>
-            </div>
-            <div v-show="!collapsedCols.has('failed')" class="kanban-list">
-              <div v-for="t in tasksBy('failed')" :key="t.id" class="kanban-card failed" @click="openTaskDetail(t)">
-                <span class="kanban-title">{{ t.title }}</span>
-                <span class="kanban-assignee">{{ t.assignee }}</span>
-                <button class="kanban-retry" title="重跑" @click.stop="retryTask(t)">↻</button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </aside>
-
-      <!-- ===== 任务详情弹窗 ===== -->
-      <div v-if="taskDetail" class="modal-mask" @click.self="taskDetail = null">
-        <div class="modal task-detail-modal">
-          <div class="modal-head">
-            <h2>{{ taskDetail.title }}</h2>
-            <button class="modal-close" @click="taskDetail = null">✕</button>
-          </div>
-          <div class="modal-body">
-            <div class="detail-grid">
-              <div class="detail-field">
-                <span class="detail-label">任务编号</span>
-                <span class="detail-value">{{ taskDetail.taskIdExt || taskDetail.id }}</span>
-              </div>
-              <div class="detail-field">
-                <span class="detail-label">状态</span>
-                <span class="detail-value" :style="{ color: STATUS_COLOR[taskDetail.status] }">{{ STATUS_LABEL[taskDetail.status] }}</span>
-              </div>
-              <div class="detail-field">
-                <span class="detail-label">负责人</span>
-                <span class="detail-value">{{ taskDetail.assignee || '-' }}</span>
-              </div>
-              <div class="detail-field">
-                <span class="detail-label">分层</span>
-                <span class="detail-value">{{ taskDetail.layer === 'backend' ? '后端' : taskDetail.layer === 'frontend' ? '前端' : '-' }}</span>
-              </div>
-              <div class="detail-field" v-if="taskDetail.phaseId">
-                <span class="detail-label">阶段 ID</span>
-                <span class="detail-value">{{ taskDetail.phaseId }}</span>
-              </div>
-              <div class="detail-field" v-if="taskDetail.retryCount > 0">
-                <span class="detail-label">重试次数</span>
-                <span class="detail-value" style="color: var(--yellow)">{{ taskDetail.retryCount }}/3</span>
-              </div>
-            </div>
-
-            <div class="detail-section" v-if="taskDetail.description">
-              <span class="detail-label">描述</span>
-              <p class="detail-text">{{ taskDetail.description }}</p>
-            </div>
-
-            <div class="detail-section" v-if="taskDetail.acceptance">
-              <span class="detail-label">验收标准</span>
-              <p class="detail-text">{{ taskDetail.acceptance }}</p>
-            </div>
-
-            <div class="detail-section" v-if="taskDetail.result">
-              <span class="detail-label">执行结果</span>
-              <p class="detail-text result">{{ taskDetail.result }}</p>
-            </div>
-
-            <div class="detail-section" v-if="taskDetail.errorMsg">
-              <span class="detail-label" style="color: var(--red)">失败原因</span>
-              <p class="detail-text error">{{ taskDetail.errorMsg }}</p>
-            </div>
-          </div>
-          <div class="modal-actions">
-            <button class="btn-cancel" @click="taskDetail = null">关闭</button>
-            <button v-if="taskDetail.status === 'failed'" class="btn-retry" @click="retryTask(taskDetail); taskDetail = null">↻ 重跑</button>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <!-- ===== 底部日志面板 ===== -->
-    <div v-if="logOpen" class="log-resize-wrap">
-      <div
-        class="resize-handle h"
-        title="拖拽调整高度"
-        @mousedown="startDrag($event, 'y', 'log')"
-      ></div>
-      <div class="log-panel" :style="{ height: logHeight + 'px' }">
-      <div class="log-head">
-        <span class="log-title">
-          <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="4 17 10 11 4 5" />
-            <line x1="12" y1="19" x2="20" y2="19" />
-          </svg>
-          执行日志
-        </span>
-        <button class="log-clear" @click="logs = []">清空</button>
-      </div>
-      <div ref="logBody" class="log-scroll">
-        <div v-for="(l, i) in logs" :key="i" class="log-item">
-          <span class="log-time">{{ l.time }}</span>
-          <span class="log-agent" :style="{ color: agentColor(l.agentId) }">[{{ l.agent }}]</span>
-          <span class="log-text">{{ l.text }}</span>
-        </div>
-      </div>
-      </div>
-    </div>
-
-    <!-- ===== 确认门就地问答卡（阶段 3：引擎挂起等人拍板，答复后自动续跑） ===== -->
-    <div v-if="pendingConfirms.length" class="confirm-mask">
-      <div class="confirm-card">
-        <div class="confirm-head">
-          <span class="confirm-node">{{ nodeLabel(pendingConfirms[0].node) }}</span>
-          <span class="confirm-expire">{{ confirmCountdown(pendingConfirms[0].expireAt) }}</span>
-        </div>
-        <p class="confirm-question">{{ pendingConfirms[0].question }}</p>
-        <!-- 有选项=选择题（点一下即答），无选项=自由文本题（PM 追问走这里） -->
-        <div v-if="parseOptions(pendingConfirms[0]).length" class="confirm-opts">
-          <button
-            v-for="opt in parseOptions(pendingConfirms[0])"
-            :key="opt"
-            class="confirm-opt"
-            :disabled="confirmBusy"
-            @click="submitConfirm(opt)"
-          >{{ opt }}</button>
-        </div>
-        <div v-else class="confirm-free">
-          <input
-            v-model="confirmText"
-            class="input confirm-input"
-            type="text"
-            placeholder="输入回复…"
-            :disabled="confirmBusy"
-            @keyup.enter="confirmText.trim() && submitConfirm(confirmText.trim())"
-          />
-          <button class="confirm-opt send" :disabled="confirmBusy || !confirmText.trim()" @click="submitConfirm(confirmText.trim())">
-            发送
-          </button>
-        </div>
-      </div>
-    </div>
-
-  </div>
-</template>
-
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount, nextTick, reactive } from 'vue'
+/* ============================================================
+   执行面板（/projects/:id/execution）= 车间现场
+   ------------------------------------------------------------
+   世界观：这里 = 晒图室的车间。左列"图夹"（活动栏走深蓝晒图纸底），
+   中为"看图台"（文件树 + 多 Tab 描图台），右为"工单板"（看板），
+   底部"运行记录"（日志=轮询差分）。确认门 = 会签待审卡。
+   逻辑与旧版逐字保留：看板唯一数据源=sys_task（10s 轮询），
+   模式落后端 confirm_mode，文件懒加载详情，草稿持久化 cf_files_{id}。
+   视觉移植的两处收敛：手绘 SVG 图标全部换 tabler 一族；
+   tab 的文件类型小画片改成"扩展名字码片"（色值进章色 token）。
+   ============================================================ */
+import { ref, computed, onMounted, nextTick, reactive } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
+import {
+  IconChevronDown,
+  IconClock,
+  IconCode,
+  IconFolder,
+  IconLayoutKanban,
+  IconMessage,
+  IconRefresh,
+  IconSend,
+  IconTerminal,
+  IconX,
+} from '@tabler/icons-vue'
 import FileTree from '../components/FileTree.vue'
 import MonacoEditor from '../components/MonacoEditor.vue'
+import TopBar from '../components/ui/TopBar.vue'
+import AppModal from '../components/ui/AppModal.vue'
+import StampSeal from '../components/ui/StampSeal.vue'
 import { AGENT_NAMES } from '../constants/agents'
+import { MODE_META, MODE_NUM_TO_STR, TASK_STATUS, nodeLabel, type StampTone } from '../constants/status'
 import { fetchProjectFiles, fetchProjectFileDetail } from '../api/projectFile'
 import type { FileNode, projectFileVO } from '../types/file'
 import { useExecutionStore } from '../stores/execution'
 import { fetchTasks, retryTask as apiRetryTask, summarizeTaskQuality } from '../api/task'
 import type { TaskItem as ApiTaskItem, TaskStatus } from '../api/task'
 import { fetchProjectById, updateProject } from '../api/project'
-import { fetchPendingConfirms, answerConfirm, parseOptions, type ConfirmQuestion } from '../api/confirm'
-import { ElMessage } from 'element-plus'
+import { fetchPendingConfirms, parseOptions, type ConfirmQuestion } from '../api/confirm'
+import { answerConfirm as answerConfirmApi } from '../api/confirm'
+import { usePolling } from '../composables/usePolling'
+import { toast } from '../utils/toast'
 
 const router = useRouter()
 const route = useRoute()
@@ -427,19 +48,18 @@ const projectName = ref('项目 #' + route.params.id)
 const execStore = useExecutionStore()
 const confirmMode = ref(execStore.confirmMode)
 
-/** 确认模式常量 */
-const MODES = [
-  { value: 0, label: '全绿灯', color: '#5ecb8a', desc: 'Agent 自动执行，无需人工确认' },
-  { value: 1, label: '混合', color: '#f2b840', desc: '关键步骤（如换阶段）需人工确认' },
-  { value: 2, label: '手动', color: '#f070a0', desc: '每阶段计划都需人工确认' },
-] as const
+/** 确认模式常量（收口到 constants/status：label/desc 逐字即旧 MODES） */
+const MODES = [0, 1, 2].map((n) => ({
+  value: n as 0 | 1 | 2,
+  ...MODE_META[MODE_NUM_TO_STR[n]],
+}))
 
 function setMode(mode: 0 | 1 | 2) {
   confirmMode.value = mode
   execStore.setConfirmMode(mode)
   // 阶段 3：模式落后端 sys_project.confirm_mode（引擎开工时读它决定 Cli/Http 分流）——
   // 只存 localStorage 的话选择器就是装饰，Web 上切了引擎也看不见
-  const strMode = (['green', 'mixed', 'manual'] as const)[mode]
+  const strMode = MODE_NUM_TO_STR[mode]
   updateProject(Number(route.params.id), { confirmMode: strMode } as never).catch(() => {
     /* 保存失败提示由拦截器统一弹；本地态保留，用户可重试 */
   })
@@ -462,18 +82,13 @@ async function submitConfirm(answer: string) {
   if (confirmBusy.value || !pendingConfirms.value.length) return
   confirmBusy.value = true
   try {
-    await answerConfirm(pendingConfirms.value[0].id, answer)
-    ElMessage.success('已答复，引擎几秒内续跑')
+    await answerConfirmApi(pendingConfirms.value[0].id, answer)
+    toast.success('已答复，引擎几秒内续跑')
     confirmText.value = ''
     await pollConfirms()
   } finally {
     confirmBusy.value = false
   }
-}
-
-function nodeLabel(node: string): string {
-  const map: Record<string, string> = { architect: '架构师', manager: '项目经理', test: '测试' }
-  return map[node] || node
 }
 
 /** 超时放行倒计时提示（惰性：每轮轮询刷新，不做秒级动画） */
@@ -483,12 +98,12 @@ function confirmCountdown(expireAt: string | null): string {
   return min > 0 ? `${min} 分钟无人应答将自动放行` : '即将自动放行'
 }
 
-// ===== 布局状态（VS Code 风格） =====
+// ===== 布局状态（活动栏三席） =====
 const activeView = ref<'files' | 'chat'>('files') // 左侧边栏内容
-const leftOpen = ref(true) // 左侧边栏
+// 窄屏（≤860px 侧栏变浮层，挡着看图台）默认收抽屉——车间图纸桌先给屏幕，点图夹脊可开
+const leftOpen = ref(!window.matchMedia('(max-width: 860px)').matches) // 左侧边栏
 const rightOpen = ref(false) // 右侧边栏（任务看板）
 const logOpen = ref(false) // 底部日志面板
-
 
 // ===== 面板尺寸（支持拖拽拉伸） =====
 const sidebarWidth = ref(280)
@@ -535,7 +150,7 @@ function startDrag(e: MouseEvent, axis: 'x' | 'y', target: 'left' | 'right' | 'l
 const tasks = ref<ApiTaskItem[]>([])
 const qualitySummary = computed(() => summarizeTaskQuality(tasks.value))
 
-/** 收起的列（默认已完成收起来） */
+/** 收起的列（默认完工收起来） */
 const collapsedCols = reactive(new Set<TaskStatus>(['done']))
 
 /** 任务详情弹窗 */
@@ -544,17 +159,11 @@ function openTaskDetail(t: ApiTaskItem) {
   taskDetail.value = t
 }
 
-const STATUS_COLOR: Record<TaskStatus, string> = {
-  todo: '#8890a8',
-  doing: '#45b8ff',
-  done: '#5ecb8a',
-  failed: '#f26060',
+function taskTone(status: TaskStatus): StampTone {
+  return TASK_STATUS[status]?.tone || 'pencil'
 }
-const STATUS_LABEL: Record<TaskStatus, string> = {
-  todo: '待办',
-  doing: '执行中',
-  done: '已完成',
-  failed: '失败',
+function taskStatusLabel(status: TaskStatus): string {
+  return TASK_STATUS[status]?.label || status
 }
 
 function toggleCol(status: TaskStatus) {
@@ -600,7 +209,7 @@ async function pollTasks() {
       const who = t.status === 'failed' ? 5 : t.status === 'done' ? 6 : t.layer === 'frontend' ? 4 : 3
       const line = t.status === 'failed'
         ? `任务 ${t.taskIdExt || t.id}「${t.title}」失败：${(t.errorMsg || '未记录原因').split('\n')[0].slice(0, 60)}`
-        : `任务 ${t.taskIdExt || t.id}「${t.title}」${STATUS_LABEL[t.status]}`
+        : `任务 ${t.taskIdExt || t.id}「${t.title}」${taskStatusLabel(t.status)}`
       pushLog({ time: '', agentId: who, agent: '', text: line })
       lastStatus.set(t.id, t.status)
     }
@@ -618,9 +227,10 @@ async function pollTasks() {
   done.value = total > 0 && list.every((t) => t.status === 'done' || t.status === 'failed')
 }
 
-/** Agent 日志颜色 */
-function agentColor(id: number): string {
-  return ['#f070a0', '#a76bff', '#5ecb8a', '#f0c060', '#5ec8c0'][id - 1] || '#8890a8'
+/** 日志里 Agent 名号的颜色：一席一章色（旧版是五串手写 hex，现在走章色 token 类名） */
+function agentClass(id: number): string {
+  const cls = ['', 'ag-1', 'ag-2', 'ag-3', 'ag-4', 'ag-5', 'ag-6']
+  return cls[id] || 'ag-sys'
 }
 
 // ===== 文件树 + 多 Tab 编辑器（持久化到 localStorage） =====
@@ -732,25 +342,25 @@ function tabName(path: string): string {
   return path.split('/').pop() || path
 }
 
-const FILE_TAB_META: Record<string, { color: string; icon: string }> = {
-  java: { color: '#f09050', icon: '<path d="M4 6h16v12H4z"/><path d="M9 10h6M9 14h4"/>' },
-  vue: { color: '#5ecb8a', icon: '<path d="M3 5l9 14 9-14z"/><polyline points="8.5 5 12 10.5 15.5 5"/>' },
-  ts: { color: '#45b8ff', icon: '<path d="M4 6h16v12H4z"/><path d="M14 10v6M14 13h3"/><path d="M9.5 10v5M7.5 10h4"/>' },
-  yml: { color: '#f0c060', icon: '<path d="M4 6h16v12H4z"/><circle cx="8" cy="10" r="1"/><circle cx="8" cy="14" r="1"/><line x1="12" y1="10" x2="17" y2="10"/><line x1="12" y1="14" x2="17" y2="14"/>' },
-  md: { color: '#8890a8', icon: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>' },
+/** 扩展名 → 章色（旧 FILE_TAB_META 的手绘小图标换成字码片：色随章色走） */
+const EXT_TONE: Record<string, string> = {
+  java: 'rust',
+  vue: 'pass',
+  ts: 'info',
+  js: 'info',
+  yml: 'wait',
+  yaml: 'wait',
+  md: 'pencil',
 }
-const DEFAULT_TAB = { color: '#8890a8', icon: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>' }
-
-function tabIcon(path: string) {
-  const ext = path.split('.').pop()?.toLowerCase() || ''
-  return FILE_TAB_META[ext] || DEFAULT_TAB
+function tabExt(path: string): string {
+  return path.split('.').pop()?.toLowerCase() || ''
 }
-function tabColor(path: string) {
-  return tabIcon(path).color
+function extToneClass(path: string): string {
+  return 'ext-' + (EXT_TONE[tabExt(path)] || 'pencil')
 }
 
 function langFor(path: string): string {
-  const ext = path.split('.').pop()?.toLowerCase() || ''
+  const ext = tabExt(path)
   const map: Record<string, string> = {
     java: 'java', vue: 'html', ts: 'typescript', js: 'javascript',
     yml: 'yaml', yaml: 'yaml', json: 'json', xml: 'xml', sql: 'sql', md: 'markdown', css: 'css',
@@ -822,8 +432,6 @@ const currentPhase = ref('')
 const overallProgress = ref(0)
 const done = ref(false)
 
-const pollTimer = ref<ReturnType<typeof setInterval> | null>(null)
-
 function pushLog(e: { time: string; agentId: number; agent: string; text: string }) {
   logs.value.push({
     time: new Date().toLocaleTimeString('zh-CN', { hour12: false }),
@@ -838,30 +446,32 @@ function pushLog(e: { time: string; agentId: number; agent: string; text: string
   })
 }
 
+const { start: startPolling } = usePolling(() => {
+  pollFiles()
+  pollTasks()
+  pollConfirms()
+}, 10000)
+
 onMounted(async () => {
   // 看板唯一数据源=sys_task 轮询（假卡片/假时间线已随施工卡 1-4 撤除）
   await pollTasks()
-  void pollConfirms()   // 确认门首拉：进页面就答，不等 10s（阶段 3）
+  void pollConfirms() // 确认门首拉：进页面就答，不等 10s（阶段 3）
   // 回填真项目名 + 库中确认模式（阶段 3：模式以 sys_project.confirm_mode 为真相，本地只是即时态）
-  fetchProjectById(Number(route.params.id)).then((p) => {
-    projectName.value = p.name
-    if (p.confirmMode === 0 || p.confirmMode === 1 || p.confirmMode === 2) {
-      confirmMode.value = p.confirmMode
-      execStore.setConfirmMode(p.confirmMode)
-    }
-  }).catch(() => { /* 详情拉不到不拦面板主流程 */ })
+  fetchProjectById(Number(route.params.id))
+    .then((p) => {
+      projectName.value = p.name
+      if (p.confirmMode === 0 || p.confirmMode === 1 || p.confirmMode === 2) {
+        confirmMode.value = p.confirmMode
+        execStore.setConfirmMode(p.confirmMode)
+      }
+    })
+    .catch(() => {
+      /* 详情拉不到不拦面板主流程 */
+    })
   // 文件优先从数据库加载（agent 落库 sys_project_file），本地草稿兜底；任务状态只信 pollTasks
   if (!(await loadFromDb())) restoreFiles()
   // 10s 轮询：文件 + 任务 + 待答问题（引擎在跑就有新状态）
-  pollTimer.value = setInterval(() => {
-    pollFiles()
-    pollTasks()
-    pollConfirms()
-  }, 10000)
-})
-
-onBeforeUnmount(() => {
-  if (pollTimer.value) clearInterval(pollTimer.value)
+  startPolling()
 })
 
 function viewOverview() {
@@ -915,7 +525,7 @@ async function pollFiles() {
       if (vo.fileContent && vo.fileContent !== activeFile.value.content) {
         activeFile.value.content = vo.fileContent
         // 同步更新 tabs 数组中对应 tab 的内容
-        const tab = tabs.value.find(t => t.path === activeFile.value?.path)
+        const tab = tabs.value.find((t) => t.path === activeFile.value?.path)
         if (tab) tab.content = vo.fileContent
       }
     }
@@ -925,317 +535,583 @@ async function pollFiles() {
 }
 </script>
 
+<template>
+  <div class="exec">
+    <!-- 顶栏 -->
+    <TopBar class="exec-top">
+      <template #context>
+        <button class="tb-back btn btn-sm btn-ghost" @click="router.push(`/projects/${route.params.id}`)">← 返回</button>
+        <span class="tb-title">
+          <span class="dim">{{ projectName }} ·</span>
+          <span>执行面板</span>
+        </span>
+        <StampSeal :label="currentPhase || '准备中'" tone="info" />
+      </template>
+      <template #right>
+        <div class="quality-strip" title="基于当前已进入终态的任务统计">
+          <span class="q-label faint">质量</span>
+          <strong>{{ qualitySummary.firstPassRate }}%</strong>
+          <span class="q-muted">首次通过 · {{ qualitySummary.evaluated }} 个终态任务</span>
+          <span v-if="qualitySummary.totalRetries" class="q-retry">
+            <IconRefresh :size="13" :stroke-width="1.75" /> {{ qualitySummary.totalRetries }}
+          </span>
+        </div>
+        <!-- 暂停/继续随假引擎退役（施工卡 1-4）：真执行无剧本，引擎侧控制=确认门（阶段 3） -->
+        <button v-if="done" class="btn btn-primary btn-sm" @click="viewOverview">查看项目</button>
+      </template>
+    </TopBar>
+
+    <div class="body">
+      <!-- ===== 活动栏（图夹脊） ===== -->
+      <nav class="activity-bar" aria-label="面板切换">
+        <button
+          class="activity-item"
+          :class="{ active: leftOpen && activeView === 'files' }"
+          title="资源管理器（文件树）"
+          @click="leftOpen && activeView === 'files' ? (leftOpen = false) : ((activeView = 'files'), (leftOpen = true))"
+        >
+          <IconFolder :size="21" :stroke-width="1.75" />
+        </button>
+        <button
+          class="activity-item"
+          :class="{ active: leftOpen && activeView === 'chat' }"
+          title="与项目经理对话"
+          @click="leftOpen && activeView === 'chat' ? (leftOpen = false) : ((activeView = 'chat'), (leftOpen = true))"
+        >
+          <IconMessage :size="21" :stroke-width="1.75" />
+          <span v-if="chatUnread" class="activity-badge"></span>
+        </button>
+        <button
+          class="activity-item"
+          :class="{ active: rightOpen }"
+          title="任务看板"
+          @click="rightOpen = !rightOpen"
+        >
+          <IconLayoutKanban :size="21" :stroke-width="1.75" />
+        </button>
+        <button
+          class="activity-item"
+          :class="{ active: logOpen }"
+          title="执行日志"
+          @click="logOpen = !logOpen"
+        >
+          <IconTerminal :size="21" :stroke-width="1.75" />
+        </button>
+        <!-- 收口进度：车间总闸（done/total 角标） -->
+        <span class="ab-progress mono" title="完工任务 / 全部">{{ overallProgress }}%</span>
+      </nav>
+
+      <!-- ===== 左侧边栏（文件树 / 对话） ===== -->
+      <aside v-if="leftOpen" class="sidebar" :style="{ width: sidebarWidth + 'px' }">
+        <!-- 文件树视图 -->
+        <template v-if="activeView === 'files'">
+          <div class="side-head">
+            <span>项目文件</span>
+            <span class="side-count">{{ fileCount }} 个</span>
+          </div>
+          <div class="side-scroll">
+            <FileTree :nodes="fileTree" :active-path="activeFile?.path" @open="openFile" />
+          </div>
+        </template>
+
+        <!-- 对话视图（与项目经理） -->
+        <template v-else>
+          <div class="side-head">
+            <span>项目经理</span>
+            <span class="side-count">执行中随时提问</span>
+          </div>
+          <!-- 确认模式选择器 -->
+          <div class="mode-selector">
+            <div class="mode-label">
+              <IconClock :size="13" :stroke-width="1.75" />
+              确认模式
+            </div>
+            <div class="mode-options">
+              <button
+                v-for="m in MODES"
+                :key="m.value"
+                class="mode-btn"
+                :class="{ active: confirmMode === m.value }"
+                :title="m.desc"
+                @click="setMode(m.value)"
+              >
+                <span class="lamp" :class="'lamp-' + m.tone"></span>
+                {{ m.label }}
+              </button>
+            </div>
+            <div class="mode-hint faint">{{ MODES[confirmMode]?.desc }}</div>
+          </div>
+          <div class="chat-body">
+            <div v-for="(m, i) in chatMessages" :key="i" class="msg" :class="m.role">
+              <div v-if="m.role === 'assistant'" class="msg-avatar">
+                <img src="../assets/agent-manager.png" alt="Hina" />
+              </div>
+              <div class="msg-bubble">{{ m.content }}</div>
+            </div>
+            <div v-if="chatThinking" class="msg assistant">
+              <div class="msg-avatar">
+                <img src="../assets/agent-manager.png" alt="Hina" />
+              </div>
+              <div class="msg-bubble typing">
+                <span class="tdot"></span>
+                <span class="tdot"></span>
+                <span class="tdot"></span>
+              </div>
+            </div>
+          </div>
+          <div class="chat-input">
+            <textarea
+              v-model="chatDraft"
+              class="textarea"
+              rows="2"
+              placeholder="问项目经理：进度、代码、下一步..."
+              @keydown.enter.exact.prevent="sendChat"
+            ></textarea>
+            <button class="btn btn-primary btn-send" :disabled="!chatDraft.trim() || chatThinking" @click="sendChat">
+              <IconSend :size="15" :stroke-width="1.75" />
+            </button>
+          </div>
+        </template>
+      </aside>
+
+      <!-- 左侧边栏拖拽手柄 -->
+      <div
+        v-if="leftOpen"
+        class="resize-handle v"
+        title="拖拽调整宽度"
+        @mousedown="startDrag($event, 'x', 'left')"
+      ></div>
+
+      <!-- ===== 编辑器（多 Tab 描图台） ===== -->
+      <div class="editor-area">
+        <div v-if="tabs.length" class="tabs">
+          <div
+            v-for="t in tabs"
+            :key="t.path"
+            class="tab"
+            :class="{ active: activeFile?.path === t.path }"
+            @click="activeFile = t"
+          >
+            <span class="tab-ext mono" :class="extToneClass(t.path)">{{ tabExt(t.path) }}</span>
+            <span class="tab-name">{{ tabName(t.path) }}</span>
+            <span v-if="t.userModified" class="tab-modified" title="已手动修改"></span>
+            <button class="tab-close" aria-label="关闭" @click.stop="closeTab(t.path)">
+              <IconX :size="12" :stroke-width="1.75" />
+            </button>
+          </div>
+        </div>
+        <div class="editor-wrap">
+          <!-- key 只含 path：曾把 userModified 编进 key（9/15 审计坑 F4），
+               用户敲第一字符→0变1→key 变→编辑器销毁重建，首字符被吞、光标/撤销栈重置。
+               注意：注释必须放标签外——塞进属性区会打断 Vue 模板解析（9/16 vue-tsc 实锤） -->
+          <MonacoEditor
+            v-if="activeFile"
+            :key="activeFile.path"
+            :language="langFor(activeFile.path)"
+            :value="activeFile.content || ''"
+            @change="onUserEdit"
+            @save="onSave"
+          />
+          <div v-else class="editor-empty">
+            <IconCode :size="42" :stroke-width="1.2" class="ee-ico" />
+            <p>从左侧文件树打开文件</p>
+            <p class="faint">Agent 生成的文件会实时出现在文件树中</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- 右侧边栏拖拽手柄 -->
+      <div
+        v-if="rightOpen"
+        class="resize-handle v"
+        title="拖拽调整宽度"
+        @mousedown="startDrag($event, 'x', 'right')"
+      ></div>
+
+      <!-- ===== 右侧边栏（任务工单板） ===== -->
+      <aside v-if="rightOpen" class="rightbar" :style="{ width: rightbarWidth + 'px' }">
+        <div class="side-head">
+          <span>任务看板</span>
+          <span class="side-count">{{ tasks.length }} 个任务</span>
+        </div>
+        <div class="quality-card">
+          <div class="qc-head"><span>产出质量</span><strong>{{ qualitySummary.firstPassRate }}%</strong></div>
+          <div class="qc-meta">通过 {{ qualitySummary.passed }} · 失败 {{ qualitySummary.failed }} · 重试 {{ qualitySummary.totalRetries }}</div>
+          <div v-if="qualitySummary.failureCategories.length" class="qc-failures">
+            <span v-for="item in qualitySummary.failureCategories.slice(0, 3)" :key="item.label" class="mono">
+              {{ item.label }} {{ item.count }}
+            </span>
+          </div>
+        </div>
+        <div class="kanban">
+          <div v-for="col in (['todo', 'doing', 'done', 'failed'] as TaskStatus[])" :key="col" class="kanban-col">
+            <div class="kanban-col-head" @click="toggleCol(col)">
+              <span class="kb-dot" :class="'dot-' + TASK_STATUS[col].tone"></span>
+              <span>{{ TASK_STATUS[col].label }}</span>
+              <span class="kanban-count mono">{{ taskCount(col) }}</span>
+              <IconChevronDown
+                :size="14"
+                :stroke-width="1.75"
+                class="kb-arrow"
+                :class="{ collapsed: collapsedCols.has(col) }"
+              />
+            </div>
+            <div v-show="!collapsedCols.has(col)" class="kanban-list">
+              <div
+                v-for="t in tasksBy(col)"
+                :key="t.id"
+                class="kanban-card"
+                :class="col"
+                @click="openTaskDetail(t)"
+              >
+                <span class="kanban-title">{{ t.title }}</span>
+                <span class="kanban-assignee faint">{{ t.assignee }}</span>
+                <button
+                  v-if="col === 'failed'"
+                  class="kanban-retry"
+                  title="重跑"
+                  @click.stop="retryTask(t)"
+                >
+                  <IconRefresh :size="13" :stroke-width="1.75" />
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <!-- ===== 任务详情弹窗 ===== -->
+      <AppModal
+        v-if="taskDetail"
+        :title="taskDetail.title"
+        sheet="TASK·DETAIL"
+        width="640px"
+        @close="taskDetail = null"
+      >
+        <div class="detail-grid tblock">
+          <div class="tblock-cell">
+            <span class="tblock-key">任务编号</span>
+            <span class="tblock-val mono">{{ taskDetail.taskIdExt || taskDetail.id }}</span>
+          </div>
+          <div class="tblock-cell">
+            <span class="tblock-key">状态</span>
+            <span class="tblock-val">
+              <StampSeal :label="taskStatusLabel(taskDetail.status)" :tone="taskTone(taskDetail.status)" />
+            </span>
+          </div>
+          <div class="tblock-cell">
+            <span class="tblock-key">负责人</span>
+            <span class="tblock-val">{{ taskDetail.assignee || '-' }}</span>
+          </div>
+          <div class="tblock-cell">
+            <span class="tblock-key">分层</span>
+            <span class="tblock-val">{{ taskDetail.layer === 'backend' ? '后端' : taskDetail.layer === 'frontend' ? '前端' : '-' }}</span>
+          </div>
+          <div v-if="taskDetail.phaseId" class="tblock-cell">
+            <span class="tblock-key">阶段 ID</span>
+            <span class="tblock-val mono">{{ taskDetail.phaseId }}</span>
+          </div>
+          <div v-if="taskDetail.retryCount > 0" class="tblock-cell">
+            <span class="tblock-key">重试次数</span>
+            <span class="tblock-val mono wait-txt">{{ taskDetail.retryCount }}/3</span>
+          </div>
+        </div>
+
+        <div v-if="taskDetail.description" class="detail-section">
+          <span class="ds-label faint">描述</span>
+          <p class="detail-text">{{ taskDetail.description }}</p>
+        </div>
+        <div v-if="taskDetail.acceptance" class="detail-section">
+          <span class="ds-label faint">验收标准</span>
+          <p class="detail-text">{{ taskDetail.acceptance }}</p>
+        </div>
+        <div v-if="taskDetail.result" class="detail-section">
+          <span class="ds-label faint">执行结果</span>
+          <p class="detail-text result mono">{{ taskDetail.result }}</p>
+        </div>
+        <div v-if="taskDetail.errorMsg" class="detail-section">
+          <span class="ds-label err">失败原因</span>
+          <p class="detail-text error">{{ taskDetail.errorMsg }}</p>
+        </div>
+
+        <template #footer>
+          <button class="btn btn-sm" @click="taskDetail = null">关闭</button>
+          <button
+            v-if="taskDetail.status === 'failed'"
+            class="btn btn-sm btn-primary"
+            @click="retryTask(taskDetail); taskDetail = null"
+          >
+            <IconRefresh :size="14" :stroke-width="1.75" /> 重跑
+          </button>
+        </template>
+      </AppModal>
+    </div>
+
+    <!-- ===== 底部日志面板（运行记录） ===== -->
+    <div v-if="logOpen" class="log-resize-wrap">
+      <div class="resize-handle h" title="拖拽调整高度" @mousedown="startDrag($event, 'y', 'log')"></div>
+      <div class="log-panel" :style="{ height: logHeight + 'px' }">
+        <div class="log-head">
+          <span class="log-title">
+            <IconTerminal :size="12" :stroke-width="1.75" />
+            执行日志
+          </span>
+          <button class="log-clear btn btn-sm btn-ghost" @click="logs = []">清空</button>
+        </div>
+        <div ref="logBody" class="log-scroll">
+          <div v-for="(l, i) in logs" :key="i" class="log-item">
+            <span class="log-time mono faint">{{ l.time }}</span>
+            <span class="log-agent mono" :class="agentClass(l.agentId)">[{{ l.agent }}]</span>
+            <span class="log-text">{{ l.text }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===== 确认门就地问答卡（阶段 3：引擎挂起等人拍板，答复后自动续跑） ===== -->
+    <Teleport to="body">
+      <div v-if="pendingConfirms.length" class="confirm-mask">
+        <div class="confirm-card panel sheet-fall">
+          <div class="confirm-head">
+            <StampSeal :label="nodeLabel(pendingConfirms[0].node)" tone="wait" :just="true" />
+            <span class="confirm-expire mono faint">{{ confirmCountdown(pendingConfirms[0].expireAt) }}</span>
+          </div>
+          <p class="confirm-question">{{ pendingConfirms[0].question }}</p>
+          <!-- 有选项=选择题（点一下即答），无选项=自由文本题（PM 追问走这里） -->
+          <div v-if="parseOptions(pendingConfirms[0]).length" class="confirm-opts">
+            <button
+              v-for="opt in parseOptions(pendingConfirms[0])"
+              :key="opt"
+              class="btn confirm-opt"
+              :disabled="confirmBusy"
+              @click="submitConfirm(opt)"
+            >
+              {{ opt }}
+            </button>
+          </div>
+          <div v-else class="confirm-free">
+            <input
+              v-model="confirmText"
+              class="input"
+              type="text"
+              placeholder="输入回复…"
+              :disabled="confirmBusy"
+              @keyup.enter="confirmText.trim() && submitConfirm(confirmText.trim())"
+            />
+            <button class="btn btn-primary" :disabled="confirmBusy || !confirmText.trim()" @click="submitConfirm(confirmText.trim())">
+              发送
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
+  </div>
+</template>
+
 <style scoped>
+/* ===== 车间骨架：顶栏 + 活动栏/侧栏/看图台/工单板 + 底部运行记录 ===== */
 .exec {
   position: relative;
   z-index: 1;
-  height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
-
-/* ===== 顶栏 ===== */
-.topbar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 clamp(14px, 3vw, 42px);
-  height: 58px;
-  border-bottom: 1px solid var(--border);
-  background: rgba(8, 13, 22, 0.92);
-  backdrop-filter: blur(16px);
-  flex-shrink: 0;
+.exec-top {
+  flex: none;
+  padding-inline: clamp(14px, 3vw, 42px);
 }
-.btn-back {
-  padding: 7px 14px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text2);
-  font-size: 13px;
-  cursor: pointer;
-  transition: all 0.2s;
+.tb-back {
+  flex: none;
 }
-.btn-back:hover {
-  border-color: var(--border2);
-  color: var(--text);
-}
-.topbar-title {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  font-size: 14px;
+.tb-title {
   font-weight: 600;
-}
-.dim {
-  color: var(--text3);
-  font-weight: 400;
-}
-.phase-badge {
-  padding: 3px 10px;
-  border-radius: 10px;
-  background: rgba(83, 224, 183, 0.1);
-  border: 1px solid rgba(83, 224, 183, 0.25);
-  color: var(--green);
-  font-size: 11.5px;
-  font-weight: 500;
-}
-.topbar-right {
-  display: flex;
-  align-items: center;
-  gap: 12px;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .quality-strip {
-  display: flex;
-  align-items: baseline;
-  gap: 7px;
-  margin-right: 14px;
-  color: var(--text2);
-  font-size: 11px;
-  white-space: nowrap;
-}
-.quality-strip strong { color: var(--green); font-size: 16px; }
-.quality-label { color: var(--text); font-weight: 600; }
-.quality-muted { color: var(--text3); }
-.quality-retry { color: var(--yellow); }
-.btn-pause {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 8px 14px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--bg3);
-  color: var(--text2);
-  font-size: 13px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-.btn-pause:hover {
-  border-color: var(--yellow);
-  color: var(--yellow);
-}
-.btn-pause.paused {
-  border-color: var(--green);
-  color: var(--green);
-}
-.btn-save {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
-  gap: 8px;
-  height: 36px;
-  padding: 0 20px;
-  border: none;
-  border-radius: var(--radius-sm);
-  background: var(--grad1);
-  color: #fff;
-  font-size: 14px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: opacity var(--dur) var(--ease);
+  gap: 7px;
+  font-size: var(--fs-meta);
+  color: var(--ink-2);
+  white-space: nowrap;
 }
-.btn-save:hover {
-  opacity: 0.9;
+.quality-strip strong {
+  font-family: var(--font-display);
+  font-size: 15px;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.q-label {
+  font-weight: 600;
+}
+.q-muted {
+  color: var(--ink-3);
+}
+.q-retry {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--rust);
 }
 
-/* ===== 主体 ===== */
 .body {
   flex: 1;
   display: flex;
   min-height: 0;
 }
 
-/* ===== 活动栏 ===== */
+/* ===== 活动栏：深蓝晒图纸底 ===== */
 .activity-bar {
-  width: 46px;
-  background: var(--bg2);
-  border-right: 1px solid var(--border);
+  flex: none;
+  width: 50px;
+  background: var(--cyan-plate);
   display: flex;
   flex-direction: column;
   align-items: center;
   padding: 8px 0;
   gap: 4px;
-  flex-shrink: 0;
 }
 .activity-item {
   position: relative;
   width: 38px;
-  height: 38px;
-  border: none;
-  border-left: 2px solid transparent;
-  background: transparent;
-  color: var(--text3);
-  cursor: pointer;
+  height: 40px;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: all 0.15s;
+  color: #7fa8c9;
+  border-left: 2px solid transparent;
+  transition: color var(--dur) var(--ease), background var(--dur) var(--ease);
 }
 .activity-item:hover {
-  color: var(--text);
+  color: #dbe9f5;
 }
 .activity-item.active {
-  color: var(--green);
-  border-left-color: var(--green);
-  background: rgba(83, 224, 183, 0.08);
+  color: #eaf3fa;
+  background: rgba(243, 246, 248, 0.08);
+  border-left-color: #9fc6e8;
 }
 .activity-badge {
   position: absolute;
-  top: 6px;
-  right: 5px;
-  width: 8px;
-  height: 8px;
+  top: 8px;
+  right: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
-  background: var(--pink);
+  background: var(--wait);
+  border: 1px solid var(--cyan-plate);
+}
+.ab-progress {
+  margin-top: auto;
+  padding: 6px 0 4px;
+  font-size: 10px;
+  color: #7fa8c9;
+  font-variant-numeric: tabular-nums;
 }
 
-/* ===== 拖拽手柄（点击区 10px，视觉线 2px 居中） ===== */
-.resize-handle {
-  position: relative;
-  z-index: 30;
-  background: transparent;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.resize-handle.v {
-  width: 10px;
-  cursor: col-resize;
-  flex-shrink: 0;
-}
-.resize-handle.h {
-  height: 10px;
-  cursor: row-resize;
-  flex-shrink: 0;
-}
-.resize-handle.v::after {
-  content: '';
-  width: 2px;
-  height: 100%;
-  border-radius: 1px;
-  background: transparent;
-  transition: background 0.15s;
-}
-.resize-handle.h::after {
-  content: '';
-  height: 2px;
-  width: 100%;
-  border-radius: 1px;
-  background: transparent;
-  transition: background 0.15s;
-}
-.resize-handle:hover::after,
-.resize-handle:active::after {
-  background: rgba(83, 224, 183, 0.65);
-}
-
-/* ===== 侧边栏 ===== */
-.sidebar {
-  background: var(--bg2);
-  border-right: 1px solid var(--border);
+/* ===== 侧栏公共 ===== */
+.sidebar,
+.rightbar {
+  flex: none;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  flex-shrink: 0;
-  min-width: 0;
-  animation: side-in 0.2s var(--ease);
+  background: var(--paper-raised);
+  border-right: 1px solid var(--line-2);
+  overflow: hidden;
 }
-@keyframes side-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
+.rightbar {
+  border-right: none;
+  border-left: 1px solid var(--line-2);
 }
 .side-head {
+  flex: none;
   display: flex;
-  align-items: center;
+  align-items: baseline;
   justify-content: space-between;
-  padding: 12px 14px;
-  border-bottom: 1px solid var(--border);
-  font-size: 12.5px;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line);
+  font-family: var(--font-display);
+  font-size: 12px;
   font-weight: 600;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--text2);
+  color: var(--ink-2);
 }
 .side-count {
-  font-size: 11px;
-  color: var(--text3);
+  font-family: var(--font-mono);
+  font-size: 10px;
   font-weight: 400;
-  text-transform: none;
   letter-spacing: 0;
+  color: var(--ink-3);
+}
+.side-scroll {
+  flex: 1;
+  overflow: auto;
 }
 
-/* ===== 确认模式选择器（PM 对话区） ===== */
+/* ===== 确认模式 ===== */
 .mode-selector {
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
+  flex: none;
+  padding: 10px 12px;
+  border-bottom: 1px dashed var(--line-2);
 }
 .mode-label {
   display: flex;
   align-items: center;
-  gap: 5px;
-  font-size: 11px;
+  gap: 6px;
+  font-size: var(--fs-meta);
   font-weight: 600;
-  color: var(--text3);
+  color: var(--ink-2);
   margin-bottom: 8px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 .mode-options {
   display: flex;
   gap: 4px;
-  margin-bottom: 6px;
 }
 .mode-btn {
   flex: 1;
-  display: flex;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 5px;
-  padding: 5px 0;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--bg3);
-  color: var(--text2);
-  font-size: 11.5px;
-  font-weight: 500;
-  cursor: pointer;
-  transition: all 0.15s;
+  padding: 6px 4px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-xs);
+  background: var(--paper);
+  font-size: var(--fs-meta);
+  color: var(--ink-2);
+  transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease);
 }
 .mode-btn:hover {
-  border-color: var(--border2);
-  color: var(--text);
+  border-color: var(--cyan);
 }
 .mode-btn.active {
-  border-color: var(--blue);
-  color: var(--blue);
-  background: rgba(69, 184, 255, 0.06);
+  border-color: var(--cyan);
+  background: var(--cyan-wash-2);
+  color: var(--cyan);
+  font-weight: 600;
 }
-.mode-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  flex-shrink: 0;
+.mode-btn .lamp {
+  width: 8px;
+  height: 8px;
 }
 .mode-hint {
-  font-size: 10.5px;
-  color: var(--text3);
+  margin-top: 7px;
+  font-size: 11px;
   line-height: 1.5;
-  padding-left: 2px;
 }
 
-.side-scroll {
-  flex: 1;
-  overflow-y: auto;
-  padding: 8px 6px;
-}
-
-/* ===== 对话（侧边栏内） ===== */
+/* ===== 侧栏对话 ===== */
 .chat-body {
   flex: 1;
   overflow-y: auto;
-  padding: 14px;
+  padding: 12px;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -1243,621 +1119,560 @@ async function pollFiles() {
 .msg {
   display: flex;
   gap: 8px;
-  max-width: 95%;
+  align-items: flex-start;
 }
 .msg.user {
-  align-self: flex-end;
-  flex-direction: row-reverse;
+  justify-content: flex-end;
 }
 .msg-avatar {
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  overflow: hidden;
-  flex-shrink: 0;
-  background: var(--bg3);
-  border: 1px solid var(--border);
+  flex: none;
 }
 .msg-avatar img {
-  width: 100%;
-  height: 100%;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1px solid var(--line-2);
   object-fit: cover;
+  display: block;
 }
 .msg-bubble {
-  padding: 9px 12px;
-  border-radius: 10px;
-  font-size: 12.5px;
-  line-height: 1.7;
-  white-space: pre-line;
+  max-width: 82%;
+  padding: 8px 11px;
+  border-radius: 2px 10px 10px 10px;
+  background: var(--paper-deep);
+  border: 1px solid var(--line);
+  font-size: 13px;
+  line-height: 1.65;
+  white-space: pre-wrap;
   word-break: break-word;
 }
-.msg.assistant .msg-bubble {
-  background: var(--bg3);
-  border: 1px solid var(--border);
-  color: var(--text);
-  border-top-left-radius: 3px;
-}
 .msg.user .msg-bubble {
-  background: var(--grad1);
-  color: #fff;
-  border-top-right-radius: 3px;
+  background: var(--cyan);
+  border-color: var(--cyan);
+  color: #f3f6f8;
+  border-radius: 10px 2px 10px 10px;
 }
 .typing {
   display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 12px 14px;
+  gap: 5px;
+  padding: 12px;
 }
-.typing .dot {
+.tdot {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--text3);
-  animation: blink 1.4s infinite;
+  background: var(--ink-3);
+  animation: tdot 1.1s var(--ease) infinite;
 }
-.typing .dot:nth-child(2) { animation-delay: 0.2s; }
-.typing .dot:nth-child(3) { animation-delay: 0.4s; }
-@keyframes blink {
-  0%, 80%, 100% { opacity: 0.25; }
-  40% { opacity: 1; }
+.tdot:nth-child(2) {
+  animation-delay: 0.15s;
+}
+.tdot:nth-child(3) {
+  animation-delay: 0.3s;
+}
+@keyframes tdot {
+  35% {
+    transform: translateY(-4px);
+    opacity: 0.5;
+  }
 }
 .chat-input {
+  flex: none;
   display: flex;
-  align-items: flex-end;
-  gap: 8px;
+  gap: 6px;
   padding: 10px;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--line);
+  align-items: flex-end;
 }
-.chat-input textarea {
+.chat-input .textarea {
   flex: 1;
-  padding: 8px 10px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--bg3);
-  color: var(--text);
-  font-size: 12.5px;
-  line-height: 1.5;
-  outline: none;
-  resize: none;
-  font-family: inherit;
-  transition: border-color 0.2s;
-}
-.chat-input textarea:focus {
-  border-color: var(--blue);
-}
-.chat-input textarea::placeholder {
-  color: var(--text3);
+  min-height: 40px;
+  max-height: 110px;
+  font-size: 13px;
 }
 .btn-send {
-  width: 34px;
-  height: 34px;
-  border: none;
-  border-radius: 8px;
-  background: var(--grad1);
-  color: #fff;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: opacity 0.2s;
-  flex-shrink: 0;
+  height: 40px;
+  width: 40px;
+  padding: 0;
+  flex: none;
 }
-.btn-send:hover:not(:disabled) { opacity: 0.9; }
-.btn-send:disabled { opacity: 0.4; cursor: not-allowed; }
 
-/* ===== 编辑器区 ===== */
+/* ===== 拖拽手柄 ===== */
+.resize-handle {
+  flex: none;
+  background: transparent;
+  transition: background var(--dur) var(--ease);
+}
+.resize-handle:hover,
+.resize-handle:active {
+  background: var(--cyan-wash-2);
+}
+.resize-handle.v {
+  width: 5px;
+  cursor: col-resize;
+  margin: 0 -2px; /* 视觉不占位，热区 9px */
+  z-index: 2;
+}
+.resize-handle.h {
+  height: 5px;
+  cursor: row-resize;
+  margin: -2px 0;
+  z-index: 2;
+}
+
+/* ===== 看图台 ===== */
 .editor-area {
   flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
-  min-width: 0;
-  background: #1e1e1e;
+  background: var(--paper);
 }
 .tabs {
+  flex: none;
   display: flex;
-  background: var(--bg2);
-  border-bottom: 1px solid var(--border);
   overflow-x: auto;
-  flex-shrink: 0;
+  border-bottom: 1px solid var(--line-2);
+  background: var(--paper-deep);
 }
 .tab {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   padding: 8px 10px 8px 12px;
-  border-right: 1px solid var(--border);
-  font-size: 12.5px;
-  color: var(--text2);
+  border-right: 1px solid var(--line);
+  font-size: 13px;
+  color: var(--ink-2);
   cursor: pointer;
   white-space: nowrap;
-  position: relative;
-  transition: background 0.15s;
+  user-select: none;
 }
 .tab:hover {
-  background: var(--bg3);
+  background: var(--cyan-wash);
 }
 .tab.active {
-  background: #1e1e1e;
-  color: var(--text);
+  background: var(--paper-raised);
+  color: var(--ink);
+  font-weight: 500;
+  box-shadow: inset 0 2px 0 var(--cyan); /* 图签夹条 */
+}
+.tab-ext {
+  font-size: 9px;
+  line-height: 1;
+  padding: 3px 4px;
+  border: 1px solid currentColor;
+  border-radius: var(--r-xs);
+  opacity: 0.9;
+}
+.ext-rust {
+  color: var(--rust);
+}
+.ext-pass {
+  color: var(--pass-ink);
+}
+.ext-info {
+  color: var(--cyan);
+}
+.ext-wait {
+  color: var(--wait-ink);
+}
+.ext-pencil {
+  color: var(--pencil);
 }
 .tab-modified {
-  color: var(--blue);
-  font-size: 8px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1.5px solid var(--wait-ink);
+  flex: none;
 }
 .tab-close {
-  border: none;
-  background: transparent;
-  color: var(--text3);
-  font-size: 10px;
-  cursor: pointer;
+  display: inline-flex;
   padding: 2px;
-  border-radius: 4px;
-  opacity: 0;
-  transition: all 0.15s;
-}
-.tab:hover .tab-close {
-  opacity: 1;
+  border-radius: var(--r-xs);
+  color: var(--ink-3);
 }
 .tab-close:hover {
-  background: rgba(242, 96, 96, 0.15);
-  color: var(--red);
+  background: var(--void-wash);
+  color: var(--void-ink);
 }
 .editor-wrap {
   flex: 1;
   min-height: 0;
+  display: flex;
+}
+.editor-wrap > :deep(div) {
+  flex: 1;
+  min-width: 0;
 }
 .editor-empty {
-  height: 100%;
+  flex: 1;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 10px;
-  color: var(--text3);
-  font-size: 13px;
-  background: #1e1e1e;
+  gap: 8px;
+  color: var(--ink-2);
+  font-size: 14px;
 }
-.editor-empty svg { opacity: 0.35; }
-.editor-empty .dim { font-size: 12px; }
+.ee-ico {
+  color: var(--line-2);
+}
+.editor-empty .faint {
+  font-size: var(--fs-meta);
+}
 
-/* ===== 右侧边栏 ===== */
-.rightbar {
-  background: var(--bg2);
-  border-left: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  flex-shrink: 0;
-  min-width: 0;
-  animation: right-in 0.2s var(--ease);
-}
+/* ===== 工单板 ===== */
 .quality-card {
-  margin: 10px 10px 6px;
-  padding: 10px 11px;
+  flex: none;
+  margin: 10px 12px 4px;
+  padding: 10px 12px;
   border: 1px solid var(--line);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--panel) 84%, var(--blue));
+  border-radius: var(--r);
+  background: var(--paper);
 }
-.quality-card-head { display: flex; justify-content: space-between; align-items: center; color: var(--text2); font-size: 12px; }
-.quality-card-head strong { color: var(--green); font-size: 18px; }
-.quality-card-meta { margin-top: 5px; color: var(--text3); font-size: 11px; }
-.quality-failures { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 8px; }
-.quality-failures span { padding: 2px 6px; border-radius: 10px; color: var(--red); background: color-mix(in srgb, var(--red) 12%, transparent); font-size: 10px; }
-@keyframes right-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
+.qc-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: var(--fs-meta);
+  color: var(--ink-2);
+}
+.qc-head strong {
+  font-family: var(--font-display);
+  font-size: 18px;
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.qc-meta {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--ink-3);
+}
+.qc-failures {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  margin-top: 7px;
+  font-size: 10px;
+  color: var(--void-ink);
 }
 
-/* ===== 任务看板 ===== */
 .kanban {
   flex: 1;
   overflow-y: auto;
-  padding: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  padding: 6px 0 12px;
 }
 .kanban-col {
-  background: var(--bg3);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  overflow: hidden;
+  margin-top: 6px;
 }
 .kanban-col-head {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 10px;
-  border-bottom: 1px solid var(--border);
-  font-size: 12px;
+  gap: 7px;
+  padding: 6px 12px;
+  font-size: var(--fs-meta);
   font-weight: 600;
-  color: var(--text2);
+  color: var(--ink-2);
   cursor: pointer;
   user-select: none;
-  transition: background 0.15s;
 }
 .kanban-col-head:hover {
-  background: rgba(69, 184, 255, 0.04);
+  background: var(--cyan-wash);
 }
-.kanban-dot {
+.kb-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
+  flex: none;
 }
-.kanban-dot.todo { background: var(--text3); }
-.kanban-dot.doing { background: var(--blue); }
-.kanban-dot.done { background: var(--green); }
-.kanban-dot.failed { background: var(--red); }
+.dot-pencil {
+  background: var(--pencil);
+}
+.dot-info {
+  background: var(--cyan);
+}
+.dot-pass {
+  background: var(--pass);
+}
+.dot-void {
+  background: var(--void);
+}
 .kanban-count {
   margin-left: auto;
-  font-size: 11px;
-  color: var(--text3);
-  font-weight: 400;
+  font-size: 10px;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+.kb-arrow {
+  color: var(--ink-3);
+  transition: transform var(--dur) var(--ease);
+}
+.kb-arrow.collapsed {
+  transform: rotate(-90deg);
 }
 .kanban-list {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  padding: 6px;
+  padding: 2px 8px;
 }
 .kanban-card {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 7px 8px;
-  border-radius: 7px;
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  font-size: 12px;
-  transition: all 0.15s;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-left-width: 2px;
+  border-radius: var(--r-xs);
+  background: var(--paper-raised);
+  cursor: pointer;
+  transition: border-color var(--dur) var(--ease);
+}
+.kanban-card:hover {
+  border-color: var(--cyan);
+}
+.kanban-card.todo {
+  border-left-color: var(--pencil);
 }
 .kanban-card.doing {
-  border-color: rgba(69, 184, 255, 0.35);
-  background: rgba(69, 184, 255, 0.06);
+  border-left-color: var(--cyan);
 }
 .kanban-card.done {
-  border-color: rgba(94, 203, 138, 0.25);
-  opacity: 0.7;
+  border-left-color: var(--pass);
 }
 .kanban-card.failed {
-  border-color: rgba(242, 96, 96, 0.35);
-  background: rgba(242, 96, 96, 0.06);
+  border-left-color: var(--void);
 }
 .kanban-title {
   flex: 1;
   min-width: 0;
+  font-size: 12.5px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .kanban-assignee {
+  flex: none;
   font-size: 10px;
-  color: var(--text3);
-  flex-shrink: 0;
-  padding: 2px 6px;
-  border-radius: 4px;
-  background: var(--bg3);
 }
 .kanban-retry {
-  border: none;
-  background: transparent;
-  color: var(--red);
-  cursor: pointer;
-  font-size: 14px;
-  padding: 0 2px;
-  line-height: 1;
+  flex: none;
+  display: inline-flex;
+  padding: 3px;
+  color: var(--void-ink);
+  border-radius: var(--r-xs);
 }
 .kanban-retry:hover {
-  color: #ff8080;
-}
-.kanban-arrow {
-  font-size: 10px;
-  transition: transform 0.2s;
-  margin-left: auto;
-}
-.kanban-arrow.collapsed {
-  transform: rotate(-90deg);
+  background: var(--void-wash);
 }
 
-/* ===== 任务详情弹窗 ===== */
-.task-detail-modal {
-  width: 480px;
-  max-height: 80vh;
-  display: flex;
-  flex-direction: column;
-}
-.modal-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding-bottom: 14px;
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 16px;
-}
-.modal-head h2 {
-  font-size: 16px;
-  font-weight: 700;
-  margin: 0;
-}
-.modal-close {
-  border: none;
-  background: transparent;
-  color: var(--text3);
-  font-size: 16px;
-  cursor: pointer;
-  padding: 4px;
-}
-.modal-close:hover {
-  color: var(--text);
-}
-.modal-body {
-  flex: 1;
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
+/* ===== 任务详情 ===== */
 .detail-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 10px;
+  margin-bottom: 14px;
 }
-.detail-field {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 8px 10px;
-  border-radius: 8px;
-  background: var(--bg3);
-  border: 1px solid var(--border);
-}
-.detail-label {
-  font-size: 11px;
-  color: var(--text3);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-.detail-value {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text);
+.wait-txt {
+  color: var(--wait-ink);
 }
 .detail-section {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+  margin-top: 12px;
 }
-.detail-section .detail-label {
-  font-size: 11px;
+.ds-label {
+  display: block;
+  font-size: 10px;
   text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 4px;
+}
+.ds-label.err {
+  color: var(--void-ink);
 }
 .detail-text {
   font-size: 13px;
   line-height: 1.7;
-  color: var(--text2);
-  margin: 0;
-  padding: 10px 12px;
-  border-radius: 8px;
-  background: var(--bg3);
-  border: 1px solid var(--border);
+  color: var(--ink);
   white-space: pre-wrap;
   word-break: break-word;
+  max-height: 180px;
+  overflow-y: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-xs);
+  background: var(--paper);
 }
 .detail-text.result {
-  border-color: rgba(94, 203, 138, 0.25);
+  font-size: 12px;
 }
 .detail-text.error {
-  border-color: rgba(242, 96, 96, 0.3);
-  color: var(--red);
-}
-.btn-retry {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 18px;
-  height: 36px;
-  border-radius: 8px;
-  border: 1px solid var(--red);
-  background: rgba(242, 96, 96, 0.1);
-  color: var(--red);
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-.btn-retry:hover {
-  background: rgba(242, 96, 96, 0.2);
+  border-color: var(--void);
+  background: var(--void-wash);
+  color: var(--void-ink);
 }
 
-/* ===== 弹窗遮罩 + 通用 modal（与项目其他页面一致） ===== */
-.modal-mask {
-  position: fixed;
-  inset: 0;
-  z-index: 100;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: rgba(8, 11, 17, 0.7);
-  backdrop-filter: blur(4px);
-}
-.modal {
-  background: var(--bg2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  padding: 24px;
-}
-.modal-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 10px;
-  margin-top: 18px;
-  padding-top: 14px;
-  border-top: 1px solid var(--border);
-}
-.btn-cancel {
-  padding: 0 18px;
-  height: 36px;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: transparent;
-  color: var(--text2);
-  font-size: 13px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-.btn-cancel:hover {
-  border-color: var(--border2);
-  color: var(--text);
-}
-
-/* ===== 底部日志面板 ===== */
+/* ===== 底部运行记录 ===== */
 .log-resize-wrap {
+  flex: none;
   display: flex;
   flex-direction: column;
-  flex-shrink: 0;
-  animation: log-in 0.2s var(--ease);
-}
-@keyframes log-in {
-  from { opacity: 0; }
-  to { opacity: 1; }
+  border-top: 1px solid var(--line-2);
+  background: var(--paper-raised);
 }
 .log-panel {
-  background: var(--bg2);
-  border-top: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  flex-shrink: 0;
-  overflow: hidden;
+  min-height: 0;
 }
 .log-head {
+  flex: none;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 14px;
-  border-bottom: 1px solid var(--border);
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--line);
 }
 .log-title {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text2);
-}
-.log-clear {
-  border: none;
-  background: transparent;
-  color: var(--text3);
+  font-family: var(--font-display);
   font-size: 11px;
-  cursor: pointer;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-2);
 }
-.log-clear:hover { color: var(--text); }
 .log-scroll {
   flex: 1;
   overflow-y: auto;
   padding: 8px 14px;
-  font-family: 'Consolas', monospace;
-  font-size: 11.5px;
-  line-height: 1.9;
+  font-size: 12.5px;
+  line-height: 1.8;
 }
 .log-item {
   display: flex;
-  gap: 8px;
+  gap: 10px;
+  align-items: baseline;
 }
-.log-time { color: var(--text3); flex-shrink: 0; }
-.log-agent { flex-shrink: 0; }
-.log-text { color: var(--text2); word-break: break-all; }
+.log-time {
+  flex: none;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.log-agent {
+  flex: none;
+  font-size: 11px;
+}
+.ag-1 {
+  color: var(--cyan);
+} /* 经理 */
+.ag-2 {
+  color: var(--rust);
+} /* 架构师 */
+.ag-3 {
+  color: var(--pass-ink);
+} /* 后端 */
+.ag-4 {
+  color: var(--wait-ink);
+} /* 前端 */
+.ag-5 {
+  color: var(--void-ink);
+} /* 测试 */
+.ag-6 {
+  color: var(--ink-2);
+} /* 维护 */
+.ag-sys {
+  color: var(--pencil);
+}
+.log-text {
+  min-width: 0;
+  word-break: break-word;
+  color: var(--ink);
+}
 
-/* ===== 确认门问答卡（阶段 3）：居中浮层，藏青底 + 黄描边强调"等人拍板" ===== */
+/* ===== 确认门卡 ===== */
 .confirm-mask {
   position: fixed;
   inset: 0;
-  z-index: 60;
+  z-index: 1500;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(6, 10, 22, 0.62);
-  backdrop-filter: blur(4px);
+  background: rgba(22, 34, 46, 0.4);
+  backdrop-filter: blur(3px);
+  padding: 20px;
 }
 .confirm-card {
-  width: min(520px, 92vw);
-  padding: 24px 28px;
-  border-radius: var(--radius-lg);
-  border: 1px solid rgba(242, 184, 64, 0.45);
-  background: var(--bg2);
-  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.5);
+  width: 100%;
+  max-width: 520px;
+  padding: 20px 22px;
 }
 .confirm-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 14px;
-}
-.confirm-node {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--yellow);
-  border: 1px solid rgba(242, 184, 64, 0.4);
-  border-radius: 999px;
-  padding: 3px 12px;
-  letter-spacing: 1px;
+  gap: 12px;
+  margin-bottom: 12px;
 }
 .confirm-expire {
-  font-size: 11.5px;
-  color: var(--text3);
+  font-size: 11px;
 }
 .confirm-question {
-  font-size: 14px;
+  font-size: 14.5px;
   line-height: 1.7;
-  color: var(--text);
+  color: var(--ink);
   white-space: pre-wrap;
-  max-height: 40vh;
-  overflow-y: auto;
-  margin-bottom: 20px;
+  word-break: break-word;
+  margin-bottom: 16px;
 }
 .confirm-opts {
   display: flex;
-  gap: 12px;
-  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.confirm-opt {
+  min-width: 88px;
 }
 .confirm-free {
   display: flex;
-  gap: 10px;
+  gap: 8px;
 }
-.confirm-input {
+.confirm-free .input {
   flex: 1;
 }
-.confirm-opt {
-  height: 38px;
-  padding: 0 20px;
-  border-radius: var(--radius-sm);
-  border: 1px solid var(--border2);
-  background: transparent;
-  color: var(--text);
-  font-size: 13px;
-  cursor: pointer;
-  transition: all var(--dur) var(--ease);
-}
-.confirm-opt:hover:not(:disabled) {
-  border-color: var(--yellow);
-  color: var(--yellow);
-}
-.confirm-opt.send {
-  border: none;
-  background: var(--grad1);
-  color: #fff;
-  font-weight: 600;
-}
-.confirm-opt:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
 
-@media (max-width: 820px) {
-  .quality-strip { display: none; }
-  .topbar-title { max-width: 46vw; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
-  .sidebar { position: absolute; inset: 0 auto 0 46px; z-index: 40; box-shadow: 18px 0 40px rgba(0, 0, 0, 0.28); }
-  .rightbar { position: absolute; inset: 0 0 0 auto; z-index: 40; box-shadow: -18px 0 40px rgba(0, 0, 0, 0.28); }
-  .quality-card { margin-top: 8px; }
+/* ===== 窄屏：侧栏浮起（能看文件就行） ===== */
+@media (max-width: 860px) {
+  .sidebar,
+  .rightbar {
+    position: absolute;
+    top: 57px;
+    bottom: 0;
+    z-index: 40;
+    box-shadow: var(--shadow-lg);
+  }
+  .sidebar {
+    left: 50px;
+  }
+  .rightbar {
+    right: 0;
+  }
+  .resize-handle {
+    display: none;
+  }
+  .quality-strip .q-muted {
+    display: none;
+  }
 }
-
+/* 手机屏装不下质量指标条（flex:none 会把状态章挤出画幅——9/17 exec-mobile 实锤）；
+   质量数据在右抽屉看板卡里仍有全量，顶栏让位 */
+@media (max-width: 640px) {
+  .quality-strip {
+    display: none;
+  }
+  /* 图名让位——状态章必须完整在框内；页名"执行面板"本身已说明身在何处 */
+  .tb-title .dim {
+    display: none;
+  }
+}
 </style>

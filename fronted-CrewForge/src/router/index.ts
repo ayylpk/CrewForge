@@ -1,5 +1,5 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import { ElMessageBox } from 'element-plus'
+import { confirmDialog } from '../utils/confirm'
 import LoginView from '../views/LoginView.vue'
 import ProjectsView from '../views/ProjectsView.vue'
 
@@ -74,10 +74,8 @@ router.beforeEach((to, from) => {
     return '/projects'
   }
   if (SEALED_PATHS.some((re) => re.test(to.path))) {
-    ElMessageBox.alert('该功能还未开发，现已暂时关闭。', '功能未开放', {
-      type: 'warning',
-      confirmButtonText: '知道了',
-    }).catch(() => {}) // ESC/右上角关闭会 reject，吞掉防未处理拒绝
+    // 会签单 alert 模式（无取消键）：resolve 与否都不影响导航，fire-and-forget
+    void confirmDialog({ title: '功能未开放', body: '该功能还未开发，现已暂时关闭。', ok: '知道了' })
     // 地址栏直敲/刷新封存页 → 弹完落回项目列表；站内点击 → 原地不动只弹窗
     return from.name ? false : '/projects'
   }

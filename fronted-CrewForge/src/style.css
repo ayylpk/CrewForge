@@ -1,64 +1,100 @@
 /* ============================================================
-   CrewForge 全局样式 — 工程控制室视觉系统
-   颜色服务于状态：青绿=运行/通过，琥珀=注意，珊瑚=失败。
+   CrewForge · 晒图室（The Drawing Office）全局设计系统
+   ------------------------------------------------------------
+   世界观：整个控制台 = 一套持续下发的工程图纸。
+   规则：线宽即层级（0.25/0.5/0.7mm）；彩色只出现在边线、细带与章面；
+        正文区近无色；图号用 Oswald 大写压缩字，数据用等宽。
+   2026-09-17 重写（impeccable 方向轮 · seed 89b0257e · 指派位）。
    ============================================================ */
 
+/* 自托管字体：图号/大写牌 = Oswald；数据/代码 = JetBrains Mono
+   （中文走系统黑体栈：中文字体文件动辄数 MB，不现实也不必要） */
+@import '@fontsource/oswald/400.css';
+@import '@fontsource/oswald/500.css';
+@import '@fontsource/oswald/600.css';
+@import '@fontsource/jetbrains-mono/400.css';
+@import '@fontsource/jetbrains-mono/600.css';
+
 :root {
-  /* ===== 语义色板：墨蓝画布 / 石板面板 / 冷青运行轨道 ===== */
-  --canvas: #080d16;
-  --panel: #101927;
-  --panel-raised: #172337;
-  --panel-hover: #1d2c42;
-  --line: #26374d;
-  --line-strong: #38516d;
-  --ink: #e8f1fb;
-  --ink-muted: #9aadc1;
-  --ink-faint: #60758c;
-  --accent: #53e0b7;
-  --accent-blue: #6bc7f5;
-  --attention: #f5bd5c;
-  --danger: #f27678;
-  --info: #7fb9ff;
+  /* ===== 纸与墨（页面基底，永远冷调，禁暖米黄） ===== */
+  --paper: #e9eef2; /* 制图纸：页面底 */
+  --paper-raised: #f3f6f8; /* 图面/卡面/表单纸 */
+  --paper-deep: #dde5eb; /* 下凹区：表头、条形带、禁用底 */
+  --ink: #16222e; /* 一阶墨：正文 */
+  --ink-2: #46586a; /* 二阶墨：次要文字（≥4.5:1 on paper） */
+  --ink-3: #5f7280; /* 三阶墨：placeholder/禁用（AA 边缘，只用于短标签） */
 
-  /* 兼容现有 scoped 页面变量 */
-  --bg: var(--canvas);
-  --bg2: var(--panel);
-  --bg3: #132033;
-  --bg4: var(--panel-raised);
-  --border: var(--line);
-  --border2: var(--line-strong);
-  --text: var(--ink);
-  --text1: var(--ink);
-  --text2: var(--ink-muted);
-  --text3: var(--ink-faint);
-  --blue: var(--accent-blue);
-  --purple: #9f8cff;
-  --green: var(--accent);
-  --yellow: var(--attention);
-  --red: var(--danger);
-  --cyan: #66d9d0;
-  --orange: #f59a67;
-  --pink: #ef8bb7;
-  --grad1: linear-gradient(135deg, #45d6b0 0%, #5eb8ef 100%);
+  /* ===== 晒图青：结构主色（页签、主按钮、选中、链接） ===== */
+  --cyan: #155e93;
+  --cyan-deep: #0f4b76; /* hover/按下 */
+  --cyan-wash: rgba(21, 94, 147, 0.08); /* 选中底色 */
+  --cyan-wash-2: rgba(21, 94, 147, 0.16); /* hover 底色 */
+  --cyan-plate: #0e3a5c; /* 深蓝图版底（页签带/活动栏） */
 
-  /* ===== 形状 ===== */
-  --radius-sm: 6px;
-  --radius: 10px;
-  --radius-lg: 14px;
+  /* ===== 图框线（线宽即层级） ===== */
+  --line: #b9c6d1; /* 0.5mm：面板描边 */
+  --line-2: #8fa3b3; /* 0.7mm：主描边/输入框 */
+  --grid: rgba(21, 94, 147, 0.055); /* 图板格线（背景用） */
 
-  /* ===== 毛玻璃 ===== */
-  --glass-bg: rgba(16, 25, 39, 0.82);
-  --glass-border: rgba(91, 125, 158, 0.28);
-  --glass-blur: 16px;
+  /* ===== 章色：只落在线条、细带、章面 ===== */
+  --pass: #2e8f5b; /* 合格绿：章面/灯 */
+  --pass-ink: #1e6f45; /* 绿字（AA） */
+  --pass-wash: rgba(46, 143, 91, 0.12);
+  --wait: #d98f1b; /* 待检黄：灯/条（亮色只做章面） */
+  --wait-ink: #8a5d10; /* 黄字（AA） */
+  --wait-wash: rgba(217, 143, 27, 0.16);
+  --void: #c23a2e; /* 验收红：作废/驳回/破坏性 */
+  --void-ink: #a93226; /* 红字（AA） */
+  --void-wash: rgba(194, 58, 46, 0.1);
+  --pencil: #5f7280; /* 铅笔灰：草稿/未盖章（虚线世界） */
+  --rust: #a05a2c; /* 铁锈橙：已暂停（区别于红黄） */
+  --violet: #5f7280; /* 兼容旧变量：不再用紫 */
 
-  /* ===== 阴影 ===== */
-  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.18);
-  --shadow: 0 10px 30px rgba(0, 0, 0, 0.24);
-  --shadow-lg: 0 24px 70px rgba(0, 0, 0, 0.42);
+  /* ===== 形状（一套圆角尺：4px 全局，弹窗 8px） ===== */
+  --r-xs: 2px;
+  --r: 4px;
+  --r-lg: 8px;
+
+  /* ===== 字体 ===== */
+  --font-ui: system-ui, -apple-system, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+  --font-display: 'Oswald', var(--font-ui);
+  --font-mono: 'JetBrains Mono', Consolas, 'Courier New', monospace;
+
+  /* ===== 排版尺度（层级靠尺寸对比，不靠套盒） ===== */
+  --fs-sheet: clamp(34px, 5vw, 56px); /* 大图号/封面名 */
+  --fs-h1: 26px;
+  --fs-h2: 17px;
+  --fs-body: 14px;
+  --fs-meta: 12px;
 
   /* ===== 动效 ===== */
-  --ease: cubic-bezier(0.4, 0, 0.2, 1);
-  --dur: 0.18s;
+  --ease: cubic-bezier(0.16, 1, 0.3, 1); /* 指数缓出 */
+  --dur: 0.16s;
+  --dur-slow: 0.42s;
+
+  /* ===== 兼容旧 scoped 页面（封存三页不回归） ===== */
+  --bg: var(--paper);
+  --bg2: var(--paper-raised);
+  --bg3: var(--paper-deep);
+  --bg4: var(--paper-deep);
+  --border: var(--line);
+  --border2: var(--line-2);
+  --text: var(--ink);
+  --text1: var(--ink);
+  --text2: var(--ink-2);
+  --text3: var(--ink-3);
+  --blue: var(--cyan); /* ⚠️ 此处只许给"旧名字"赋新值——--cyan 本身第 28 行已定义，
+                            再写 --cyan: var(--cyan) 就是自引用，整条链失效（9/17 截图实锤） */
+  --green: var(--pass);
+  --yellow: var(--wait);
+  --red: var(--void);
+  --orange: var(--rust);
+  --pink: var(--void);
+  --glass-bg: rgba(243, 246, 248, 0.92);
+  --glass-border: var(--line);
+  --shadow-sm: 0 1px 2px rgba(22, 34, 46, 0.1);
+  --shadow: 0 6px 22px rgba(22, 34, 46, 0.14);
+  --shadow-lg: 0 18px 48px rgba(14, 58, 92, 0.22);
 }
 
 /* ===== 重置 ===== */
@@ -76,10 +112,26 @@ body,
 }
 
 body {
-  font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
-  background: var(--bg);
-  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--fs-body);
+  line-height: 1.6;
+  background: var(--paper);
+  color: var(--ink);
   -webkit-font-smoothing: antialiased;
+}
+
+/* 图板格线：全站统一底纹（0.25mm 线宽的世界观根基，纯 CSS 非图片）
+   —— 晒图室的"图板"就是测量/绘图工作面本体，属规则豁免的 blueprint surface */
+/* impeccable-disable-next-line codex-grid-background */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background:
+    linear-gradient(var(--grid) 1px, transparent 1px) 0 0 / 100% 28px,
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px) 0 0 / 28px 100%;
 }
 
 button,
@@ -87,59 +139,466 @@ input,
 textarea,
 select {
   font: inherit;
+  color: inherit;
 }
 
-button:focus-visible,
-input:focus-visible,
-textarea:focus-visible,
-select:focus-visible,
-a:focus-visible {
-  outline: 2px solid var(--accent);
+button {
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+a {
+  color: var(--cyan);
+  text-decoration: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--cyan);
   outline-offset: 2px;
+  border-radius: var(--r-xs);
 }
 
 ::selection {
-  color: var(--canvas);
-  background: var(--accent);
+  background: var(--cyan);
+  color: #f3f6f8;
 }
 
-/* ===== 滚动条（暗色适配） ===== */
+/* ===== 滚动条：图纸边缘的细滑轨 ===== */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
 }
 ::-webkit-scrollbar-track {
-  background: transparent;
+  background: var(--paper);
 }
 ::-webkit-scrollbar-thumb {
-  background: var(--border);
-  border-radius: 4px;
+  background: var(--line-2);
+  border: 3px solid var(--paper);
+  border-radius: 5px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--border2);
+  background: var(--cyan);
 }
 
-/* ===== 渐变文字 ===== */
-.grad-text {
-  background: var(--grad1);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
+/* ============================================================
+   原子件
+   ============================================================ */
+
+/* ---- 按钮：出图章式，主按钮=晒图青 ---- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  height: 38px;
+  padding: 0 16px;
+  border-radius: var(--r);
+  border: 1px solid var(--line-2);
+  background: var(--paper-raised);
+  color: var(--ink);
+  font-size: var(--fs-body);
+  font-weight: 500;
+  white-space: nowrap;
+  transition:
+    border-color var(--dur) var(--ease),
+    background var(--dur) var(--ease),
+    transform var(--dur) var(--ease);
+}
+.btn:hover {
+  border-color: var(--cyan);
+  color: var(--cyan);
+}
+.btn:active {
+  transform: translateY(1px);
+}
+.btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+  transform: none;
 }
 
-/* ===== 页面容器通用 ===== */
+/* 主按钮：青底白字（章面逻辑：整面压墨） */
+.btn-primary {
+  background: var(--cyan);
+  border-color: var(--cyan);
+  color: #f3f6f8;
+}
+.btn-primary:hover {
+  background: var(--cyan-deep);
+  border-color: var(--cyan-deep);
+  color: #f3f6f8;
+}
+
+/* 破坏性：验收红描边，填实只发生在 hover（日常安静，按下才警告） */
+.btn-danger {
+  border-color: var(--void);
+  color: var(--void-ink);
+}
+.btn-danger:hover {
+  background: var(--void);
+  border-color: var(--void);
+  color: #f3f6f8;
+}
+
+/* 幽灵（图标钮）：无边框，hover 起纸色 */
+.btn-ghost {
+  border-color: transparent;
+  background: transparent;
+  color: var(--ink-2);
+}
+.btn-ghost:hover {
+  background: var(--cyan-wash);
+  border-color: transparent;
+  color: var(--cyan);
+}
+
+.btn-sm {
+  height: 30px;
+  padding: 0 10px;
+  font-size: var(--fs-meta);
+}
+
+/* ---- 表单字段：标签在上、提示在下，禁 placeholder 当标签 ---- */
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.field-label {
+  font-size: var(--fs-meta);
+  font-weight: 600;
+  color: var(--ink-2);
+  letter-spacing: 0.02em;
+}
+.field-hint {
+  font-size: var(--fs-meta);
+  color: var(--ink-3);
+}
+.field-error {
+  font-size: var(--fs-meta);
+  color: var(--void-ink);
+}
+.input,
+.textarea,
+.select {
+  width: 100%;
+  background: var(--paper-raised);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r);
+  padding: 9px 12px;
+  font-size: var(--fs-body);
+  color: var(--ink);
+  transition: border-color var(--dur) var(--ease);
+}
+.input::placeholder,
+.textarea::placeholder {
+  color: var(--ink-3);
+}
+.input:hover,
+.textarea:hover,
+.select:hover {
+  border-color: var(--line-2);
+}
+.input:focus,
+.textarea:focus,
+.select:focus {
+  outline: none;
+  border-color: var(--cyan);
+  box-shadow: 0 0 0 3px var(--cyan-wash);
+}
+.textarea {
+  resize: vertical;
+  min-height: 96px;
+  line-height: 1.7;
+}
+.select {
+  appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--ink-2) 50%),
+    linear-gradient(-45deg, transparent 50%, var(--ink-2) 50%);
+  background-position: calc(100% - 16px) 17px, calc(100% - 11px) 17px;
+  background-size: 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 32px;
+}
+
+/* ---- 面板：0.5mm 描边的图面，无阴影（纸不悬浮）；阴影只给弹窗/浮层 ---- */
+.panel {
+  background: var(--paper-raised);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+}
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+}
+.panel-title {
+  font-size: var(--fs-h2);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+/* ---- 章：状态章面（方章，-6° 微斜，双描边） ---- */
+.stamp {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px 9px;
+  border: 1.5px solid currentColor;
+  border-radius: var(--r-xs);
+  outline: 1px solid currentColor; /* 双线圈：章味 */
+  outline-offset: -3.5px;
+  font-family: var(--font-ui);
+  font-size: var(--fs-meta);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  line-height: 1.6;
+  transform: rotate(-6deg);
+  white-space: nowrap;
+  user-select: none;
+}
+.stamp-pass { color: var(--pass-ink); }
+.stamp-wait { color: var(--wait-ink); }
+.stamp-void { color: var(--void-ink); }
+.stamp-info { color: var(--cyan); }
+.stamp-pencil { color: var(--pencil); }
+.stamp-rust { color: var(--rust); }
+
+/* 刚盖章：从上方压下来（全站唯一"盖章"动效的复用位） */
+@keyframes stamp-press {
+  0% {
+    transform: rotate(-6deg) scale(1.65);
+    opacity: 0;
+  }
+  60% {
+    transform: rotate(-6deg) scale(0.96);
+    opacity: 1;
+  }
+  100% {
+    transform: rotate(-6deg) scale(1);
+  }
+}
+.stamp-just {
+  animation: stamp-press 0.32s var(--ease) both;
+}
+
+/* ---- 图号牌：Oswald 大写压缩 + 细线衬底 ---- */
+.sheet-no {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--cyan);
+  font-size: var(--fs-meta);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap; /* 图号是整号，禁中间折行（9/17 architect-mobile 断成 ARCH-/0001-D） */
+}
+
+/* ---- 标题栏条（tblock）：每页共用的元信息格 ---- */
+.tblock {
+  display: flex;
+  align-items: stretch;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r);
+  background: var(--paper-raised);
+  overflow: hidden;
+  font-size: var(--fs-meta);
+}
+.tblock-cell {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 1px;
+  padding: 7px 14px;
+  min-width: 84px;
+}
+.tblock-cell + .tblock-cell {
+  border-left: 1px solid var(--line);
+}
+.tblock-key {
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.tblock-val {
+  font-weight: 600;
+  color: var(--ink);
+}
+/* 窄屏：四格折成 2×2（9/17 手机登录截图实锤——不折第四格被 overflow 裁掉半张） */
+@media (max-width: 480px) {
+  .tblock { flex-wrap: wrap; }
+  .tblock-cell { flex: 1 1 50%; min-width: 0; }
+  .tblock-cell:nth-child(2n + 1) { border-left: none; }
+  .tblock-cell:nth-child(n + 3) { border-top: 1px solid var(--line); }
+}
+
+/* ---- 细带（彩色只做细带/边线：虹彩云牌的捐赠纪律） ---- */
+.rule-strip {
+  height: 3px;
+  border-radius: 2px;
+  background: var(--cyan);
+}
+
+/* ---- 表格行：只用下边线，克制 ---- */
+.rows .row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 11px 4px;
+  border-bottom: 1px solid var(--line);
+}
+.rows .row:last-child {
+  border-bottom: none;
+}
+
+/* ---- 骨架屏：铅笔排线（loading 不是转圈） ---- */
+@keyframes hatch-slide {
+  to {
+    background-position: 56px 0;
+  }
+}
+.skeleton {
+  border-radius: var(--r-xs);
+  background: repeating-linear-gradient(
+    -45deg,
+    var(--paper-deep),
+    var(--paper-deep) 6px,
+    var(--paper) 6px,
+    var(--paper) 14px
+  );
+  background-size: 200% 100%;
+  animation: hatch-slide 1.2s linear infinite;
+}
+
+/* ---- 灯：小而真实的语义状态点（非装饰） ---- */
+.lamp {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--pencil);
+  border: 1px solid rgba(22, 34, 46, 0.25);
+  flex: none;
+}
+.lamp-on {
+  background: var(--pass);
+}
+.lamp-wait {
+  background: var(--wait);
+}
+.lamp-void {
+  background: var(--void);
+}
+.lamp-cyan {
+  background: var(--cyan);
+}
+@keyframes lamp-pulse {
+  50% {
+    box-shadow: 0 0 0 4px var(--cyan-wash);
+  }
+}
+.lamp-live {
+  animation: lamp-pulse 1.8s var(--ease) infinite;
+}
+
+/* ---- 页容器 ---- */
 .page {
   position: relative;
   z-index: 1;
   width: 100%;
-  padding: 32px 48px;
+  max-width: 1320px;
+  margin: 0 auto;
+  padding: 28px 40px 56px;
 }
-
 @media (max-width: 760px) {
-  .page { padding: 24px 18px; }
+  .page {
+    padding: 20px 16px 40px;
+  }
 }
 
+/* ---- 弹层通用：硫酸纸（全站唯一允许 blur 的地方） ---- */
+.scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(22, 34, 46, 0.42);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+}
+@keyframes sheet-fall {
+  from {
+    opacity: 0;
+    transform: translateY(-14px);
+  }
+}
+.sheet-fall {
+  animation: sheet-fall var(--dur-slow) var(--ease) both;
+}
+
+/* ---- 空态纸 ---- */
+.empty-sheet {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 10px;
+  padding: 48px 24px;
+  border: 1.5px dashed var(--line-2); /* 未盖章的虚线图框 */
+  border-radius: var(--r);
+  color: var(--ink-2);
+}
+.empty-sheet h3 {
+  font-size: var(--fs-h2);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+/* ---- 修订云（失败/返工的批注线） ---- */
+.revision-cloud {
+  border: 1.5px solid var(--void);
+  border-radius: 50% 45% 55% 48% / 55% 50% 48% 45%;
+  padding: 10px 16px;
+  background: var(--void-wash);
+}
+
+/* ---- 文字工具 ---- */
+.mono {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.dim {
+  color: var(--ink-2);
+}
+.faint {
+  color: var(--ink-3);
+}
+.hairline-top {
+  border-top: 1px solid var(--line);
+}
+
+/* ---- 路由过渡：翻页（轻，全站唯一页面级动效） ---- */
+.route-enter-active {
+  transition: opacity 0.22s var(--ease), transform 0.22s var(--ease);
+}
+.route-enter-from {
+  opacity: 0;
+  transform: translateY(6px);
+}
+
+/* ---- 无障碍：尊重减少动效 ---- */
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
+  *,
+  *::before,
+  *::after {
     animation-duration: 0.001ms !important;
     animation-iteration-count: 1 !important;
     scroll-behavior: auto !important;

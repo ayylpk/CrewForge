@@ -1,227 +1,146 @@
-<template>
-  <div class="file-tree">
-    <div v-for="node in sortedNodes" :key="node.path" class="tree-node" :style="{ paddingLeft: (depth) * 5 + 'px' }">
-      <!-- 目录 -->
-      <div
-        v-if="node.type === 'dir'"
-        class="node-row dir"
-        @click="toggle(node)"
-      >
-        <span class="node-arrow" :class="{ open: node.open }">
-          <svg viewBox="0 0 24 24" width="10" height="10" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-            <polyline points="9 18 15 12 9 6" />
-          </svg>
-        </span>
-        <span class="node-icon dir-icon">
-          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M3 7v11a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-6l-2-2H5a2 2 0 0 0-2 2z" />
-          </svg>
-        </span>
-        <span class="node-name">{{ node.name }}</span>
-      </div>
-
-      <!-- 文件 -->
-      <div
-        v-else
-        class="node-row file"
-        :class="{ active: selected === node.path, 'is-new': node.isNew }"
-        @click="$emit('select', node)"
-      >
-        <span class="node-arrow spacer"></span>
-        <span class="node-icon" :style="{ color: fileIcon(node).color }">
-          <svg v-html="fileIcon(node).icon" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></svg>
-        </span>
-        <span class="node-name">{{ node.name }}</span>
-        <!-- user_modified 锁标记 -->
-        <span v-if="node.userModified" class="node-lock" title="已被你修改，Agent 不会覆盖">
-          <svg viewBox="0 0 24 24" width="11" height="11" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="3" y="11" width="18" height="11" rx="2" />
-            <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-          </svg>
-        </span>
-      </div>
-
-      <!-- 子节点 -->
-      <template v-if="node.type === 'dir' && node.open">
-        <FileTree
-          :nodes="node.children || []"
-          :depth="depth + 1"
-          :selected="selected"
-          @select="$emit('select', $event)"
-        />
-      </template>
-    </div>
-  </div>
-</template>
-
 <script setup lang="ts">
-/**
- * 文件树组件（递归）
- * - 目录展开/折叠
- * - 文件类型图标（按扩展名着色）
- * - user_modified 锁标记（蓝色小锁）
- * - 新文件高亮动画（isNew）
- */
+/* ============================================================
+   文件树（执行面板 · 只读）：引擎产出的图纸目录
+   ------------------------------------------------------------
+   数据是 FileNode[]（buildTreeFromVO 在 ExecutionView 里拼好）；
+   点开文件时 content 为空 → 只 emit open，父组件拉详情（懒加载）。
+   渲染用扁平化 walker（不递归组件，缩进=左内边距，竖导引线靠背景）。
+   ============================================================ */
 import { computed } from 'vue'
+import { IconChevronDown, IconChevronRight, IconFile, IconFolder, IconFolderOpen } from '@tabler/icons-vue'
 import type { FileNode } from '../types/file'
 
-// depth 默认 0，避免根级递归时 undefined * 14 = NaN
-const props = withDefaults(
-  defineProps<{
-    nodes: FileNode[]
-    depth?: number
-    selected?: string
-  }>(),
-  { depth: 0 }
-)
-
-/** 展示排序：目录优先、同层按名称字母序（不改原数据） */
-const sortedNodes = computed<FileNode[]>(() =>
-  [...props.nodes].sort((a, b) => {
-    if (a.type !== b.type) return a.type === 'dir' ? -1 : 1
-    return a.name.localeCompare(b.name)
-  })
-)
-
-defineEmits<{
-  (e: 'select', node: FileNode): void
+const props = defineProps<{
+  nodes: FileNode[]
+  activePath?: string
 }>()
 
-/** 文件类型 → 图标 + 颜色 */
-const FILE_META: Record<string, { color: string; icon: string }> = {
-  java: {
-    color: '#f09050',
-    icon: '<path d="M4 6h16v12H4z"/><path d="M9 10h6M9 14h4"/>',
-  },
-  vue: {
-    color: '#5ecb8a',
-    icon: '<path d="M3 5l9 14 9-14z"/><polyline points="8.5 5 12 10.5 15.5 5"/>',
-  },
-  ts: {
-    color: '#45b8ff',
-    icon: '<path d="M4 6h16v12H4z"/><path d="M14 10v6M14 13h3"/><path d="M9.5 10v5M7.5 10h4"/>',
-  },
-  yml: {
-    color: '#f0c060',
-    icon: '<path d="M4 6h16v12H4z"/><circle cx="8" cy="10" r="1"/><circle cx="8" cy="14" r="1"/><line x1="12" y1="10" x2="17" y2="10"/><line x1="12" y1="14" x2="17" y2="14"/>',
-  },
-  json: {
-    color: '#f0c060',
-    icon: '<path d="M4 6h16v12H4z"/><polyline points="10 9 7 12 10 15"/><polyline points="14 9 17 12 14 15"/>',
-  },
-  xml: {
-    color: '#a76bff',
-    icon: '<path d="M4 6h16v12H4z"/><polyline points="9 9 6 12 9 15"/><polyline points="15 9 18 12 15 15"/>',
-  },
-  sql: {
-    color: '#5ec8c0',
-    icon: '<ellipse cx="12" cy="6" rx="7" ry="3"/><path d="M5 6v6c0 1.66 3.13 3 7 3s7-1.34 7-3V6"/><path d="M5 12v6c0 1.66 3.13 3 7 3s7-1.34 7-3v-6"/>',
-  },
-  md: {
-    color: '#8890a8',
-    icon: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/>',
-  },
-  html: {
-    color: '#f07050',
-    icon: '<path d="M4 6h16v12H4z"/><polyline points="9 10 6.5 12 9 14"/><polyline points="15 10 17.5 12 15 14"/><line x1="12.5" y1="9" x2="11.5" y2="15"/>',
-  },
-  css: {
-    color: '#5ea8f0',
-    icon: '<path d="M4 6h16v12H4z"/><path d="M8 10h8M8 14h5"/>',
-  },
-  js: {
-    color: '#f0d060',
-    icon: '<path d="M4 6h16v12H4z"/><polyline points="9 9.5 6.5 12 9 14.5"/><polyline points="15 9.5 17.5 12 15 14.5"/>',
-  },
+const emit = defineEmits<{ open: [node: FileNode] }>()
+
+interface FlatRow {
+  node: FileNode
+  depth: number
 }
 
-const DEFAULT_FILE = {
-  color: '#8890a8',
-  icon: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>',
+/** 深度优先展平：目录 open=false 时跳过子树 */
+const rows = computed<FlatRow[]>(() => {
+  const out: FlatRow[] = []
+  const walk = (arr: FileNode[], depth: number) => {
+    for (const n of arr) {
+      out.push({ node: n, depth })
+      if (n.type === 'dir' && n.open && n.children) walk(n.children, depth + 1)
+    }
+  }
+  walk(props.nodes, 0)
+  return out
+})
+
+function toggle(row: FlatRow) {
+  if (row.node.type === 'dir') row.node.open = !row.node.open
+  else emit('open', row.node)
 }
 
-function fileIcon(node: FileNode) {
-  const ext = node.name.split('.').pop()?.toLowerCase() || ''
-  return FILE_META[ext] || DEFAULT_FILE
-}
-
-/** 展开/折叠 */
-function toggle(node: FileNode) {
-  node.open = !node.open
+/** 文件扩展名（右下角小角标，等宽） */
+function extOf(name: string): string {
+  const i = name.lastIndexOf('.')
+  return i > 0 ? name.slice(i + 1).toLowerCase() : ''
 }
 </script>
 
+<template>
+  <div class="ftree">
+    <div v-if="!rows.length" class="ftree-empty faint">引擎还没有落盘任何文件</div>
+    <button
+      v-for="row in rows"
+      :key="row.node.path"
+      class="frow"
+      :class="{ active: row.node.path === activePath, dir: row.node.type === 'dir' }"
+      :style="{ paddingLeft: 10 + row.depth * 16 + 'px' }"
+      @click="toggle(row)"
+    >
+      <IconChevronDown v-if="row.node.type === 'dir' && row.node.open" :size="13" :stroke-width="1.75" class="chev" />
+      <IconChevronRight v-else-if="row.node.type === 'dir'" :size="13" :stroke-width="1.75" class="chev" />
+      <span v-else class="chev-sp" aria-hidden="true"></span>
+      <IconFolderOpen v-if="row.node.type === 'dir' && row.node.open" :size="14" :stroke-width="1.75" class="ico dir-ico" />
+      <IconFolder v-else-if="row.node.type === 'dir'" :size="14" :stroke-width="1.75" class="ico dir-ico" />
+      <IconFile v-else :size="14" :stroke-width="1.75" class="ico" />
+      <span class="fname" :title="row.node.path">{{ row.node.name }}</span>
+      <span v-if="row.node.userModified" class="mod" title="你手工改过（引擎不会再覆盖）">改</span>
+      <span v-else-if="row.node.type === 'file' && extOf(row.node.name)" class="ext mono">{{ extOf(row.node.name) }}</span>
+    </button>
+  </div>
+</template>
+
 <style scoped>
-.file-tree {
+.ftree {
+  display: flex;
+  flex-direction: column;
+  padding: 6px 0;
   font-size: 13px;
-  user-select: none;
 }
-.node-row {
+.ftree-empty {
+  padding: 18px 12px;
+  font-size: var(--fs-meta);
+}
+.frow {
   display: flex;
   align-items: center;
   gap: 5px;
-  padding: 4px 8px;
-  border-radius: 6px;
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background 0.12s;
+  width: 100%;
+  padding: 4px 10px;
+  text-align: left;
+  color: var(--ink);
+  border-left: 2px solid transparent;
+  min-width: 0;
 }
-.node-row:hover {
-  background: var(--bg3);
+.frow:hover {
+  background: var(--cyan-wash);
 }
-.node-row.dir {
-  font-weight: 500;
-  color: var(--text);
+.frow.active {
+  background: var(--cyan-wash-2);
+  border-left-color: var(--cyan); /* 选中轨：青线 0.5mm */
 }
-.node-row.file {
-  color: var(--text2);
+.frow.dir {
+  font-weight: 600;
 }
-.node-row.file.active {
-  background: rgba(69, 184, 255, 0.12);
-  color: var(--text);
-}
-.node-row.file.is-new {
-  animation: new-file 1.6s var(--ease);
-}
-@keyframes new-file {
-  0% { background: rgba(94, 203, 138, 0.35); }
-  100% { background: transparent; }
-}
-.node-arrow {
-  width: 12px;
-  height: 12px;
-  display: flex;
-  align-items: center;
+.chev,
+.chev-sp {
+  flex: none;
+  color: var(--ink-3);
+  width: 13px;
+  display: inline-flex;
   justify-content: center;
-  color: var(--text3);
-  flex-shrink: 0;
-  transition: transform 0.15s;
 }
-.node-arrow.open {
-  transform: rotate(90deg);
+.ico {
+  flex: none;
+  color: var(--ink-2);
 }
-.node-arrow.spacer {
-  visibility: hidden;
-  display: inline-block;
+.dir-ico {
+  color: var(--cyan);
 }
-.node-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-}
-.dir-icon {
-  color: var(--blue);
-}
-.node-name {
+.fname {
+  flex: 1;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  flex: 1;
+  white-space: nowrap;
 }
-.node-lock {
-  color: var(--blue);
-  display: flex;
-  align-items: center;
-  flex-shrink: 0;
+.ext {
+  flex: none;
+  font-size: 10px;
+  color: var(--ink-3);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+/* 手工修改章：微型"改"章（铅笔灰） */
+.mod {
+  flex: none;
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--pencil);
+  border: 1px solid var(--pencil);
+  border-radius: var(--r-xs);
+  padding: 0 3px;
+  line-height: 1.5;
 }
 </style>
