@@ -34,6 +34,37 @@ import { pickQuestioner } from "./confirm";
 import { dispatchArchitectTaskBatched } from "./architectTaskBuilder";
 import { createRealLlm } from "./developerAgent/realLlm";
 import { matchScaffolds } from "./developerAgent/scaffold";
+// 召唤工位（9/17 拓扑升级·层 B）：架构师对**自己冻结的产物**（蓝图 + 批次）有职权。
+//   · batch_resend：把 _tasks/<taskId>/ 档案里**尚未交付**的那一批重发一次
+//     （已交付的重发会被 developer 的 batch_duplicate_ignored 吃掉，天然幂等）；
+//   · plan_revision：修订说明落盘到 _tasks/<taskId>/consult-revisions.json。
+//   ★ 为什么 plan_revision 不改蓝图字段本身：蓝图一旦中途改写，developer 侧
+//     已冻结的 acceptanceHash 立刻漂移，已经交付的批次也失去"前缀"语义——
+//     那等于把正在跑的流水线当场作废。修订落在**它的产物文件**上，由下游自己读。
+import { handleConsultRequest } from "./consultStation";
+import type { ConsultContext } from "./consultStation";
+import { CONSULT_DRIVER } from "./consult";
+import type { ConsultAmendment, ConsultRequest } from "./consult";
+import { batchFileNameOf } from "./developerAgent/architectCheckpoint";
+import { ArchitectBatchSchema, ArchitectTaskSchema } from "./developerAgent/protocol";
+import type { ArchitectBatch, ArchitectTask } from "./developerAgent/protocol";
+import { DEVELOPER_NAME } from "./developerAgent/hubAdapter";
+import path from "node:path";
+
+/**
+ * 召唤工位（层 B）的注入缝。
+ *   · 缺省 = **接架构师自己的模型**（ARCHITECT_MODEL_JSON：拆分图用的就是它）——
+ *     层 B 的问答本来就该由它来答："计划改不改、哪一批重发"是它的判断。
+ *   · consultLlm：显式注入（测试注脚本化 fake，或换模型）。
+ *   · deterministicOnly：显式关掉 LLM（测试/无 key 环境），只做"复述自己产物"的
+ *     确定性回答——零行为变化的那条路。
+ */
+export interface ArchitectConsultDeps {
+    /** 被召唤时用它组织回答（可选）；不注入且未关 LLM = 用架构师自己的模型 */
+    consultLlm?: (prompt: string) => Promise<string>;
+    /** true = 不接任何 LLM，只做确定性复述（绝不编事实的那条路） */
+    deterministicOnly?: boolean;
+}
 
 /**
  * 脚手架接管维度计算（2026-09-17 修订）：state.stack 有两种形状——
@@ -938,9 +969,17 @@ export const DEFAULT_EDGES: Edge[] = [
 
 export class Architect extends BaseAgent {
     private graph: any;
+    /** 召唤工位（层 B）注入缝：缺省 = 确定性回答（见 ArchitectConsultDeps 注释） */
+    private readonly consultDeps: ArchitectConsultDeps;
+    /** 本工位签发的计划修订（层 B 的产物之一，落 _tasks/<taskId>/consult-revisions.json） */
+    private readonly planRevisions = new Map<string, { detail: string; payload?: Record<string, unknown>; at: number }[]>();
 
-    constructor(station: TransferStation, nodes: Node[] = DEFAULT_NODES, edges: Edge[] = DEFAULT_EDGES) {
+    constructor(
+        station: TransferStation, nodes: Node[] = DEFAULT_NODES, edges: Edge[] = DEFAULT_EDGES,
+        consultDeps: ArchitectConsultDeps = {},
+    ) {
         super("architect", roles.architect, station);
+        this.consultDeps = consultDeps;
         this.build(nodes, edges);
 
         // phase_plan → 拆分当前阶段；phase_done → 转告 PM 请求下一阶段
@@ -964,6 +1003,191 @@ export class Architect extends BaseAgent {
             this.send("manager", { type: "phase_request", phase: data.phase });
             console.log(`[architect] 发送到 PM：请求下一阶段（阶段 ${data.phase} 已完成）`);
         });
+        // ---------- 召唤工位（9/17 层 B）：司机中途把问题送进来 ----------
+        //   为什么是它：计划/批次是**架构师冻结的产物**，中途发现"计划里少了鉴权、
+        //   批次顺序不对"时，唯一有权处置的就是它。以前它只在阶段开始时出现一次，
+        //   之后司机只能自己发明解释——这正是"换脑断层"。
+        //   ★ 不按 fromNames 过滤：发错人的请求也要拿到一条**明确拒绝**的回复
+        //     （投递闸在 handleConsultRequest 里）。
+        this.on("consult_request", ({ data }) => this.answerConsult(data as unknown as ConsultRequest));
+    }
+
+    /** 召唤应答（层 B）：ownContext = 它自己的蓝图/批次产物；amend = 计划修订 + 批次重发 */
+    private async answerConsult(req: ConsultRequest): Promise<void> {
+        const reply = await handleConsultRequest(req, this.buildConsultContext(req));
+        this.send(CONSULT_DRIVER, reply as unknown as Record<string, any>);
+        console.log(`[architect] 应答召唤 ${reply.consultId}（confidence=${reply.confidence}`
+            + `${reply.refused ? "，已拒绝" : ""}${reply.amendment ? `，已签发 ${reply.amendment.kind}` : ""}）`);
+    }
+
+    private buildConsultContext(req: ConsultRequest): ConsultContext {
+        const pid = currentProjectId();
+        const taskId = typeof req?.taskId === "string" && req.taskId ? req.taskId : "";
+        const llm = this.consultLlmPort();
+        return {
+            role: "architect",
+            projectId: pid != null ? String(pid) : "",
+            // 架构师**不绑定单一任务**：一个阶段一个 taskId，同一个工位实例服务整个阶段。
+            // 留空 = "不持该维度"，不构成拒绝理由（见 handleConsultRequest 的身份闸注释）。
+            taskId: "",
+            ownContext: async () => this.renderOwnContext(taskId),
+            ...(llm ? { llm } : {}),
+            amend: async (a) => this.applyArchitectAmendment(a, taskId, pid),
+        };
+    }
+
+    /**
+     * 层 B 的 LLM 端口：架构师本来就有模型（拆分图走的就是 ARCHITECT_MODEL_JSON），
+     * 所以默认真的由它来答——否则"召唤架构师"只会复述自己产物的文件名，
+     * 而它真正该回答的是"这个计划要不要改"。
+     *   · 一次一调（超时/重试由调用方负责；调用失败会被应答器收敛成 refused，不抛）；
+     *   · 模型档位/上限沿用拆解档，不在这里另调参（调参要能被审计）。
+     */
+    private consultLlmPort(): ((prompt: string) => Promise<string>) | undefined {
+        if (this.consultDeps.consultLlm) return this.consultDeps.consultLlm;
+        if (this.consultDeps.deterministicOnly) return undefined;
+        return async (prompt: string): Promise<string> => {
+            const model = initModels(ARCHITECT_MODEL_JSON, "architect") as unknown as {
+                invoke(input: unknown): Promise<{ content: unknown }>;
+            };
+            const res = await model.invoke([new SystemMessage(prompt)]);
+            return typeof res.content === "string" ? res.content : JSON.stringify(res.content);
+        };
+    }
+
+    /** 本工位持有的产物目录（与派发节点落盘的同一处：RUNS_ROOT/p{N}/_tasks/{taskId}） */
+    private taskDirOf(taskId: string, pid: number | null): string | null {
+        if (pid == null || !taskId) return null;
+        return path.join(projectDir(pid), "_tasks", taskId);
+    }
+
+    /** 读回自己落盘的蓝图与批次（读不到就如实说读不到，不猜） */
+    private readOwnArtifacts(taskId: string, pid: number | null): {
+        dir: string | null; blueprint: ArchitectTask | null; batches: ArchitectBatch[]; reasons: string[];
+    } {
+        const dir = this.taskDirOf(taskId, pid);
+        const reasons: string[] = [];
+        let blueprint: ArchitectTask | null = null;
+        const batches: ArchitectBatch[] = [];
+        if (!dir) {
+            reasons.push("拿不到 _tasks 目录（项目号或 taskId 缺失）");
+            return { dir: null, blueprint: null, batches, reasons };
+        }
+        const bpFile = path.join(dir, "blueprint.json");
+        if (fs.existsSync(bpFile)) {
+            try { blueprint = ArchitectTaskSchema.parse(JSON.parse(fs.readFileSync(bpFile, "utf-8"))); }
+            catch (e) { reasons.push(`blueprint.json 不可用：${(e as Error).message}`); }
+        } else {
+            reasons.push(`蓝图文件不存在（${bpFile}）：本阶段可能还没派发，或 taskId 不对`);
+        }
+        try {
+            for (const f of fs.readdirSync(dir)) {
+                if (!f.startsWith("batch-") || !f.endsWith(".json")) continue;
+                try {
+                    batches.push(ArchitectBatchSchema.parse(JSON.parse(fs.readFileSync(path.join(dir, f), "utf-8"))));
+                } catch (e) {
+                    reasons.push(`${f} 不可用：${(e as Error).message}`);
+                }
+            }
+        } catch { /* 目录不存在：上面已经记过原因 */ }
+        return { dir, blueprint, batches, reasons };
+    }
+
+    /** ownContext：只讲自己拥有的产物（工作项序、已交付批次、判据 id、技术栈、已签发修订） */
+    private async renderOwnContext(taskId: string): Promise<string> {
+        const pid = currentProjectId();
+        const { dir, blueprint, batches, reasons } = this.readOwnArtifacts(taskId, pid);
+        const items = blueprint?.foundationPlan.workItems ?? [];
+        const deliveredIds = new Set(batches.map((b) => b.itemId));
+        const pending = items.filter((w) => !deliveredIds.has(w.id));
+        const revisions = this.planRevisions.get(taskId) ?? [];
+        return [
+            "# 架构师当前持有的产物（事实，逐条可核）",
+            `- 产物目录：${dir ?? "（不可用）"}`,
+            blueprint ? `- 蓝图：projectId=${blueprint.projectId} taskId=${blueprint.taskId}` : "- 蓝图：**没读到**",
+            blueprint
+                ? `- 技术栈：frontend=${blueprint.stackProfile.frontend} backend=${blueprint.stackProfile.backend}`
+                    + `${blueprint.stackProfile.database ? ` database=${blueprint.stackProfile.database}` : ""}`
+                : "",
+            `- 工作项（顺序即执行序，${items.length}）：${items.map((w) => `${w.id}(${w.kind})`).join(" → ") || "（无）"}`,
+            `- 已交付批次（${batches.length}）：${batches.map((b) => b.itemId).join("、") || "（无）"}`,
+            `- **尚未交付**的工作项（${pending.length}）：${pending.map((w) => w.id).join("、") || "（无，蓝图已发满）"}`,
+            `- 蓝图判据 id：${blueprint?.acceptanceChecks.map((c) => String((c as { id?: unknown }).id ?? "?" )).join("、") || "（无）"}`,
+            `- 已签发的计划修订（${revisions.length}）：${revisions.map((r) => r.detail).join("；") || "（无）"}`,
+            "",
+            "## 注意事项",
+            ...(reasons.length > 0 ? reasons.map((r) => `- 读取告警：${r}`) : ["- 产物读取无告警"]),
+            "- 我不持有：生成项目的代码（司机）、判据的执行/判定（测试）、需求原文（PM）。",
+            "- 蓝图字段一旦中途改写会让 developer 侧 acceptanceHash 漂移、已发批次失去前缀语义，"
+                + "所以计划修订落在 consult-revisions.json 上，由下游读；**已冻结的蓝图字段不动**。",
+        ].filter((l) => l !== "").join("\n");
+    }
+
+    /**
+     * 层 B 的职权动作（只认自己拥有的产物；别的 kind 一律退回，不改任何状态）：
+     *   batch_resend → 把**尚未交付**的那一批原样重发给 developer；
+     *   plan_revision → 修订说明落盘 _tasks/<taskId>/consult-revisions.json（进 ownContext 与下游可见）。
+     */
+    private async applyArchitectAmendment(a: ConsultAmendment, taskId: string, pid: number | null): Promise<boolean> {
+        if (a.kind === "batch_resend") {
+            const { dir, blueprint, batches, reasons } = this.readOwnArtifacts(taskId, pid);
+            if (!dir || !blueprint) {
+                console.warn(`[architect] 批次重发被退回：读不到自己的产物（${reasons.join("；")}）`);
+                return false;
+            }
+            const delivered = new Set(batches.map((b) => b.itemId));
+            const wanted = typeof a.payload?.["itemId"] === "string" ? String(a.payload["itemId"]) : "";
+            const items = blueprint.foundationPlan.workItems ?? [];
+            const target = wanted
+                ? items.find((w) => w.id === wanted)
+                : items.find((w) => !delivered.has(w.id));
+            if (!target) {
+                console.warn(`[architect] 批次重发被退回：${wanted ? `工作项 ${wanted} 不在蓝图里` : "没有尚未交付的工作项"}`);
+                return false;
+            }
+            const file = path.join(dir, batchFileNameOf(target.id));
+            if (!fs.existsSync(file)) {
+                // 诚实失败：批还没拆出来就不假装"已重发"（否则司机会以为等到了）
+                console.warn(`[architect] 批次重发被退回：批次文件不存在（${file}）`);
+                return false;
+            }
+            try {
+                const batch = ArchitectBatchSchema.parse(JSON.parse(fs.readFileSync(file, "utf-8")));
+                if (batch.projectId !== blueprint.projectId || batch.taskId !== blueprint.taskId) {
+                    console.warn("[architect] 批次重发被退回：批次文件身份与蓝图不符");
+                    return false;
+                }
+                this.station.sendMessage("architect", DEVELOPER_NAME, JSON.stringify(batch));
+                console.log(`[architect] 层 B：按召唤重发批次 ${batch.itemId} → ${DEVELOPER_NAME}`);
+                return true;
+            } catch (e) {
+                console.warn(`[architect] 批次重发失败：${(e as Error).message}`);
+                return false;
+            }
+        }
+        if (a.kind === "plan_revision") {
+            const dir = this.taskDirOf(taskId, pid);
+            if (!dir) return false;
+            const list = this.planRevisions.get(taskId) ?? [];
+            list.push({ detail: a.detail, ...(a.payload ? { payload: a.payload } : {}), at: Date.now() });
+            this.planRevisions.set(taskId, list);
+            try {
+                fs.mkdirSync(dir, { recursive: true });
+                fs.writeFileSync(
+                    path.join(dir, "consult-revisions.json"),
+                    JSON.stringify({ taskId, revisions: list, updatedAt: new Date().toISOString() }, null, 2),
+                    "utf-8",
+                );
+            } catch (e) {
+                // 落盘失败 = 修订没有留下任何可核验的痕迹 → 按未生效处理（不骗司机）
+                console.warn(`[architect] 计划修订落盘失败：${(e as Error).message}`);
+                return false;
+            }
+            console.log(`[architect] 层 B：已记录计划修订（${taskId}）：${a.detail.slice(0, 200)}`);
+            return true;
+        }
+        // 其余 kind（判据澄清/需求澄清/验收说明）不是架构师的产物 → 退回
+        return false;
     }
 
     /** 注册实现（schema/code/cond）→ stitch() 拼接编译 → this.graph */

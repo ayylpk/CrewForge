@@ -9,6 +9,9 @@
 // ============================================================
 
 import { Annotation } from "@langchain/langgraph";
+// 求助（9/17）：升级判定与组题在 escalation.ts（纯函数，零 LLM 可单测）
+import { MAX_ESCALATIONS_PER_TASK } from "./escalation";
+import type { EscalationQuestion } from "./escalation";
 import { skillForWorkItem } from "./protocol";
 import type {
     AcceptanceCheck, Contract, DomainModel, FoundationPlan, RequirementSnapshot,
@@ -23,8 +26,11 @@ export type DeveloperStatus =
     | "waiting_test"  // 已落库、等外部 TestAgent 消息恢复（**不在节点里阻塞**）
     | "waiting_item"  // 分批模式：等架构师推送下一个工作项批次（同样**不阻塞**，END 后由外部复活）
     | "repairing"     // 按失败证据修复
+    | "waiting_human" // 保险丝触发后**暂停问人**（9/17 加）：问题进 state.human 出图，
+                      //   人答后由 index 侧 ask 回填 humanAnswer 复活。它不是终态——
+                      //   这正是"卡住即死"改造成"卡住问人"的那一步。
     | "ready"         // 唯一入口：受信 TestAgent 的 TestPassed + 真实机器证据
-    | "blocked"       // 重复失败 / 修复次数耗尽 / 预算超限 / 环境缺失
+    | "blocked"       // 重复失败 / 修复次数耗尽 / 预算超限 / 环境缺失（且已问过人也无解）
     | "failed"        // 未捕获异常收尾
     | "cancelled";    // 被显式取消
 
@@ -105,6 +111,30 @@ export interface DeveloperState {
     llmCallsCompleted: number;
     /** 工具调用次数 */
     toolCalls: number;
+    // ---------- 求助（human-in-the-loop，9/17 加） ----------
+    /** 待人回答的问题（非 null = 出图等答案；结构与 GraphFactory.HumanQuestion 兼容） */
+    human: EscalationQuestion | null;
+    /** 人给的答案（index 侧 ask 回填后复活；escalate 节点消费完清空） */
+    humanAnswer: string | null;
+    /** 本任务已求助次数（有界：问人也救不回来就如实收尾） */
+    escalationsUsed: number;
+    /** 求助次数上限（默认 MAX_ESCALATIONS_PER_TASK） */
+    maxEscalations: number;
+    /** 人给的自由文本指示（按时间序保留，进上下文当新的输入） */
+    humanGuidance: string[];
+    /**
+     * ★ 上下文越窗阻塞（9/17 接线 contextBudget）：非 null = **这一轮的 LLM 请求不许发**
+     *   （硬发就是越窗 400、截断就是丢决策），值是人类可读的那一行诊断（含用量/阻塞线/窗口来源）。
+     *
+     *   为什么放在 state 而不是只放在 loop 的返回值里：runToolLoop 是在节点**内部**跑的，
+     *   它没有"出图"的能力；要复用既有的问人站（escalate 节点 → state.human → waiting_human
+     *   → index.invokeWithHuman 回填答案复活），就必须把这件事**带出节点**。
+     *   出口与其它保险丝完全同一条：routeAfter* → "developerBlocked" → escalate（装配层映射）。
+     *   人答"继续/降级"后由 escalate 节点清空（不清就会每轮都往回送，打转）。
+     */
+    contextBlocked: string | null;
+    /** 人选择"降级"后被搁置的工作项（**如实记录，绝不假装完成**） */
+    deferredWorkItems: string[];
     status: DeveloperStatus;
     error: string | null;
 }
@@ -158,6 +188,15 @@ export const DeveloperAnnotation = Annotation.Root({
     toolCalls: Annotation<number>({ reducer: lastWrite, default: () => 0 }),
     status: Annotation<DeveloperStatus>({ reducer: lastWrite, default: () => "received" }),
     error: Annotation<string | null>({ reducer: lastWrite, default: () => null }),
+    // ---------- 求助（9/17）：问人三件套 + 人的指引 ----------
+    human: Annotation<EscalationQuestion | null>({ reducer: lastWrite, default: () => null }),
+    humanAnswer: Annotation<string | null>({ reducer: lastWrite, default: () => null }),
+    escalationsUsed: Annotation<number>({ reducer: lastWrite, default: () => 0 }),
+    maxEscalations: Annotation<number>({ reducer: lastWrite, default: () => MAX_ESCALATIONS_PER_TASK }),
+    humanGuidance: Annotation<string[]>({ reducer: appendUnique, default: () => [] }),
+    deferredWorkItems: Annotation<string[]>({ reducer: appendUnique, default: () => [] }),
+    // ★ 上下文越窗阻塞（9/17）：lastWrite（它是一次判定结果，不是累积量）
+    contextBlocked: Annotation<string | null>({ reducer: lastWrite, default: () => null }),
 });
 
 /** 供 index.ts / 测试构造初始状态 */
@@ -177,6 +216,9 @@ export function initialDeveloperState(patch: Partial<DeveloperState>): Developer
         maxRepairAttempts: 2, stalledRepairs: 0,
         acceptanceStallCount: 0, acceptanceStallKey: null, localChecksUnverified: [],
         llmCallsPlanned: 0, llmCallsCompleted: 0, toolCalls: 0,
+        human: null, humanAnswer: null, escalationsUsed: 0,
+        maxEscalations: MAX_ESCALATIONS_PER_TASK, humanGuidance: [], deferredWorkItems: [],
+        contextBlocked: null,
         status: "received", error: null,
         ...patch,
     };
@@ -189,16 +231,19 @@ export function initialDeveloperState(patch: Partial<DeveloperState>): Developer
 // ============================================================
 
 export const STATUS_TRANSITIONS: Record<DeveloperStatus, DeveloperStatus[]> = {
-    received: ["inspecting", "blocked", "failed", "cancelled"],
-    inspecting: ["implementing", "blocked", "failed", "cancelled"],
-    implementing: ["implementing", "testing", "waiting_test", "waiting_item", "repairing", "blocked", "failed", "cancelled"],
-    testing: ["testing", "waiting_test", "repairing", "ready", "blocked", "failed", "cancelled"],
-    waiting_test: ["testing", "repairing", "ready", "blocked", "failed", "cancelled"],
+    received: ["inspecting", "waiting_human", "blocked", "failed", "cancelled"],
+    inspecting: ["implementing", "waiting_human", "blocked", "failed", "cancelled"],
+    implementing: ["implementing", "testing", "waiting_test", "waiting_item", "repairing", "waiting_human", "blocked", "failed", "cancelled"],
+    testing: ["testing", "waiting_test", "repairing", "waiting_human", "ready", "blocked", "failed", "cancelled"],
+    waiting_test: ["testing", "repairing", "waiting_human", "ready", "blocked", "failed", "cancelled"],
     // waiting_item 只能回 implementing 继续干活或收口终态；**不得**直达 testing/ready——
     // 判据没到齐就没有"送检"这回事（routeAfterLocalChecks 的未达闸是同一件事的另一半）。
     // waiting_test → waiting_item 也被禁：一旦送过检，acceptanceHash 必须冻结。
-    waiting_item: ["implementing", "blocked", "failed", "cancelled"],
-    repairing: ["implementing", "testing", "waiting_test", "blocked", "failed", "cancelled"],
+    waiting_item: ["implementing", "waiting_human", "blocked", "failed", "cancelled"],
+    repairing: ["implementing", "testing", "waiting_test", "waiting_human", "blocked", "failed", "cancelled"],
+    // 问人态（9/17）：人答"继续/降级"→ 回 implementing 接着干；人答"停止"或问满次数 → blocked。
+    // 它**不是终态**——这一点是"卡住即死 → 卡住问人"的全部意义所在。
+    waiting_human: ["implementing", "repairing", "testing", "waiting_test", "waiting_item", "blocked", "failed", "cancelled"],
     ready: [],
     blocked: [],
     failed: [],

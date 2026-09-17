@@ -32,6 +32,8 @@
 // ============================================================
 
 import type { DeveloperLlm } from "./graph";
+import { PROMPT_TOO_LONG_ERROR_MESSAGE } from "./contextBudget";
+import type { SummaryRequest, SummaryResponse, Usage } from "./contextBudget";
 
 export interface RealLlmOptions {
     /** 端点，默认取 process.env.ANTHROPIC_BASE_URL */
@@ -482,7 +484,9 @@ export function createRealLlm(opts: RealLlmOptions = {}): DeveloperLlm {
     const model = opts.model ?? process.env.DEVELOPER_LLM_MODEL ?? "qwen3.8-flash";
     // 9/12 T1 实弹教训：qwen3.8-flash 会先吐大段分析文字再出 JSON，2048 经常死在
     // JSON 之前（stop=max_tokens → 决策丢失 → 白烧 45s/次）。抬到 8192 留足推理余量。
-    const maxTokens = opts.maxTokens ?? 8192;
+    // 9/17 再抬 8192 → 32768：p7 全跑实测 [llm#8] out=40960（升档×2），8192 上限直接触发翻倍升档，
+    // 而且被截断的响应永远成不了合法批次——guardrails 的 evaluateWriteBatch 因此形同虚设。
+    const maxTokens = opts.maxTokens ?? 32768;
     // T3b 实弹教训：偶发一次 >120s 的慢响应会把整个任务打死（见 graph.ts 的配套修复），
     // 超时抬到 240s；再配合 runToolLoop 的单步容错，慢不再等于死。
     // 9/16 p7 联跑用户指令 ×1.5：240s → 360s（中型项目单发判据体量更大）。
@@ -499,10 +503,29 @@ export function createRealLlm(opts: RealLlmOptions = {}): DeveloperLlm {
 
     let calls = 0;
 
+    // ★ 9/17 压缩摘要口：**同一个客户端**（同端点、同凭据、同超时/重试参数）。
+    //   懒建（第一次真的要压缩时才建），与 next 的懒校验凭据同款理由：
+    //   没配 key 也不该在构造期就炸掉"压缩根本没被触发"的正常路径。
+    let summarizer: ((request: SummaryRequest) => Promise<SummaryResponse>) | null = null;
+    const ensureSummarizer = (): ((request: SummaryRequest) => Promise<SummaryResponse>) =>
+        (summarizer ??= createRealLlmSummarizer({
+            baseUrl, authToken, model, timeoutMs, maxRetries, retryInitialDelayMs,
+        }));
+
     return {
         id: `real:${model}@${baseUrl}${native ? ":tools" : ":json"}`,
 
         calls: () => calls,
+
+        /**
+         * 压缩摘要调用（cc 的 compact 调用）。**计入 calls()**：它也是一次真实调用，
+         * "真实调用计数"少算它就会让"这一步花了多少钱"对不上（台账里由 runToolLoop
+         * 按 querySource:'compact' 另记一笔预占/完成）。
+         */
+        async summarize(request: SummaryRequest): Promise<SummaryResponse> {
+            calls++;
+            return ensureSummarizer()(request);
+        },
 
         async next(input) {
             calls++;
@@ -653,5 +676,145 @@ export function createRealLlm(opts: RealLlmOptions = {}): DeveloperLlm {
                 ? fromAnthropicContent(data.content, data.stop_reason ?? "")
                 : (extractJson(rawText) ?? rawText);
         },
+    };
+}
+
+// ============================================================
+// 压缩摘要调用（9/17 接线 contextBudget 的 CompactHost.summarize）
+//
+//   为什么不复用 `next()`：next() 的语义是"解析出一个**决策**"（tool_use / done），
+//   返回值是决策对象；而压缩要的是**一段纯文本摘要 + 那次调用的 usage**。
+//   硬塞进 next() 会把"决策解析"和"摘要正文"两件事搅在一起（摘要文本里出现
+//   JSON 就会被 extractJson 抠走、被 fromAnthropicContent 当成 done 之前还会先
+//   走一遍工具解析）——那是把一个确定的解析路径做成不确定的。
+//   所以另起一口，但**请求形状照抄 cc**（compact.ts:1292-1326 的参数部分）：
+//     system = "You are a helpful AI assistant tasked with summarizing conversations."
+//     ├─ 由 buildSummaryRequest 造好（本文件不自己拼提示词）
+//     max_tokens <= 20_000（请求里的 maxOutputTokensOverride）
+//     thinking 关（见下面的说明）
+//
+//   【适配①】tools：cc 的摘要请求只留 FileReadTool（**限制 forked agent 的工具面**）。
+//     本仓库的 SummaryRequest.tools 是**工具名字符串**（无 schema），而摘要提示词的
+//     第一句就是 "Do NOT call any tools" —— 所以这里**不发 tools 字段**：
+//     发一个没有 schema 的工具名只会让端点报错或让模型乱调，两件事都没意义。
+//   【适配②】thinking：cc 明确发 `{type:'disabled'}`。本仓库同一个端点上
+//     `models.ts` 的 ChatDeepSeek 用的就是 `thinking:{type:'disabled'}`（原生支持），
+//     所以这里照发——把"摘要调用不许思考"这条 cc 语义真正落实，而不是靠默认值碰运气。
+//   【适配③】prompt-too-long 的识别：cc 从服务端 413 报文里解析 tokenGap
+//     （getPromptTooLongTokenGap），本仓库的客户端**不保留 errorDetails**（适配清单 A10）。
+//     这里退回"错误正文认关键词"：认出"上下文太长"就把摘要文本换成
+//     PROMPT_TOO_LONG_ERROR_MESSAGE —— 于是 compactConversation 里那条
+//     PTL 重试环（truncateHeadForPTLRetry，最多 3 次）**真的会被走到**，
+//     而不是永远停在"HTTP 400"上直接放弃压缩。
+// ============================================================
+
+export interface RealLlmSummarizerOptions {
+    baseUrl?: string;
+    authToken?: string;
+    model?: string;
+    timeoutMs?: number;
+    maxRetries?: number;
+    retryInitialDelayMs?: number;
+}
+
+/** 服务端"上下文太长"的报文特征（各网关写法不一，认关键词；认不出就走普通失败） */
+const PROMPT_TOO_LONG_PATTERN =
+    /prompt is too long|maximum context length|context[_ ]length|too many tokens|input is too long|exceed[s]? (the )?max/i;
+
+/**
+ * 造一个摘要口（CompactHost.summarize 的实现）。**只做一次 HTTP 调用**，
+ * 重试策略与主路径同源（429/5xx/网络抖动退避重试；退避会越预算就不试）。
+ */
+export function createRealLlmSummarizer(
+    opts: RealLlmSummarizerOptions = {},
+): (request: SummaryRequest) => Promise<SummaryResponse> {
+    const baseUrl = (opts.baseUrl ?? process.env.ANTHROPIC_BASE_URL ?? "").replace(/\/+$/, "");
+    const authToken = opts.authToken ?? process.env.ANTHROPIC_AUTH_TOKEN ?? "";
+    const defaultModel = opts.model ?? process.env.DEVELOPER_LLM_MODEL ?? "qwen3.8-flash";
+    const timeoutMs = opts.timeoutMs ?? 360_000;
+    const maxRetries = opts.maxRetries ?? RETRY_MAX_RETRIES;
+    const retryInitialDelayMs = opts.retryInitialDelayMs ?? RETRY_INITIAL_DELAY_MS;
+
+    if (!baseUrl) throw new Error("realLlm.summarize：缺 ANTHROPIC_BASE_URL（端点未配置）");
+    if (!authToken) throw new Error("realLlm.summarize：缺 ANTHROPIC_AUTH_TOKEN（token 未配置）");
+
+    return async (request: SummaryRequest): Promise<SummaryResponse> => {
+        const startedAt = Date.now();
+        // 【适配】消息形状：cc 的 Message[] 直译成 Anthropic 的 role/content；
+        //   system / attachment 在 buildSummaryRequest 里已经被滤掉（normalizeMessagesForAPI）。
+        const messages = request.messages
+            .filter((m) => m.type === "user" || m.type === "assistant")
+            .map((m) => ({
+                role: m.type === "user" ? "user" : "assistant",
+                content: m.message.content,
+            }));
+
+        const body: Record<string, unknown> = {
+            // 模型名用**请求里的**（buildSummaryRequest 填的是当前档位的模型），
+            // 而不是这个 summarizer 自己的默认名——否则"用 pro 档跑却拿 flash 压缩"。
+            model: request.model || defaultModel,
+            max_tokens: request.maxOutputTokensOverride,
+            system: request.systemPrompt.join("\n\n"),
+            messages,
+            thinking: request.thinkingConfig,
+        };
+
+        const postOnce = async (): Promise<
+            | { ok: true; data: MessagesResponse }
+            | { ok: false; error: Error; retryable: boolean; retryAfterMs: number | null; tooLong: boolean }
+        > => {
+            try {
+                const res = await fetch(`${baseUrl}/v1/messages`, {
+                    method: "POST",
+                    headers: {
+                        "content-type": "application/json",
+                        "authorization": `Bearer ${authToken}`,
+                        "anthropic-version": "2023-06-01",
+                    },
+                    body: JSON.stringify(body),
+                    signal: AbortSignal.timeout(timeoutMs),
+                });
+                if (!res.ok) {
+                    const errBody = await res.text().catch(() => "");
+                    return {
+                        ok: false,
+                        error: new Error(`realLlm.summarize：HTTP ${res.status} ${errBody.slice(0, 500)}`),
+                        retryable: isRetryableStatus(res.status),
+                        retryAfterMs: parseRetryAfterMs(res.headers),
+                        tooLong: PROMPT_TOO_LONG_PATTERN.test(errBody),
+                    };
+                }
+                return { ok: true, data: await res.json() as MessagesResponse };
+            } catch (e) {
+                return { ok: false, error: e as Error, retryable: true, retryAfterMs: null, tooLong: false };
+            }
+        };
+
+        for (let i = 0; ; i++) {
+            const r = await postOnce();
+            if (r.ok) {
+                const text = (r.data.content ?? [])
+                    .filter((b) => b.type === "text" && typeof b.text === "string")
+                    .map((b) => b.text as string)
+                    .join("");
+                const u = r.data.usage;
+                const usage: Usage | undefined = u
+                    ? {
+                        input_tokens: u.input_tokens ?? 0,
+                        output_tokens: u.output_tokens ?? 0,
+                        cache_read_input_tokens: readCacheReadTokens(u),
+                        cache_creation_input_tokens: readCacheCreationTokens(u),
+                    }
+                    : undefined;
+                return { text, ...(usage ? { usage } : {}) };
+            }
+            // 上下文太长：**不重试**（重发同一份请求必然还是太长），
+            // 把信号交回压缩器 —— 它会截头重试（最多 3 次）。
+            if (r.tooLong) return { text: PROMPT_TOO_LONG_ERROR_MESSAGE, isApiErrorMessage: true };
+            if (!r.retryable || i >= maxRetries) throw r.error;
+            const waitMs = r.retryAfterMs ?? retryDelayMs(i + 1, Math.random, retryInitialDelayMs);
+            if (Date.now() - startedAt + waitMs >= timeoutMs) throw r.error;
+            await sleep(waitMs);
+        }
     };
 }

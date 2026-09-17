@@ -27,19 +27,24 @@ import {
     commandKeyOf, integrityDeltas, resolveSandboxCapabilities, sanitizeEnv,
 } from "../tools/processSandbox";
 import { invokeWithFingerprintCache, SNAPSHOT_KEYED_TOOLS, toolCallFingerprint } from "../graph";
+import { cleanupTempDirsAfterTests, tmpDir } from "./_tmp";
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "cf-dev-sandbox-"));
+const root = tmpDir("cf-dev-sandbox");
 const NODE = process.execPath;
 const opened: DeveloperLedger[] = [];
 let seq = 0;
 
-// 清理：只关账本。
-// ⚠️ 刻意**不**做整棵目录的 rmSync —— 这些用例会拉起真实子进程、建真 sqlite（WAL），
-//    在 Windows 上删树要 6 秒以上，会把 afterAll 的 5 秒 hook 超时打爆（实测过）。
-//    临时目录交给系统清理，比让测试挂在收尾钩子上强。
+// 清理分两步，**顺序不能反**（9/17 实测）：
+//   ① 先关账本 —— 这些用例建的是真 sqlite，Windows 上开着库删树必 EBUSY
+//      （实测报错就是 `EBUSY: resource busy or locked`；db.close() 之后同一条 rmSync 立刻成功）；
+//   ② 再交给 _tmp.ts 删树 —— 它带重试/退避，并且给 afterAll 传 60 秒超时
+//      （删树要好几秒，默认 5 秒会把收尾变成"钩子超时"；老注释里"临时目录交给系统清理"
+//       的那个妥协，就是被这一步替掉的）。bun 的钩子按注册顺序执行，所以清理钩子必须
+//       注册在下面这个 afterAll **之后**。
 afterAll(() => {
     for (const l of opened) { try { l.close(); } catch { /* 已关 */ } }
 });
+cleanupTempDirsAfterTests();
 
 function newProject(name: string): string {
     const dir = path.join(root, name);

@@ -17,7 +17,12 @@ import type { ReadonlySubAgentRole } from "./readonlySubAgent";
 
 export const delegateReadonlyTool: ToolSpec = {
     name: "delegateReadonly",
-    description: "调用只读子 Agent 分析问题（可搜索、可解释错误、可给结构化建议；绝不能写盘）。传 role 走结构化通道：explorer / debugger / ui-reviewer",
+    description: "召唤只读专家/子 Agent 分析问题（可搜索、可解释错误、可给结构化建议；绝不能写盘）。"
+        + "team 是**可召唤**的：传 role 走结构化通道——"
+        + "explorer（摸清结构与入口）/ debugger（从失败证据找根因）/ ui-reviewer（前端白屏与状态处理）/ "
+        + "architect-advisor（结构性缺口：工程入口、路由登记、迁移接入、契约在位）/ "
+        + "acceptance-advisor（预判拿去验收会挂在哪：接口清单与状态码分支）。"
+        + "★ 卡在「不知道该问谁」时就用它——比自己在原地反复改盘便宜得多。",
     parameters: {
         question: { type: "string", required: true, description: "要分析的问题，例如「为什么 PUT /api/notes 返回 500」" },
         paths: { type: "array", required: false, description: "相关文件路径，供其只读查阅" },

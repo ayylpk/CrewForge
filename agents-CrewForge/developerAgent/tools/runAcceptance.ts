@@ -26,6 +26,9 @@ import type { ContractIntent, ServeSpec } from "../../contractProbeCore";
 import { resolveProjectCommand } from "./projectCommands";
 import { num, str } from "./registry";
 import type { ToolContext, ToolResult, ToolSpec } from "./registry";
+// 回归冻结（9/17）：上一次预演的逐条状态 vs 这一次 —— 抓"修复动作弄坏已通过项"（s4 死因）
+import { diffCriteria, renderRegressionWarning, summarizeCriteriaDiff } from "../regression";
+import type { CriteriaDiff } from "../regression";
 
 /** 一条预演项：要么是可执行命令（COMPILE 类），要么是 HTTP 契约（CONTRACT 类） */
 interface RehearsalItem {
@@ -291,11 +294,38 @@ export const runAcceptanceTool: ToolSpec = {
         }
 
         const unexec = unexecutable.map((u) => `${u.id}(${u.kind})`);
+        // ---------- 回归冻结（9/17）----------
+        // 把这一次的逐条状态与**上一次预演**比对：上次通过、这次失败的 = 回归（修复动作弄坏了已通过项）。
+        // 基线存在 Ledger 里（跨阶段/跨进程不丢）：s4 就是死在"批量改盘把已通过的 create 改挂"，
+        // 而当时没有任何东西守着已通过项，模型只看到"现在有几条失败"，于是越修越乱。
+        const statusNow: Record<string, "pass" | "fail" | "unevaluable"> = {};
+        for (const r of results) {
+            const id = typeof r["id"] === "string" ? r["id"] : null;
+            if (!id) continue;
+            if (r["ok"] === true) statusNow[id] = "pass";
+            else if (r["unevaluable"] === true || r["reason"] === "UNEVALUABLE") statusNow[id] = "unevaluable";
+            else statusNow[id] = "fail";
+        }
+        // 不可判定清单以汇总口径为准（明细里未必带 unevaluable 标记）
+        for (const id of unevaluableIds) statusNow[id] = "unevaluable";
+        let diff: CriteriaDiff = { firstRun: true, regressed: [], fixed: [], stillFailing: [], appeared: [], disappeared: [] };
+        try {
+            const prev = ctx.acceptanceMemory?.load() ?? null;
+            diff = diffCriteria(prev, statusNow);
+            ctx.acceptanceMemory?.save(statusNow);
+        } catch (e) {
+            console.warn(`[runAcceptance] 回归比对不可用（继续，不影响预演结果）：${String((e as Error).message ?? e)}`);
+        }
+        const regressionBlock = renderRegressionWarning(diff);
+
         const summary = [
             `验收预演完成：通过 ${passed} / 失败 ${failed} / 不可判定 ${unevaluable} / 共 ${runnable.length} 条可执行判据`
             + (unexec.length > 0 ? `；另有 ${unexec.length} 条无法机械执行：${unexec.join(", ")}` : ""),
             `耗时 ${((Date.now() - startedAll) / 1000).toFixed(1)}s`,
         ];
+        if (!diff.firstRun) {
+            summary.push(`本轮对比上一轮：${summarizeCriteriaDiff(diff)}`);
+        }
         if (unevaluable > 0) {
             // 把"判不了"单独讲清楚：它既不是绿，也不是模型的锅
             summary.push(
@@ -336,15 +366,20 @@ export const runAcceptanceTool: ToolSpec = {
             // 同"JSON 解析失败也判失败"的既有口径）
             ok: failed === 0 && unevaluable === 0 && runnable.length > 0,
             output: [
+                regressionBlock,
                 modelLines.length > 0 ? body : "（全部判据通过）",
                 "",
                 ...summary,
-            ].join("\n") + hint,
+            ].filter(Boolean).join("\n") + hint,
             meta: {
                 passed, failed, failedIds, unevaluable, unevaluableIds, runnable: runnable.length,
                 unexecutable: unexecutable.map((u) => u.id),
                 results,
                 durationMs: Date.now() - startedAll,
+                // 回归冻结的证据：上一轮通过、这一轮挂掉的判据（空数组 = 无回归）
+                regressions: diff.regressed,
+                fixedSinceLastRun: diff.fixed,
+                criteriaFirstRun: diff.firstRun,
             },
         };
     },

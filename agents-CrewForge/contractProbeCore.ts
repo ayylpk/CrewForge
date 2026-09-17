@@ -298,8 +298,8 @@ export function resolveResetTarget(
  *     · 断言不过 = 判据能判、服务端答错了 → **模型改代码有用**；
  *     · 不可判定 = 这条判据求值不了 → 模型改什么代码都**没用**，是判据侧要人来修。
  *   两者原来一律记 ❌，模型分不清，在一条永远过不了的判据上追了 49 分钟。
- *   这里用前缀做**机器可检**的标记，调用方据此分流（与 HISTORY_FOLDED_NOTE /
- *   ANTI_SPEC_GAMING_MARKER 同一手法：明示、不静默、可被代码识别）。
+ *   这里用前缀做**机器可检**的标记，调用方据此分流（与 ANTI_SPEC_GAMING_MARKER
+ *   同一手法：明示、不静默、可被代码识别）。
  */
 export const UNEVALUABLE_MARK = "[不可判定] ";
 

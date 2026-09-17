@@ -10,7 +10,6 @@
 //      Windows 进程树终止是 best-effort。下面这些断言只证明"受约束"，不证明"已隔离"。
 import { afterAll, describe, expect, it } from "bun:test";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { Workspace } from "../workspace";
 import { DeveloperLedger } from "../ledger";
@@ -18,16 +17,19 @@ import { createFullDeveloperToolRegistry, DEVELOPER_ROLE_NAME } from "../tools/r
 import type { ToolContext } from "../tools/registry";
 import { resolveSandboxCapabilities } from "../tools/processSandbox";
 import { createDeveloperAgent } from "../index";
+import { cleanupTempDirsAfterTests, tmpDir } from "./_tmp";
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "cf-dev-soft-"));
+const root = tmpDir("cf-dev-soft");
 const NODE = Bun.which("node") ?? process.execPath;
 const registry = createFullDeveloperToolRegistry();
 const opened: DeveloperLedger[] = [];
 let seq = 0;
 
+// 先关账本，再删树（顺序不能反：开着 sqlite 删树在 Windows 上是 EBUSY，见 _tmp.ts 文件头实测）。
 afterAll(() => {
     for (const l of opened) { try { l.close(); } catch { /* 已关 */ } }
 });
+cleanupTempDirsAfterTests();
 
 function newProject(name: string): string {
     const dir = path.join(root, name);

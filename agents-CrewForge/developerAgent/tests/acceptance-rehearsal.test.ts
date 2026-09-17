@@ -10,13 +10,16 @@
 import { describe, expect, it } from "bun:test";
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import { budgetText } from "../realLlm";
 import { pickByPath, suggestServeCommand, fillVars, fillVarsDeep, deepEqual, evalAssertion, isUnevaluable, resolveResetTarget, unresolvedPlaceholders, formatUnresolvedPlaceholders, runContractProbe } from "../../contractProbeCore";
 import type { JsonAssertion } from "../../contractProbeCore";
 import { prepareCheck } from "../live/verifier";
+import { cleanupTempDirsAfterTests, tmpDir } from "./_tmp";
 
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cforge-accept-"));
+// 临时工程树统一由 _tmp.ts 建在本次运行的根目录下并登记收尾清理
+// （9/17 实测：这个文件跑一遍在 %TEMP% 里留 1 个 cforge-accept-XXXX）。
+const tmp = tmpDir("cforge-accept");
+cleanupTempDirsAfterTests();
 const mk = (rel: string, files: Record<string, string>): string => {
     const dir = path.join(tmp, rel);
     fs.mkdirSync(dir, { recursive: true });

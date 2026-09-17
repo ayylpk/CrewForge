@@ -23,6 +23,8 @@ function rt(over: Partial<RtSettings> = {}): RtSettings {
         modelName: null, modelPro: null, roleModels: null, modelUrl: null, apiKey: null,
         modelKind: "deepseek", javaBaseUrl: "http://localhost:8080", confirmTimeoutMin: 30, smokeBuild: false,
         llmConcurrency: 6, stationSlots: 5, toolMode: false,
+        // 上下文窗口（9/17 接线）：null = 没配（列没建也走这条）→ 引擎回落 [1m]/env/产品默认 256K
+        contextWindow: null, contextWindowPro: null,
         ...over,
     };
 }

@@ -3,9 +3,11 @@
 //
 //   入站（Developer 接收）：
 //     architect_task / test_failure / test_passed / repair_requested / cancel_task / resume_task
+//     / consult_reply（层 B 召唤工位的应答，9/17——形状在 consult.ts，越权闸也在那边）
 //   出站（Developer 发送）：
 //     developer_started / developer_progress / test_request / repair_started /
 //     repair_finished / developer_ready / developer_blocked / developer_failed
+//     / consult_request（层 B 召唤工位，形状见 consult.ts；见 hubAdapter 的 OutboundMessage 放宽）
 //
 //   非法消息一律**拒绝**（不猜测、不静默吞掉），由调用方写进 Ledger。
 //   这里的校验只做结构；权限与状态迁移分别在 workspace.ts / state.ts。
@@ -13,6 +15,10 @@
 
 import { z } from "zod";
 import { hashOf } from "./ledger";
+// 召唤工位（层 B，9/17）：consult_reply 也要走**同一张入站解析表**——
+// 它是司机在循环里等待的合法入站消息；不走这里的话 HubAdapter 会把它判成
+// "未知消息类型 invalid" 并丢掉，召唤永远等不到回复（且**不报错**，最难查的那种断链）。
+import { ConsultReplySchema, type ConsultReply, type ConsultRequest } from "../consult";
 
 // ============================================================
 // 入站消息
@@ -370,11 +376,17 @@ export type ResumeTask = z.infer<typeof ResumeTaskSchema>;
 const INBOUND_SCHEMAS = [
     ArchitectTaskSchema, ArchitectBatchSchema, TestFailureSchema, TestPassedSchema,
     RepairRequestedSchema, CancelTaskSchema, ResumeTaskSchema,
+    // 召唤工位（层 B）：工位对司机的应答。形状校验在这里，**越权闸**在
+    // consult.ts 的 parseConsultReply 里（kind 与签发方必须匹配）——
+    // 本表只管"这封信是不是合法信封"。
+    ConsultReplySchema,
 ] as const;
 
 export type InboundMessage =
     | ArchitectTask | ArchitectBatch | TestFailure | TestPassed
-    | RepairRequested | CancelTask | ResumeTask;
+    | RepairRequested | CancelTask | ResumeTask
+    /** 层 B：被召唤工位的应答；等待方按 (consultId, projectId, taskId) 三元组配对 */
+    | ConsultReply;
 
 export type ParseResult =
     | { ok: true; message: InboundMessage }
@@ -430,11 +442,18 @@ export interface DeveloperFailed { type: "developer_failed"; projectId: string; 
 
 export type OutboundMessage =
     | DeveloperStarted | DeveloperProgress | TestRequest | RepairStarted
-    | RepairFinished | DeveloperReady | DeveloperBlocked | DeveloperFailed;
+    | RepairFinished | DeveloperReady | DeveloperBlocked | DeveloperFailed
+    /**
+     * 层 B（9/17）：召唤真工位。**刻意放宽到本联合里**，而不是在 hubAdapter 里
+     * 另开一条 send 通道——出站只有一处漏斗（序列化 + Ledger outbound 记账 +
+     * 终态抄送），多开一条就等于多一处会忘记记账的旁路。
+     */
+    | ConsultRequest;
 
 export const OUTBOUND_TYPES = [
     "developer_started", "developer_progress", "test_request", "repair_started",
     "repair_finished", "developer_ready", "developer_blocked", "developer_failed",
+    "consult_request",
 ] as const;
 
 // ============================================================

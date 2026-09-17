@@ -15,19 +15,21 @@
 
 import { afterAll, describe, expect, it } from "bun:test";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { Workspace } from "../workspace";
 import { DeveloperLedger } from "../ledger";
+import { cleanupTempDirsAfterTests, tmpDir } from "./_tmp";
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "cf-accept-surface-"));
+const root = tmpDir("cf-accept-surface");
 const NODE = process.execPath;
 const opened: DeveloperLedger[] = [];
 let seq = 0;
 
+// 先关账本，再删树（顺序不能反：开着 sqlite 删树在 Windows 上是 EBUSY，见 _tmp.ts 文件头实测）。
 afterAll(() => {
     for (const l of opened) { try { l.close(); } catch { /* 已关 */ } }
 });
+cleanupTempDirsAfterTests();
 
 function newProject(name: string): string {
     const dir = path.join(root, name);

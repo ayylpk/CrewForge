@@ -154,6 +154,27 @@ const tokenTally = { calls: 0, input: 0, output: 0, maxTokensCuts: 0, retries: 0
 let realLlm: ReturnType<typeof createRealLlm> | null = null;
 const progress = { writes: 0, streak: 0 }; // 止损①：连续 5 次无写盘且无有效工具决策
 
+/**
+ * 惰性建真实客户端（与原来的写法一致：**只有真的要调模型时才校验凭据**）。
+ *   抽成一处是为了压缩摘要口（9/17 接线）能拿到**同一个**客户端——
+ *   压缩调用与决策调用必须同端点/同凭据/同观测，否则"用哪个模型压缩"就成了另一套配置。
+ */
+const ensureRealLlm = (): ReturnType<typeof createRealLlm> => (realLlm ??= createRealLlm({
+    onCall: (i) => {
+        tokenTally.calls++; tokenTally.input += i.inputTokens; tokenTally.output += i.outputTokens;
+        if (i.stopReason === "max_tokens") tokenTally.maxTokensCuts++;
+        // 9/15 批 C：累计重试/升档次数与缓存命中（进运行报告，r5 复盘用）。
+        // attempts 是这一步的**首发总数**：没升档时 1 次首发，升档时 2 次
+        // （截断那次 + 升档那次），余下的才是瞬时故障重试的次数。
+        const firstSends = i.escalated ? 2 : 1;
+        tokenTally.retries += Math.max(i.attempts - firstSends, 0);
+        tokenTally.escalations += i.escalated ? 1 : 0;
+        tokenTally.cacheRead += i.cacheReadTokens;
+        const extra = i.attempts > 1 ? ` [${i.escalated ? "升档" : "重试"}×${i.attempts}]` : "";
+        say(`[llm#${tokenTally.calls}] ${i.latencyMs}ms in=${i.inputTokens} out=${i.outputTokens} stop=${i.stopReason}${extra}`);
+    },
+}));
+
 const llm: DeveloperLlm = FAKE
     ? {
         id: "fake-hub-runner",
@@ -168,24 +189,7 @@ const llm: DeveloperLlm = FAKE
         id: "real-lazy",
         calls: () => realLlm?.calls() ?? 0,
         async next(input) {
-            if (!realLlm) {
-                realLlm = createRealLlm({
-                    onCall: (i) => {
-                        tokenTally.calls++; tokenTally.input += i.inputTokens; tokenTally.output += i.outputTokens;
-                        if (i.stopReason === "max_tokens") tokenTally.maxTokensCuts++;
-                        // 9/15 批 C：累计重试/升档次数与缓存命中（进运行报告，r5 复盘用）。
-                        // attempts 是这一步的**首发总数**：没升档时 1 次首发，升档时 2 次
-                        // （截断那次 + 升档那次），余下的才是瞬时故障重试的次数。
-                        const firstSends = i.escalated ? 2 : 1;
-                        tokenTally.retries += Math.max(i.attempts - firstSends, 0);
-                        tokenTally.escalations += i.escalated ? 1 : 0;
-                        tokenTally.cacheRead += i.cacheReadTokens;
-                        const extra = i.attempts > 1 ? ` [${i.escalated ? "升档" : "重试"}×${i.attempts}]` : "";
-                        say(`[llm#${tokenTally.calls}] ${i.latencyMs}ms in=${i.inputTokens} out=${i.outputTokens} stop=${i.stopReason}${extra}`);
-                    },
-                });
-            }
-            const raw = await realLlm.next(input);
+            const raw = await ensureRealLlm().next(input);
             // 止损①：连续 5 次 LLM 调用无 changedFiles 增长且无有效工具决策 → 空转 kill。
             // 写盘看 write_audit 事件（Ledger 实时流），决策看输出里有没有"写/执行类"工具调用。
             try {
@@ -204,6 +208,11 @@ const llm: DeveloperLlm = FAKE
                 }
             } catch { /* 监控自身出错不拦任务，让引擎预算闸自己收敛 */ }
             return raw;
+        },
+        // ★ 9/17 压缩摘要口：与 next 同一个客户端（懒建同款）。没有这一口时引擎
+        //   越过阻塞线只会去问人，**不会**有任何自动压缩——所以真实运行必须给。
+        async summarize(request) {
+            return ensureRealLlm().summarize!(request);
         },
     };
 

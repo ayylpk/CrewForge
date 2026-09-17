@@ -600,7 +600,9 @@ describe("batchC / max_tokens 升档（cc utils/context.ts 8000→64000 同款�
         expect(calls.length).toBe(2);
         const first = JSON.parse(String(calls[0]!.init.body));
         const second = JSON.parse(String(calls[1]!.init.body));
-        expect(first.max_tokens).toBe(8192);
+        // 9/17：默认 max_tokens 从 8192 抬到 32768（p7 全跑实测 out=40960 触发升档×2，
+        // 而 8192 上限直接导致截断——截断的响应永远成不了合法批次，批写闸形同虚设）。
+        expect(first.max_tokens).toBe(32768);
         expect(second.max_tokens).toBe(ESCALATED_MAX_TOKENS);
         // 重发的是"同一份请求"：除 max_tokens 外全部一致（缓存前缀不白费）
         delete first.max_tokens; delete second.max_tokens;

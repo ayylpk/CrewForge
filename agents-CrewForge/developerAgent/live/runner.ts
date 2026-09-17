@@ -48,6 +48,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { createDeveloperAgent } from "../index";
 import { createRealLlm } from "../realLlm";
+import type { SummaryRequest } from "../contextBudget";
 import { assembleTask, createArchitectAgent } from "../architectAgent";
 import {
     batchFileNameOf, createArchitectCheckpoint, deliveredCheckIdsOf, pendingCheckpointWork,
@@ -313,24 +314,25 @@ let llmSeq = 0;
  * 谁都能复现"默认不执行本机命令"这件事（也不会因为没配 key 就看不到沙箱横幅）。
  */
 let realLlm: ReturnType<typeof createRealLlm> | null = null;
+/** 惰性建真实客户端（抽成一处：压缩摘要口必须拿到**同一个**客户端，见下面的 summarize） */
+const ensureRealLlm = (): ReturnType<typeof createRealLlm> => (realLlm ??= createRealLlm({
+    onCall: (i) => {
+        llmSeq++;
+        // 9/15 批 C：attempts>1 时标注是重试还是升档，并附缓存命中——
+        // 否则 r5 复盘时"这一步为什么贵"没有线索（in/out 只是合计）。
+        const extra = i.attempts > 1 ? ` [${i.escalated ? "升档" : "重试"}×${i.attempts}]` : "";
+        const cache = i.cacheReadTokens > 0 ? ` cache=${i.cacheReadTokens}` : "";
+        console.log(`[llm#${llmSeq}] ${i.latencyMs}ms in=${i.inputTokens} out=${i.outputTokens}${cache}${extra} → ${i.rawText.slice(0, 160).replace(/\s+/g, " ")}`);
+    },
+}));
 const lazyLlm = {
     id: "real-lazy",
     calls: () => realLlm?.calls() ?? 0,
-    next: async (input: Parameters<ReturnType<typeof createRealLlm>["next"]>[0]) => {
-        if (!realLlm) {
-            realLlm = createRealLlm({
-                onCall: (i) => {
-                    llmSeq++;
-                    // 9/15 批 C：attempts>1 时标注是重试还是升档，并附缓存命中——
-                    // 否则 r5 复盘时"这一步为什么贵"没有线索（in/out 只是合计）。
-                    const extra = i.attempts > 1 ? ` [${i.escalated ? "升档" : "重试"}×${i.attempts}]` : "";
-                    const cache = i.cacheReadTokens > 0 ? ` cache=${i.cacheReadTokens}` : "";
-                    console.log(`[llm#${llmSeq}] ${i.latencyMs}ms in=${i.inputTokens} out=${i.outputTokens}${cache}${extra} → ${i.rawText.slice(0, 160).replace(/\s+/g, " ")}`);
-                },
-            });
-        }
-        return realLlm.next(input);
-    },
+    next: async (input: Parameters<ReturnType<typeof createRealLlm>["next"]>[0]) =>
+        ensureRealLlm().next(input),
+    // ★ 9/17 压缩摘要口：与 next 同一个客户端。没有这一口时引擎越过阻塞线只会去问人，
+    //   **不会**有任何自动压缩——所以真实运行必须给（见 graph 的 DeveloperLlm.summarize）。
+    summarize: async (request: SummaryRequest) => ensureRealLlm().summarize!(request),
 };
 
 // 可选：加大单轮工具循环的步数上限（9/13 实弹：铺文件型任务 12 步会在

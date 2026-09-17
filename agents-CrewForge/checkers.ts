@@ -544,8 +544,214 @@ export function gateFeedback(attempt: number, problems: CheckProblems): string {
 //   需求没写栈（quote=未指定）一律放行。
 // ============================================================
 
+// ============================================================
+// ★ R3 事故族（2026-09-24 新增）：部署形态族——"不引入外部服务 / 嵌入式" ↔ 选型外部服务
+//
+//   治什么病（a1 实弹，不是假想）：冻结需求 eval/scenarios/a1/input.md 的"边界"段写死
+//   「不引入外部服务，数据库用嵌入式的即可」（交付约束还要求 npm 一键安装/启动/构建），
+//   架构师 stack 仍把 techniques.database.type 定成 "MySQL 8"（why 里甚至自陈"不引入 JWT 认证、
+//   消息队列、Redis 等中间件"），落盘的 ddl.sql 第一行就是 `-- 目标数据库：MySQL 8，字符集 utf8mb4`——
+//   于是整条下游（依赖驱动、连接串、验收）都建立在一台**验收环境并不保证提供**的 MySQL 服务器上。
+//   旧闸门只认**命名系别**（SQLite / MySQL / PostgreSQL / MongoDB），需求里"嵌入式 / 无外部服务"
+//   这种朴素语言约束它一个字都看不见 →「需求写 A、选型给 B」的硬冲突整条链放行。
+//
+//   机制：新增一族"部署形态"，命名系别两表**逐字不动**（既有行为不变）：
+//     需求侧 = 明确的嵌入式/无外部服务约束（嵌入式、不引入外部服务、无需额外服务、一键启动、
+//              开箱即用、不需要安装、sqlite/h2/本地文件数据库… + 英文同义写法）；
+//     决策侧 = 外部服务名（mysql/postgres/mongo/redis/docker/kafka/rabbitmq/k8s…）。
+//   两侧同时命中才算冲突；决策侧出现"嵌入式友好"标记（sqlite/h2/embedded/in-memory…）即放行。
+//
+//   铁律（宁漏不误杀）：纯函数、零 LLM、零 I/O；
+//     ① 需求只写"数据库用 MySQL"而没写嵌入式/无外部服务 → 约束不明确，一律不判；
+//     ② 决策侧的外部服务名若被否定词管住（a1 的 why 就写着"不引入…Redis 等中间件"）
+//        → 不算"偏向"，剔除假命中（否则一句"无需 Docker"就能把自己打成冲突）。
+// ============================================================
+
+/** 需求侧"部署形态约束"子模式（顺序即优先级；命中片段会原样引回话术，让模型对照原文自己判断） */
+const DEPLOYMENT_CONSTRAINT_PATTERNS: readonly { label: string; re: RegExp }[] = [
+    { label: "不引入外部服务", re: /不(?:引入|依赖|使用|采用|需要|接入)(?:任何|其它|其他)?外部(?:的)?(?:服务|依赖|组件|中间件)|(?:无|没有|禁止|不依赖)外部(?:服务|依赖)/i },
+    { label: "嵌入式/内嵌", re: /嵌入式|内嵌式|内嵌(?:数据库|存储|引擎)/ },
+    { label: "无需额外服务或安装", re: /无需(?:额外|其他|其它|任何)?(?:的)?(?:服务|安装|部署|依赖|中间件)|不需要(?:额外|其他|其它|任何)?(?:的)?(?:服务|安装|部署|依赖|中间件)|免安装/ },
+    { label: "一键启动/开箱即用", re: /一键(?:启动|安装|运行|跑起来|拉起|克隆|跑)|开箱即用|零配置/ },
+    { label: "嵌入式数据库命名", re: /\bsqlite\d*\b|\bh2\b|\bhsqldb\b|\bderby\b|本地文件数据库|单文件数据库|文件型数据库|本地数据库文件/i },
+    // 英文/通用写法：冻结输入以中文为主，但约束句混英文（或整篇英文）的场合不能漏
+    { label: "no external services", re: /\b(?:no|without|zero)\s+(?:external|extra|additional)\s+(?:external\s+)?(?:service|services|dependency|dependencies|middleware)\b/i },
+    { label: "embedded database", re: /\bembedded\s+(?:database|datastore|db|storage)\b/i },
+    { label: "one-command / out-of-the-box", re: /\b(?:one|single)[- ](?:command|shot)\b|\bout[- ]of[- ]the[- ]box\b|\bzero[- ]config(?:uration)?\b/i },
+    { label: "no install required", re: /\b(?:no|without)\s+install(?:ation)?(?:\s+(?:required|needed))?\b|\binstall[- ]free\b/i },
+];
+
+/**
+ * 上面全部子模式合成的单一正则。两处消费者共用同一集合：
+ *   ① conflictOf 的 claim 只接受一个 RegExp（部署形态族的需求侧认领）；
+ *   ② matchDeploymentConstraint 逐模式找"是哪种约束"，并把命中片段摘出来。
+ */
+const EMBEDDED_CONSTRAINT_RE = new RegExp(DEPLOYMENT_CONSTRAINT_PATTERNS.map(p => `(?:${p.re.source})`).join("|"), "i");
+
+/** 决策侧"外部服务"名：命中即代表选型需要一个独立部署/启动的进程或中间件 */
+const EXTERNAL_SERVICE_RE = /\bmysql\d*\b|\bmariadb\b|\bpostgres(?:ql)?\b|\bpg\b|\bmongo(?:db)?\b|\bredis\b|\bdocker\b|\bpodman\b|\bkafka\b|\brabbitmq\b|\bzookeeper\b|\bk8s\b|\bkubernetes\b|\bhelm\b|\belasticsearch\b|\bnacos\b|\bconsul\b|\betcd\b|\bminio\b/i;
+
+/** 决策侧"嵌入式友好"标记：命中即说明决策本身就在嵌入式形态里（放行，不判冲突） */
+const EMBEDDED_FRIENDLY_RE = /\bsqlite\d*\b|\bh2\b|\bhsqldb\b|\bderby\b|better-sqlite3|\bembedded\b|\bsingle[- ]file\b|\bin-?memory\b|内嵌|嵌入式|本地文件|单文件|文件型|内存数据库|本地数据库文件/i;
+
+/** 分句边界：句读 + 换行（否定词只在**同一分句内**生效） */
+const CLAUSE_BREAK_RE = /[。；;！!？?\n]/;
+/** 分句内的转折词：转折之后，前面的否定词不再管到后面的命中点（"不引入 Redis，但数据库用 MySQL"） */
+const CLAUSE_REVERSAL_RE = /但是|但|不过|然而|而是|改用|改为|换成|\b(?:but|however|instead)\b/i;
+/** 否定词：出现在同一分句命中点之前 → 这个外部服务名不算"选型偏向" */
+const CLAUSE_NEGATION_RE = /无需|不需要|不用|不必|不引入|不依赖|不安装|不采用|不使用|不部署|不接入|免安装|避免|禁止|没有引入|without|\bno\s+need\b|\bno\s+external\b|\bnot\s+(?:use|using|need)\b/i;
+
+/** 取命中处的"需求原文片段"：同一分句优先，剥掉 markdown 列表符，压成一行并截断（话术里把原文还给模型对照） */
+function constraintFragment(text: string, index: number, len: number): string {
+    const MAX = 40;
+    let start = index;
+    let end = index + len;
+    while (start > 0 && index - start < MAX && !CLAUSE_BREAK_RE.test(text[start - 1] ?? "")) start--;
+    while (end < text.length && end - (index + len) < MAX && !CLAUSE_BREAK_RE.test(text[end] ?? "")) end++;
+    return oneLine(text.slice(start, end).replace(/^[\s>*\-–—•·]+/, ""), 80);
+}
+
+/** 命中点所在分句的起点（1-based 无关，纯下标；越界安全） */
+function clauseStart(text: string, index: number): number {
+    let start = Math.max(0, Math.min(index, text.length));
+    while (start > 0 && !CLAUSE_BREAK_RE.test(text[start - 1] ?? "")) start--;
+    return start;
+}
+
+/**
+ * 决策文本里的"外部服务"提及（含下标，便于摘片段做证据）。
+ * ★ 被否定词管住的剔除：a1 的 why 写着"不引入 JWT 认证、消息队列、Redis 等中间件"——
+ *   照字面匹配会把 Redis 当成偏向，于是"自己声明不引入"反而被打成冲突（典型误杀）。
+ *   同一分句内命中点之前若有否定词、且中间没有"但/而是"这类转折，即视为否定提及。
+ */
+function findExternalServiceMentions(decision: string): { name: string; index: number }[] {
+    const text = decision ?? "";
+    const out: { name: string; index: number }[] = [];
+    const re = new RegExp(EXTERNAL_SERVICE_RE.source, "gi");
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text))) {
+        const head = text.slice(clauseStart(text, m.index), m.index);
+        const reversal = CLAUSE_REVERSAL_RE.exec(head);
+        const headEff = reversal ? head.slice((reversal.index ?? 0) + reversal[0].length) : head;
+        if (CLAUSE_NEGATION_RE.test(headEff)) continue;
+        out.push({ name: m[0], index: m.index });
+    }
+    return out;
+}
+
+/** 需求侧部署形态约束的命中结果（label=约束类别，fragment=引用给模型的需求原文片段，index=原文下标） */
+export interface DeploymentConstraintMatch {
+    label: string;
+    fragment: string;
+    index: number;
+}
+
+/**
+ * 需求原文是否带**明确**的"嵌入式 / 无外部服务"约束（TASK1 需求侧判定，纯函数）。
+ * 返回 null = 约束不明确（只提了数据库、没提部署形态）→ 调用方一律放行，不判冲突。
+ * 同一份判定被三处复用：冲突检测、代码级钉死（pinEmbeddedDatabase）、单测。
+ */
+export function matchDeploymentConstraint(requirement: string): DeploymentConstraintMatch | null {
+    const text = requirement ?? "";
+    if (!text.trim()) return null;
+    for (const p of DEPLOYMENT_CONSTRAINT_PATTERNS) {
+        const m = p.re.exec(text);
+        if (!m) continue;
+        return { label: p.label, fragment: constraintFragment(text, m.index, m[0].length), index: m.index };
+    }
+    return null;
+}
+
+/** 部署形态冲突结论：kind 固定 "deployment-form"（机器可读分支），detail=人读短句（含需求原文/冒犯选项/该选什么） */
+export interface DeploymentFormConflict {
+    kind: string;
+    detail: string;
+}
+
+/**
+ * ★ TASK1 核心：部署形态冲突检测（导出即可单测，不依赖 conflictOf/闸门其余部分）。
+ *
+ * 触发条件（缺一不可，两边都必须是"明确写了"）：
+ *   ① 需求原文命中嵌入式/无外部服务约束（matchDeploymentConstraint 非空）；
+ *   ② 决策文本点名了外部服务（mysql/postgres/mongo/redis/docker/kafka/rabbitmq/k8s…），
+ *      且该提及没被否定词管住（findExternalServiceMentions）；
+ *   ③ 决策文本里**没有**"嵌入式友好"标记（sqlite/h2/embedded/in-memory…）。
+ * 返回 null 的三种情形都是"宁漏不误杀"：约束不明确、没选外部服务、决策其实也是嵌入式。
+ */
+export function detectDeploymentFormConflict(quote: string, decision: string): DeploymentFormConflict | null {
+    const constraint = matchDeploymentConstraint(quote ?? "");
+    if (!constraint) return null;                                   // ① 约束不明确 → 放行
+    const text = decision ?? "";
+    if (EMBEDDED_FRIENDLY_RE.test(text)) return null;               // ③ 决策本身就在嵌入式形态里 → 无冲突
+    const mentions = findExternalServiceMentions(text);
+    const first = mentions[0];
+    if (!first) return null;                                        // ② 没选外部服务（或全被否定词管住）→ 放行
+    const names = [...new Set(mentions.map(m => m.name))];
+    const chosen = constraintFragment(text, first.index, first.name.length);
+    return {
+        kind: "deployment-form",
+        detail: `部署形态冲突（R3）：需求原文写明「${constraint.fragment}」（约束类别：${constraint.label}）——本项目必须嵌入式/无外部服务即可跑起来；`
+            + `而选型选了外部服务 ${names.join("、")}（决策文本片段：「${chosen}」），生成物要额外部署并启动这些服务，验收环境不保证提供。`
+            + `请改回嵌入式形态：database.type 用 SQLite（文件型数据库，随应用进程启动、零外部依赖；JVM 项目用 H2 内存库或 sqlite-jdbc 亦可），`
+            + `DDL 落盘后必须在启动时真实执行；确实必须外部服务时，先改冻结需求原文再谈选型。`,
+    };
+}
+
+/** TASK2：嵌入式约束下**代码级钉死**的数据库决策（不是建议，是调用方必须写进 stack 的值） */
+export interface PinnedDatabaseChoice {
+    type: "sqlite";
+    why: string;
+    migrationFile: string;
+}
+
+/** pinEmbeddedDatabase 的默认迁移文件（相对项目根）。R8 的教训是"DDL 写了没人执行"，所以路径与"启动时执行"绑在一起说 */
+export const EMBEDDED_DB_MIGRATION_FILE = "db/init.sql";
+
+/**
+ * ★ TASK2 核心：需求带嵌入式/无外部服务约束时，**代码里直接钉死**数据库决策（纯函数，返回 null = 不干预）。
+ *
+ * 为什么要有它：R3 的根因是"把合规性寄托在模型自觉"——闸门只能事后打回重选（烧一轮 60~300s），
+ * 而约束是**确定性**的：需求写了"不引入外部服务/嵌入式"，数据库就不该有任何别的答案。
+ * 调用方拿到本函数的结果后，直接以它的值覆盖 stack 决策（含 why 话术），模型连选错的机会都没有。
+ *
+ * @param requirement   冻结需求原文（与 checkStackConsistency 的入参同一份）
+ * @param migrationFile 迁移文件相对路径，默认 db/init.sql；Spring 骨架请传
+ *                      "backend/src/main/resources/schema.sql"（与 spring.sql.init 的 schema-locations 对齐）
+ * @returns null = 需求没有明确嵌入式约束（不干预选型）；否则 { type:"sqlite", why, migrationFile }
+ */
+export function pinEmbeddedDatabase(requirement: string, migrationFile: string = EMBEDDED_DB_MIGRATION_FILE): PinnedDatabaseChoice | null {
+    const constraint = matchDeploymentConstraint(requirement ?? "");
+    if (!constraint) return null;
+    const file = (migrationFile ?? "").trim() || EMBEDDED_DB_MIGRATION_FILE;
+    return {
+        type: "sqlite",
+        why: `需求原文「${constraint.fragment}」明确要求嵌入式/无外部服务（约束类别：${constraint.label}），故钉死 sqlite：`
+            + `单文件数据库随应用进程启动，零外部依赖（不装 MySQL、不跑 Docker，验收环境开来即用）；`
+            + `建表 DDL 写在 ${file}，并必须在启动时真实执行（否则接口会撞 Table '…' doesn't exist 报 500）。`
+            + `JVM 项目可用 H2/sqlite-jdbc 等价替代，但不得换成需要独立部署的数据库服务。`,
+        migrationFile: file,
+    };
+}
+
+/** 系别表的一族（见 conflictOf）：claim=需求侧认领，marker/driftOf=决策侧"偏向谁"，detail=可选自定义话术 */
+interface StackFamily {
+    family: string;
+    /**
+     * 需求侧认领模式：命中即代表"需求声明了这一系"。
+     * 缺省（undefined）= 本族只作为"决策偏向谁"的标记系别、不对需求侧认领——
+     * 部署形态族的"外部服务依赖"就是这种（需求写了 MySQL 时不该由它去认领，否则方向会反过来）。
+     */
+    claim?: RegExp;
+    /** 决策侧标记模式（driftOf 缺省时用它判定"偏向"；传了 driftOf 时仍作为展示/兜底） */
+    marker: RegExp;
+    /** 可选：自定义"决策偏向"识别（缺省 marker.test）——部署形态族要用它剔除被否定词管住的假命中 */
+    driftOf?: (decisionText: string) => string[];
+    /** 可选：自定义冲突短句（缺省走通用句式；命名系别族不传，话术逐字不变） */
+    detail?: (ctx: { family: string; claimText: string; decisionText: string; drifters: string[] }) => string;
+}
+
 /** 已知后端系别：命中即归到该系（用于"跨系冲突"判定） */
-const BACKEND_FAMILIES: { family: string; claim: RegExp; marker: RegExp }[] = [
+const BACKEND_FAMILIES: StackFamily[] = [
     { family: "Spring/JVM", claim: /spring\s?boot|spring mvc|mybatis/i, marker: /spring|mybatis|java(?!script)/i },
     { family: "Node 系", claim: /node|express|koa|fastify|nest(\.js)?/i, marker: /express|koa|fastify|nest(\.js)?|node(\.js)?\s*\+/i },
     { family: "Python 系", claim: /django|flask|fastapi/i, marker: /django|flask|fastapi/i },
@@ -553,27 +759,57 @@ const BACKEND_FAMILIES: { family: string; claim: RegExp; marker: RegExp }[] = [
 ];
 
 /** 已知数据库系别 */
-const DB_FAMILIES: { family: string; claim: RegExp; marker: RegExp }[] = [
+const DB_FAMILIES: StackFamily[] = [
     { family: "SQLite", claim: /sqlite/i, marker: /sqlite/i },
     { family: "MySQL", claim: /mysql/i, marker: /mysql/i },
     { family: "PostgreSQL", claim: /postgres/i, marker: /postgres|pg\b/i },
     { family: "MongoDB", claim: /mongo/i, marker: /mongo/i },
 ];
 
-function conflictOf(claimText: string, decisionText: string, families: { family: string; claim: RegExp; marker: RegExp }[]): string | null {
-    const claimFamily = families.find(f => f.claim.test(claimText));
+function conflictOf(claimText: string, decisionText: string, families: StackFamily[]): string | null {
+    const claimFamily = families.find(f => f.claim?.test(claimText) === true);
     if (!claimFamily) return null;
-    // 决策文本里出现了**别的系**的标记、且没有出现需求声明的系的标记 → 硬冲突
+    // 决策文本里出现了**别的系**的标记、且没有出现需求声明的系的标记 → 硬冲突。
+    //   driftOf 是 2026-09-24 给部署形态族加的钩子（否定词剔除）；命名系别族不传，行为与旧版逐字一致。
     const others = families.filter(f => f.family !== claimFamily.family);
-    const drifted = others.filter(f => f.marker.test(decisionText)).map(f => f.family);
+    const drifted: string[] = [];
+    for (const f of others) {
+        if (f.driftOf) drifted.push(...f.driftOf(decisionText));
+        else if (f.marker.test(decisionText)) drifted.push(f.family);
+    }
     if (drifted.length > 0 && !claimFamily.marker.test(decisionText)) {
+        if (claimFamily.detail) return claimFamily.detail({ family: claimFamily.family, claimText, decisionText, drifters: drifted });
         return "需求声明 " + claimFamily.family + "，而选型偏向 " + drifted.join("/") + "；回到需求原文重新选型";
     }
     return null;
 }
 
 /**
+ * ★ 部署形态族（R3，2026-09-24）：需求侧=嵌入式/无外部服务约束；决策侧=外部服务名。
+ * 第一族的 detail 直接复用导出的 detectDeploymentFormConflict（同一份判定，话术只写一处）；
+ * 第二族**没有 claim**——它只负责回答"决策偏向谁"，不对需求侧认领，
+ * 否则"需求写了 MySQL"会反过来被它认领成"需求声明外部服务依赖"，把方向判反。
+ */
+const DEPLOYMENT_FORM_FAMILIES: StackFamily[] = [
+    {
+        family: "嵌入式部署形态（无外部服务）",
+        claim: EMBEDDED_CONSTRAINT_RE,
+        marker: EMBEDDED_FRIENDLY_RE,
+        detail: ({ claimText, decisionText }) =>
+            detectDeploymentFormConflict(claimText, decisionText)?.detail
+            ?? "需求声明「嵌入式/无外部服务」部署形态，而选型偏向外部服务；回到需求原文重新选型",
+    },
+    {
+        family: "外部服务依赖",
+        marker: EXTERNAL_SERVICE_RE,
+        driftOf: (decisionText) => findExternalServiceMentions(decisionText).map(m => m.name),
+    },
+];
+
+/**
  * 对比「需求原文摘录 ↔ 栈决策文本」，返回人读冲突短句（空数组=绿/未声明=放行）。
+ * 2026-09-24 追加第三族"部署形态"（R3）：命名系别看不懂"不引入外部服务/嵌入式"，
+ * 于是需求写嵌入式、选型给 MySQL 8 的硬冲突能整链放行——第三族专治它，前两族行为不变。
  * @param quote    requirementStack.quote（模型从需求原文逐字摘的栈声明；"未指定"=放行）
  * @param decision 决策文本：techniques.database.type/why + moduleTech[].backend + why 拼接
  */
@@ -585,5 +821,573 @@ export function checkStackConsistency(quote: string, decision: string): CheckPro
     if (be) out.push(be);
     const db = conflictOf(q, decision, DB_FAMILIES);
     if (db) out.push(db);
+    // ★ R3：部署形态族（命名系别冲突已点出的同一件事会多出一条更具体的部署话术——两条都在讲真话，
+    //   让重选同时看到"哪个系错了"和"部署形态不符合需求"，比只给一条更快收敛）
+    const dep = conflictOf(q, decision, DEPLOYMENT_FORM_FAMILIES);
+    if (dep) out.push(dep);
     return out;
+}
+
+
+// ============================================================
+// 前端路由登记硬闸（2026-09-17 新增）
+//
+//   治什么病（白屏事故）：骨架 renderSkeleton 遇到"契约未登记任何页面路由"时直出一张空路由表，
+//   只在控制台留一行：
+//     [skeleton] 契约未登记任何页面路由：router 表为空（可运行但不注册任何页面，/ 会白屏）
+//   这个产物**照样能启动**（vite build 不报错、tsc 也过），所以现有任何闸门都拦不住它；
+//   而 eval 的渲染检查 page.home 会在无头 Edge 里打开 "/"，要求可见文本 + <input>——
+//   白屏直接判失败：一行没人看的日志换掉整轮评测（60~300s LLM 调用 + 全部产物）。
+//   本函数把同一个事实升级为**机器可读、可强制修复**的结论（ok/detail/evidence），
+//   由调用方（developer 图 / 验收面）当硬闸用，而不是继续 console.warn。
+//
+//   铁律（[[crewforge-code-over-tools]]）：纯函数、同步、零 LLM，只读 fs + 正则/字符串解析；
+//   拿不准一律放行（动态构造的路由表、导航守卫兜底）——宁漏不误杀，误杀一次=白烧一轮。
+// ============================================================
+
+/** 前端路由闸结论：ok=可交付；detail=人读短句（含出路）；evidence=文件:行 + 计数（模型照抄即可，不必自行推导）；file=命中的关键文件（相对 projectDirAbs，斜杠分隔） */
+export type FrontendRoutesResult = ReturnType<typeof checkFrontendRoutes>;
+
+/** 扫描前端候选目录时跳过的目录（产物/依赖不该参与"前端在哪"的判断） */
+const FE_SKIP_DIRS = new Set(["node_modules", "dist", "build", ".git", "_archive", "coverage", ".vite", ".output"]);
+
+/** 路由文件标准位置（顺序即优先级：loader 目录约定 > 单文件约定） */
+const ROUTER_CANDIDATES = ["src/router/index.ts", "src/router.ts", "src/router/index.js", "src/router.js"];
+
+/** 单文件页面约定位置 */
+const APP_VUE_REL = "src/App.vue";
+
+function statKind(p: string): "dir" | "file" | null {
+    try { const s = fs.statSync(p); return s.isDirectory() ? "dir" : s.isFile() ? "file" : null; } catch { return null; }
+}
+function isDir(p: string): boolean { return statKind(p) === "dir"; }
+function isFile(p: string): boolean { return statKind(p) === "file"; }
+function readTextOrNull(p: string): string | null { try { return fs.readFileSync(p, "utf-8"); } catch { return null; } }
+function toPosix(p: string): string { return p.replace(/\\/g, "/"); }
+/** 位置 → 1-based 行号（证据要能被模型直接定位） */
+function lineOf(src: string, index: number): number {
+    let line = 1;
+    for (let i = 0; i < index && i < src.length; i++) if (src[i] === "\n") line++;
+    return line;
+}
+/** 压成一行短片段（证据里贴代码不许把换行带进去） */
+function oneLine(text: string, max = 140): string { return text.replace(/\s+/g, " ").trim().slice(0, max); }
+
+/** 一级子目录名（排序，跳过产物/依赖）——"前端在哪"与"产物缺失"证据都用它 */
+function listDirs(dir: string): string[] {
+    try {
+        return fs.readdirSync(dir, { withFileTypes: true })
+            .filter(e => e.isDirectory() && !FE_SKIP_DIRS.has(e.name))
+            .map(e => e.name).sort();
+    } catch { return []; }
+}
+
+/** 前端工程根：先认 frontend/，否则在一级子目录里找 package.json + src/ 的那个（找不到 = 产物缺失） */
+function findFrontendDir(projectDirAbs: string): { abs: string; rel: string } | null {
+    const direct = path.join(projectDirAbs, "frontend");
+    if (isDir(direct)) return { abs: direct, rel: "frontend" };
+    for (const name of listDirs(projectDirAbs)) {
+        const abs = path.join(projectDirAbs, name);
+        if (isFile(path.join(abs, "package.json")) && isDir(path.join(abs, "src"))) return { abs, rel: name };
+    }
+    return null;
+}
+
+/**
+ * 路由文件：标准四路径优先；再兜底扫 src/router/ 目录下任意 ts/js（index.* 优先）。
+ * 兜底存在的意义：把 "src/router/index.tsx + routes.ts" 这类写法误判成"根本没有路由"
+ * 会连累后面的单文件兜底去查 App.vue（App.vue 通常只有 <router-view/>）→ 误杀真能跑的应用。
+ */
+function findRouterFile(frontendAbs: string): string | null {
+    for (const rel of ROUTER_CANDIDATES) if (isFile(path.join(frontendAbs, rel))) return rel;
+    let names: string[];
+    try {
+        names = fs.readdirSync(path.join(frontendAbs, "src", "router"))
+            .filter(n => /\.(ts|tsx|js|jsx|mts|mjs)$/i.test(n))
+            .sort((a, b) => (a.startsWith("index.") === b.startsWith("index.") ? a.localeCompare(b) : a.startsWith("index.") ? -1 : 1));
+    } catch { return null; }
+    const pick = names[0];
+    return pick ? `src/router/${pick}` : null;
+}
+
+// ---------- 代码扫描（跳字符串/注释后再数括号，防注释里的 path: 被当真路由） ----------
+
+interface BracePair { open: number; close: number }
+interface CodeScan { pairs: BracePair[]; comments: { start: number; end: number }[] }
+
+/** 跳过字符串字面量：返回闭合引号之后的下标（未闭合则到行尾/文末） */
+function skipStringAt(src: string, i: number): number {
+    const quote = src[i] ?? "";
+    let j = i + 1;
+    while (j < src.length) {
+        const c = src[j];
+        if (c === "\\") { j += 2; continue; }
+        if (c === quote) return j + 1;
+        if (c === "\n" && quote !== "`") return j;      // 单行字符串没闭合：不粘到下一行
+        j++;
+    }
+    return src.length;
+}
+
+/** 单遍扫描：括号配对 + 注释区间（字符串整体跳过；注释区间用于排除注释里的假 path:） */
+function scanCode(src: string): CodeScan {
+    const pairs: BracePair[] = [];
+    const comments: { start: number; end: number }[] = [];
+    const stack: number[] = [];
+    let i = 0;
+    while (i < src.length) {
+        const c = src[i] ?? "";
+        const next = src[i + 1] ?? "";
+        if (c === "/" && next === "/") {
+            const nl = src.indexOf("\n", i);
+            const end = nl < 0 ? src.length : nl;
+            comments.push({ start: i, end });
+            i = end;
+            continue;
+        }
+        if (c === "/" && next === "*") {
+            const e = src.indexOf("*/", i + 2);
+            const end = e < 0 ? src.length : e + 2;
+            comments.push({ start: i, end });
+            i = end;
+            continue;
+        }
+        if (c === '"' || c === "'" || c === "`") { i = skipStringAt(src, i); continue; }
+        if (c === "{") stack.push(i);
+        else if (c === "}") { const open = stack.pop(); if (open !== undefined) pairs.push({ open, close: i }); }
+        i++;
+    }
+    return { pairs, comments };
+}
+
+function inComments(scan: CodeScan, index: number): boolean {
+    return scan.comments.some(c => c.start <= index && index < c.end);
+}
+
+/** index 所在的最内层花括号对象（路由条目对象 `{ path: ..., component: ... }`） */
+function enclosingPair(pairs: BracePair[], index: number): BracePair | null {
+    let best: BracePair | null = null;
+    for (const p of pairs) if (p.open < index && index < p.close && (!best || p.open > best.open)) best = p;
+    return best;
+}
+
+/** 条目里"有没有可渲染的东西"：component / components（命名视图）/ render / redirect 都算——redirect 会跳到真实页面，同样不是白屏 */
+const COMPONENT_REF_RE = /\bcomponents\s*:|\bcomponent\s*:|\brender\s*:|\bredirect\s*:/;
+
+/** 命中 "/" 的兜底写法：通配路由（/:pathMatch(.*)* 等）也会给 "/" 渲染出东西 */
+const CATCH_ALL_RE = /^\*$|^\/\*$|^\/:[\w-]*\(\s*\.\*+\s*\)\*?$/;
+
+interface RouteEntry { line: number; path: string; ref: boolean; aliases: string[] }
+
+/** 摘出字符串字面量值（"a", 'b', `c`） */
+function quotedStrings(text: string): string[] {
+    const out: string[] = [];
+    const re = /"([^"\n]*)"|'([^'\n]*)'|`([^`\n]*)`/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text))) out.push(m[1] ?? m[2] ?? m[3] ?? "");
+    return out;
+}
+
+/** 数路由条目：每个 `path: "<字面量>"` 算一条，条数 = 路由表真实登记的页面数 */
+function routeEntries(src: string, scan: CodeScan): RouteEntry[] {
+    const out: RouteEntry[] = [];
+    const re = /\bpath\s*:\s*(?:"([^"\n]*)"|'([^'\n]*)'|`([^`\n]*)`)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(src))) {
+        if (inComments(scan, m.index)) continue;                 // 注释里的 path: 不算登记
+        const value = m[1] ?? m[2] ?? m[3] ?? "";
+        const pair = enclosingPair(scan.pairs, m.index);
+        const body = pair ? src.slice(pair.open, pair.close + 1) : src.slice(m.index);
+        // 父路由 + children 的写法：条目对象里含子路由的 component 也照收（/ 由子路由渲染）
+        const ref = COMPONENT_REF_RE.test(body);
+        const aliasMatch = /\balias\s*:\s*(\[[^\]]*\]|"[^"\n]*"|'[^'\n]*'|`[^`\n]*`)/g.exec(body);
+        out.push({ line: lineOf(src, m.index), path: value, ref, aliases: aliasMatch?.[1] ? quotedStrings(aliasMatch[1]) : [] });
+    }
+    return out;
+}
+
+/** 该条目是否承接 "/"（显式 path、空 path 兜底、通配兜底、或 alias: "/"） */
+function isHomeEntry(e: RouteEntry): boolean {
+    if (e.path === "/" || e.path === "") return true;
+    if (CATCH_ALL_RE.test(e.path)) return true;
+    return e.aliases.some(a => a === "/" || CATCH_ALL_RE.test(a));
+}
+
+/**
+ * 路由表是不是"非字面量"（静态数不出来）：addRoute 运行期注册、import.meta.glob 扫描、
+ * 或 `const routes = 别处的变量`。命中即放行（宁漏不误杀）——但绝不说"已通过"，如实标注未判定。
+ */
+function routesTableIsDynamic(src: string): boolean {
+    if (/\baddRoute\s*\(/.test(src)) return true;
+    if (/\bimport\s*\.\s*meta\s*\.\s*glob\b/.test(src)) return true;
+    const decl = /(?:const|let|var)\s+routes\b[^=\n]*=\s*([\s\S]{0,160})/.exec(src);
+    if (decl?.[1] !== undefined && !decl[1].trimStart().startsWith("[")) return true;
+    return false;
+}
+
+/**
+ * App.vue 是不是"自带可见内容"（没有路由表时的唯一救赎）。
+ * 只看模板：去掉注释/script/style 和 router-view・transition 这类结构标签后，
+ * 还剩真实标签或静态文案 = 能渲染；只剩 <router-view /> = 空壳（没有路由表时必然白屏）。
+ */
+function appVueLooksRendering(src: string): { ok: boolean; why: string } {
+    const m = /<template[^>]*>([\s\S]*)<\/template>/i.exec(src);
+    const body = m?.[1];
+    if (body === undefined || !body.trim()) return { ok: false, why: "App.vue 里没有 <template> 模板段（或模板为空）" };
+    const cleaned = body
+        .replace(/<!--[\s\S]*?-->/g, "")
+        .replace(/<script[\s\S]*?<\/script>/gi, "")
+        .replace(/<style[\s\S]*?<\/style>/gi, "");
+    const structural = new Set(["router-view", "router-link", "template", "transition", "transition-group",
+        "keep-alive", "teleport", "suspense", "component"]);
+    const tags = [...cleaned.matchAll(/<\/?([A-Za-z][\w.-]*)/g)]
+        .map(x => (x[1] ?? "").toLowerCase())
+        .filter(t => !structural.has(t));
+    const text = cleaned.replace(/<[^>]*>/g, "").replace(/\s+/g, "");
+    if (tags.length > 0) return { ok: true, why: `模板里有 <${tags[0] ?? ""}> 等 ${tags.length} 个真实标签` };
+    if (text.length > 0) return { ok: true, why: `模板里有 ${text.length} 个字符的静态文案` };
+    return { ok: false, why: "模板里只有 <router-view /> 这类结构标签，没有任何真实标签或文案" };
+}
+
+/**
+ * 前端"页面路由真的登记了"的硬闸：纯读盘判定，不跑浏览器、不调 LLM。
+ *
+ * 判定顺序（每一步都给出路，evidence 里带文件:行 + 计数，模型照抄即可行动）：
+ *   ① 找前端工程（frontend/ 或一级子目录里含 package.json + src/）——都没有 = 产物缺失，红。
+ *   ② 找路由文件（src/router/index.ts → src/router.ts → … → src/router/ 目录兜底）。
+ *   ③ 有路由文件：数 `path:` 条目。
+ *        - 0 条 → 就是那行没人看的 warn 变成的硬红（空路由 / 白屏）；
+ *        - 有条目但没一条命中 "/"（也无 alias/通配兜底）→ 红（首页缺登记 = 白屏）；
+ *        - 命中 "/" 但条目里没有 component/components/render/redirect → 红（匹配得上却无物可渲染）。
+ *   ④ 没有路由文件：只有 src/App.vue 自带真实内容才算过（单文件应用不需要路由表）；空壳 App.vue 红。
+ *
+ * 拿不准的两处一律放行但如实标注"未判定"：路由表非字面量（addRoute / import.meta.glob / 变量转发）、
+ * 以及路由表里没有 "/" 却有 beforeEach 守卫引用 "/"（守卫可能重定向到真实页面）。
+ */
+export function checkFrontendRoutes(projectDirAbs: string): { ok: boolean; detail: string; evidence: string; file?: string } {
+    const root = path.resolve(projectDirAbs);
+    const fe = findFrontendDir(root);
+    if (!fe) {
+        const dirs = listDirs(root);
+        return {
+            ok: false,
+            detail: `${root} 下前端产物缺失：既没有 frontend/，也没有任何含 package.json + src/ 的一级子目录——没有前端工程就无从登记页面路由，page.home（无头 Edge 打开 / 要求可见文本 + <input>）必然失败。请先产出前端产物（package.json / index.html / src/main.ts / src/App.vue / src/router/index.ts）。`,
+            evidence: `扫描目录 = ${root}；frontend/ 不存在；一级子目录 = ${dirs.length > 0 ? dirs.join("、") : "（无或目录不存在）"}；其中无一同时含 package.json 与 src/`,
+        };
+    }
+    const frontRel = toPosix(fe.rel);
+    const routerRel = findRouterFile(fe.abs);
+    const appRel = `${frontRel}/${APP_VUE_REL}`;
+
+    if (routerRel) {
+        const routerAbs = path.join(fe.abs, routerRel);
+        const relPath = `${frontRel}/${toPosix(routerRel)}`;
+        const src = readTextOrNull(routerAbs) ?? "";
+        const looksLikeRouter = /\bcreateRouter\b/.test(src) || /\broutes\b/.test(src);
+        if (looksLikeRouter) {
+            const scan = scanCode(src);
+            const entries = routeEntries(src, scan);
+            const declIndex = src.search(/\b(?:const|let|var)\s+routes\b/);
+            const declLine = declIndex >= 0 ? lineOf(src, declIndex) : 1;
+            const declSnippet = oneLine(src.slice(declIndex >= 0 ? declIndex : 0));
+
+            if (entries.length === 0) {
+                if (routesTableIsDynamic(src)) {
+                    return {
+                        ok: true,
+                        detail: `路由表非字面量（放行·未判定）：${relPath}:${declLine} 有 createRouter/routes，但路由表不是字面量数组（疑似 import.meta.glob / addRoute / 变量转发），静态闸门数不出条目。按"宁漏不误杀"放行——请自行确认运行时确实注册了 path: "/" 的页面，否则 / 会白屏。`,
+                        evidence: `${relPath}:${declLine} 路由表声明（片段：${declSnippet}）；path 条目计数 = 0（非字面量，计数不具判定力）`,
+                        file: relPath,
+                    };
+                }
+                return {
+                    ok: false,
+                    detail: `空路由（/ 白屏）：${relPath}:${declLine} 的路由表登记了 0 条带 path 的页面路由——应用可启动但 / 什么都不渲染（就是骨架那行"契约未登记任何页面路由：router 表为空（可运行但不注册任何页面，/ 会白屏）"的降级产物），page.home 渲染检查必失败。请在 routes 数组里登记至少一条真实页面路由，并把首页**同时**注册到 path: "/"（或给主页面条目补 alias: "/"），路由表不许再留空。`,
+                    evidence: `${relPath}:${declLine} 路由表声明（片段：${declSnippet}）；path 条目计数 = 0（去重 0）；createRouter ${/createRouter/.test(src) ? "命中" : "缺失"}；App.vue 是否存在 = ${isFile(path.join(fe.abs, APP_VUE_REL)) ? "是" : "否"}（有路由表时空壳 App.vue 救不了场）`,
+                    file: relPath,
+                };
+            }
+
+            const uniq = [...new Set(entries.map(e => e.path))];
+            const listed = uniq.slice(0, 8).join("、") + (uniq.length > 8 ? "…" : "");
+            const home = entries.find(isHomeEntry);
+            if (!home) {
+                if (/\bbeforeEach\s*\(/.test(src) && /["'`]\/["'`]/.test(src)) {
+                    return {
+                        ok: true,
+                        detail: `首页未静态命中 "/"（放行·未判定）：${relPath} 的 ${entries.length} 条 path 里没有 "/"，但文件里有 beforeEach 导航守卫且引用了 "/"——守卫可能在运行时把 / 重定向到真实页面，静态闸门证明不了。按"宁漏不误杀"放行；若守卫并不接管 /，请显式登记 path: "/"。`,
+                        evidence: `${relPath} path 条目计数 = ${entries.length}（去重 ${uniq.length}）：${listed}；"/" 命中 = 无（alias/通配兜底 = 无）；beforeEach 守卫 = 命中（未判定）`,
+                        file: relPath,
+                    };
+                }
+                return {
+                    ok: false,
+                    detail: `首页缺登记（/ 白屏）：${relPath} 登记了 ${entries.length} 条 path（${listed}），但没有一条能命中 "/"（也没有 alias: "/" 或通配兜底）——用户打开 / 匹配不上任何已登记页面，页面白屏，page.home 渲染检查必失败。请把首页**同时**注册到 path: "/"（或给主页面条目补 alias: "/"）。`,
+                    evidence: `${relPath} path 条目计数 = ${entries.length}（去重 ${uniq.length}）：${listed}；"/" 命中 = 无（path/alias/通配三种写法都没命中）；首页候选行 = 无`,
+                    file: relPath,
+                };
+            }
+            if (!home.ref) {
+                return {
+                    ok: false,
+                    detail: `首页路由未绑定组件（/ 白屏）：${relPath}:${home.line} 的 path:"${home.path}" 条目里没有 component / components / render / redirect——vue-router 能匹配到这条却没有东西可渲染（/ 白屏），page.home 渲染检查必失败。请在该条目上补组件引用（如 component: () => import("../views/XxxView.vue")）。`,
+                    evidence: `${relPath}:${home.line} 命中 "/" 的条目（path:"${home.path}"，alias 数 ${home.aliases.length}）里未出现 component/components/render/redirect；全表 path 条目计数 = ${entries.length}（去重 ${uniq.length}）：${listed}`,
+                    file: relPath,
+                };
+            }
+            return {
+                ok: true,
+                detail: `路由登记正常：${relPath} 登记了 ${entries.length} 条带 path 的页面路由（去重 ${uniq.length} 条），"/" 由 ${relPath}:${home.line}（path:"${home.path}"）承接且已绑定组件——/ 会渲染出真实页面，page.home 渲染检查可过。`,
+                evidence: `${relPath}:${declLine} 路由表（片段：${declSnippet}）；path 条目计数 = ${entries.length}（去重 ${uniq.length}）：${listed}；首页条目 = ${relPath}:${home.line} path:"${home.path}" component/components = 命中${home.aliases.length > 0 ? `（alias: ${home.aliases.join("、")}）` : ""}；App.vue = ${appRel}`,
+                file: relPath,
+            };
+        }
+        // 位置像路由、内容却既无 createRouter 也无 routes：不当作路由文件（走下面的单文件兜底），避免误杀
+    }
+
+    // ④ 没有可用路由文件 → 单文件前端判定
+    const appAbs = path.join(fe.abs, APP_VUE_REL);
+    const appSrc = readTextOrNull(appAbs);
+    const noRouterWhy = routerRel
+        ? `${frontRel} 下的 ${toPosix(routerRel)} 既无 createRouter 也无 routes（不算路由文件）`
+        : `${frontRel} 下没有路由文件（已查 ${ROUTER_CANDIDATES.map(toPosix).join(" / ")} 与 src/router/ 目录）`;
+    if (appSrc === null) {
+        return {
+            ok: false,
+            detail: `无路由也无单文件页（/ 白屏）：${noRouterWhy}，也找不到 ${appRel}——前端没有任何页面入口，/ 必然白屏（page.home 渲染检查必失败）。请产出 ${appRel}（直接渲染页面内容），或补 ${frontRel}/src/router/index.ts 并登记 path: "/"。`,
+            evidence: `${noRouterWhy}；${appRel} 是否存在 = 否；page.home 渲染检查要求 / 有可见文本 + <input>`,
+        };
+    }
+    const app = appVueLooksRendering(appSrc);
+    if (!app.ok) {
+        return {
+            ok: false,
+            detail: `App.vue 是空壳（/ 白屏）：${noRouterWhy}，而 ${appRel} ${app.why}——没有路由表时它渲染不出任何内容，/ 白屏（page.home 渲染检查必失败）。请直接在 ${appRel} 里渲染页面内容（真实标签/文案/表单），或补 ${frontRel}/src/router/index.ts 并登记 path: "/"。`,
+            evidence: `${noRouterWhy}；${appRel} 存在但模板判定为空壳（${app.why}）；单文件兜底要求 App.vue 模板含真实标记或文案`,
+            file: appRel,
+        };
+    }
+    return {
+        ok: true,
+        detail: `单文件前端（通过）：${noRouterWhy}，但 ${appRel} 非空壳（${app.why}）——main.ts 直接挂载 App.vue 就能在 / 渲染出内容，不需要路由表也能过 page.home 渲染检查。`,
+        evidence: `${noRouterWhy}；${appRel} 非空壳：${app.why}；单文件路径判定 = 通过（无路由文件时按单文件应用论）`,
+        file: appRel,
+    };
+}
+
+
+// ============================================================
+// ★ R8 事故族（2026-09-24 新增）：DDL 写了但启动时没人执行
+//
+//   治什么病（a1 实弹，不是假想）：项目根落着 ddl.sql（第一句就是 CREATE TABLE `poll`…），
+//   后端也确实跑起来了，但**全项目没有任何地方在启动时读它/执行它**——
+//   首个 HTTP 检查就撞 `Table 'poll' doesn't exist` 报 500，验收全线崩。
+//   这属于"产物看着齐全、一跑就废"的静默缺陷：编译闸、引用闸、路由闸一个都看不见它
+//   （ddl.sql 是合法 SQL、没人 import 它、跟前端路由无关）。
+//
+//   机制：纯读盘的一次性判定——先找 DDL 载体，再找"启动期施加者"，结论带 file:line 证据：
+//     applied      = 找到施加证据（代码读/执行了它 / Spring 的 spring.sql.init 自动执行 / package.json 脚本 / 代码内联建表并执行）
+//     not-applied  = 找到 DDL 载体，但全项目既没有施加者、也没有 ORM 自动建表开关 → 真缺陷（ok:false）
+//     undecided    = 静态判不了（没有 DDL 载体 / 有 ORM 自动建表 / 目录不存在 / 大文件没读）→ 写进 note，放行
+//
+//   铁律：**宁漏不误杀**——本函数拿不准时一律 ok:true 并把"未判定"如实写进 note，
+//   绝不假装通过、也绝不把不确定当缺陷；只有"明确有 DDL + 明确没人施加"才报红。
+//   纯函数（只读 fs）、同步、零 LLM、零进程。
+// ============================================================
+
+/** 迁移自举三态：见上方事故族说明 */
+export type MigrationBootstrapStatus = "applied" | "not-applied" | "undecided";
+
+/** 迁移自举结论：ok 只在 status="not-applied"（=真缺陷）时为 false；undecided 一律 true（宁漏不误杀） */
+export interface MigrationBootstrapResult {
+    ok: boolean;
+    /** DDL 载体（相对 projectDirAbs、斜杠分隔；.sql 优先，其次含 CREATE TABLE 的代码文件）；null=没找到 */
+    sqlFile: string | null;
+    /** 启动期施加证据（"文件:行 ◇片段"）；null=没找到施加者 */
+    appliedBy: string | null;
+    /** 载体里第一处 CREATE TABLE 的定位（"文件:行"）；null=载体里没有 CREATE TABLE（或没找到载体） */
+    ddlAt: string | null;
+    status: MigrationBootstrapStatus;
+    /** 人读中文结论 + 出路（拿不准时如实写"未判定"，绝不假装通过） */
+    note: string;
+}
+
+/** 迁移扫描跳过的目录：依赖/产物/缓存不参与"谁施加 DDL"的判断 */
+const MIGRATION_SKIP_DIRS = new Set([
+    "node_modules", "dist", "build", "target", "out", "bin", "obj", ".git",
+    "coverage", "__pycache__", ".venv", "venv", ".idea", ".gradle", ".mvn",
+    ".next", ".nuxt", ".output", ".vite", ".cache", "tmp", "temp",
+]);
+
+/** 只读这些后缀的文本（其余二进制/图片直接跳过）；无后缀的构建脚本用 MIGRATION_BARE_NAMES 认 */
+const MIGRATION_TEXT_EXT = /\.(sql|ts|tsx|mts|cts|js|jsx|mjs|cjs|py|java|kt|kts|go|rb|php|cs|yml|yaml|properties|json|sh|bash|zsh|ps1|cmd|bat|toml|ini|conf|xml|gradle|env)$/i;
+const MIGRATION_BARE_NAMES = new Set(["makefile", "dockerfile", "procfile", "justfile"]);
+
+/** 扫描上限：大项目不许把闸门拖死（超出部分如实体现在 note 的计数里） */
+const MIGRATION_MAX_FILES = 800;
+const MIGRATION_MAX_BYTES = 512 * 1024;
+
+/** DDL 语句 / 内联建表 / 执行调用 / SQL 文件引用 / Spring SQL init 的识别正则 */
+const MIGRATION_CREATE_TABLE_RE = /\bcreate\s+table\b/i;
+const MIGRATION_OTHER_STMT_RE = /\b(?:alter\s+table|insert\s+into|create\s+index|drop\s+table)\b/i;
+const MIGRATION_EXEC_HINT_RE = /\.\s*(?:exec|executescript|execute|query|run|prepare|all|raw)\s*\(|executeSqlScript|ResourceDatabasePopulator|\bexec\s*\(|create_all\s*\(/i;
+const MIGRATION_SPRING_SQL_INIT_RE = /spring\s*\.\s*sql|sql\s*[.:]\s*init|schema-locations|data-locations/i;
+const MIGRATION_JAVA_SQL_HINT_RE = /executeSqlScript|ResourceDatabasePopulator|@Sql\s*\(/;
+/** 迁移类脚本名（package.json scripts）：点名 DDL 文件的已由"文件引用"通道覆盖，这里兜住通用迁移命令 */
+const MIGRATION_SCRIPT_HINT_RE = /\b(?:migrate|migration|initdb|db:init|db:setup|db:migrate|db:seed|create_?tables?|prisma|alembic|flyway|liquibase|typeorm|sequelize|knex)\b/i;
+/** ORM 自动建表开关：命中即"表可能由 ORM 建出来"，静态判不了 → undecided（不报缺陷） */
+const MIGRATION_AUTO_DDL_RE = /ddl-auto\s*[:=]\s*(?:update|create|create-drop)|synchronize\s*[:=]\s*true|create_all\s*\(|db\.create_all|prisma\s+migrate|auto[_-]?migrate\s*[:=]\s*true|\.sync\s*\(\s*\{[^)]*force/i;
+
+interface ScannedTextFile { rel: string; content: string }
+
+/** 项目文本文件快照（名字排序 → 确定性；跳依赖/产物；隐藏文件/目录=引擎状态，不参与判定） */
+function scanMigrationTextFiles(root: string): { files: ScannedTextFile[]; skipped: number } {
+    const out: ScannedTextFile[] = [];
+    let skipped = 0;
+    const walk = (dir: string, rel: string) => {
+        let entries: fs.Dirent[];
+        try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+        entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+        for (const e of entries) {
+            if (out.length >= MIGRATION_MAX_FILES) return;
+            if (e.name.startsWith(".") || e.name.startsWith("_")) continue;   // .architect-state.json / _developer：引擎状态不是应用产物
+            const r = rel ? `${rel}/${e.name}` : e.name;
+            const abs = path.join(dir, e.name);
+            if (e.isDirectory()) {
+                if (!MIGRATION_SKIP_DIRS.has(e.name.toLowerCase())) walk(abs, r);
+                continue;
+            }
+            if (!MIGRATION_TEXT_EXT.test(e.name) && !MIGRATION_BARE_NAMES.has(e.name.toLowerCase())) { skipped++; continue; }
+            try {
+                if (fs.statSync(abs).size > MIGRATION_MAX_BYTES) { skipped++; continue; }
+                out.push({ rel: toPosix(r), content: fs.readFileSync(abs, "utf-8") });
+            } catch { skipped++; }
+        }
+    };
+    walk(root, "");
+    return { files: out, skipped };
+}
+
+/** 该文件是不是"可能施加 SQL"的候选（代码/脚本/配置/构建文件；.sql 自身不算施加者） */
+function isMigrationApplierCandidate(rel: string): boolean {
+    if (/\.sql$/i.test(rel)) return false;
+    const base = path.posix.basename(rel);
+    return MIGRATION_TEXT_EXT.test(base) || MIGRATION_BARE_NAMES.has(base.toLowerCase());
+}
+
+/** 文本里第一处出现 needle 的下标（大小写不敏感）；-1=没有 */
+function indexOfLoose(content: string, needle: string): number {
+    if (!needle) return -1;
+    return content.toLowerCase().indexOf(needle.toLowerCase());
+}
+
+/** 下标所在整行原文（证据片段用；越界安全） */
+function lineAt(content: string, index: number): string {
+    if (index < 0) return "";
+    const start = content.lastIndexOf("\n", index) + 1;
+    const end = content.indexOf("\n", index);
+    return content.slice(start, end < 0 ? content.length : end);
+}
+
+/** "文件:行 ◇片段" 形式的证据（模型照抄即可行动） */
+function migrationEvidence(rel: string, content: string, index: number): string {
+    return `${rel}:${lineOf(content, Math.max(0, index))} ◇「${oneLine(lineAt(content, index), 100)}」`;
+}
+
+/**
+ * ★ TASK3 核心：迁移/DDL 自举判定（纯函数、只读盘、零 LLM 零进程）。
+ *
+ * 判定链（每步都可能"未判定"，未判定一律放行并写进 note）：
+ *   ① 载体：.sql 里含 CREATE TABLE（首选）→ 其次代码内联 CREATE TABLE → 再次只含其它语句的 .sql；都没有=undecided。
+ *   ② 施加者（任一命中即 applied，证据取第一条，按文件名字典序保证确定性）：
+ *      · 代码/脚本/构建文件里点名了载体的文件名（读进来执行、`sqlite3 app.db < init.sql`、Dockerfile/Makefile…）
+ *      · 代码内联 CREATE TABLE + 执行调用（表由代码自己建，R8 的 500 不会发生；note 会提示与 .sql 可能不一致）
+ *      · Spring 的 spring.sql.init / schema-locations + mode=always（骨架就是这条路）
+ *      · Java 的 executeSqlScript / ResourceDatabasePopulator / @Sql
+ *   ③ 都没找到但有 ORM 自动建表开关（ddl-auto=update / synchronize:true / create_all…）→ undecided。
+ *   ④ 都没有 → not-applied（ok:false，带"该改哪儿"的两条出路）。
+ *
+ * 明知会漏的两种（都朝"不误杀"方向）：把 DDL 读进来却在别处执行、被否定的注释里提到
+ * `-- TODO: 手动执行 ddl.sql`——静态证明不了运行期行为，一律按"可能有施加者"放行。
+ */
+export function checkMigrationBootstrap(projectDirAbs: string): MigrationBootstrapResult {
+    const root = path.resolve(projectDirAbs ?? "");
+    if (statKind(root) !== "dir") {
+        return {
+            ok: true, sqlFile: null, appliedBy: null, ddlAt: null, status: "undecided",
+            note: `迁移自举未判定（不报缺陷）：${toPosix(root)} 不是可读目录（产物还没落盘？），无法判断 DDL 是否存在、是否被施加——按"宁漏不误杀"放行，请自行确认启动时会建表。`,
+        };
+    }
+    const { files, skipped } = scanMigrationTextFiles(root);
+    const scanned = `已扫 ${files.length} 个文本文件${skipped > 0 ? `（另跳过 ${skipped} 个非文本/超大/读失败文件）` : ""}`;
+
+    // ① DDL 载体
+    const ddlSql = files.find(f => /\.sql$/i.test(f.rel) && MIGRATION_CREATE_TABLE_RE.test(f.content));
+    const inlineDdl = files.find(f => !/\.sql$/i.test(f.rel) && MIGRATION_CREATE_TABLE_RE.test(f.content));
+    const otherSql = files.find(f => /\.sql$/i.test(f.rel) && MIGRATION_OTHER_STMT_RE.test(f.content));
+    const carrier = ddlSql ?? inlineDdl ?? otherSql ?? null;
+    if (!carrier) {
+        return {
+            ok: true, sqlFile: null, appliedBy: null, ddlAt: null, status: "undecided",
+            note: `迁移自举未判定（不报缺陷）：${scanned}，没有找到任何含 CREATE TABLE 的 .sql 或代码文件——可能本阶段确实没有表结构，也可能建表全在数据库驱动的自动同步里，静态判不了。按"宁漏不误杀"放行；若启动后接口报 Table '…' doesn't exist，请检查建表语句到底有没有被执行。`,
+        };
+    }
+    const ddlIndex = carrier.content.search(MIGRATION_CREATE_TABLE_RE);
+    const ddlAt = ddlIndex >= 0 ? `${carrier.rel}:${lineOf(carrier.content, ddlIndex)}` : null;
+    const carrierBase = path.posix.basename(carrier.rel);
+
+    // ② 施加者
+    const appliers: string[] = [];
+    const autoDdl: string[] = [];
+    for (const f of files) {
+        if (isMigrationApplierCandidate(f.rel)) {
+            // ②-1 点名了 DDL 文件（读进来执行 / 命令行重定向 / Dockerfile·Makefile / package.json 脚本值）
+            if (f.rel !== carrier.rel) {
+                const at = indexOfLoose(f.content, carrierBase);
+                if (at >= 0) appliers.push(migrationEvidence(f.rel, f.content, at));
+            }
+            // ②-2 代码内联建表 + 执行调用（代码自己建表；载体是 .sql 且代码另建一份时 note 会点出来）
+            if (MIGRATION_CREATE_TABLE_RE.test(f.content) && MIGRATION_EXEC_HINT_RE.test(f.content)) {
+                appliers.push(`${migrationEvidence(f.rel, f.content, f.content.search(MIGRATION_CREATE_TABLE_RE))}（内联 CREATE TABLE + 执行调用）`);
+            }
+            // ②-3 Spring 的 spring.sql.init：schema.sql 由启动流程自动执行（骨架骨架就是这么配的）
+            if (/(^|\/)application[-\w.]*\.(?:ya?ml|properties)$/i.test(f.rel)
+                && MIGRATION_SPRING_SQL_INIT_RE.test(f.content) && /always/i.test(f.content)
+                && (indexOfLoose(f.content, carrierBase) >= 0 || /^(?:schema|data)\.sql$/i.test(carrierBase))) {
+                appliers.push(`${migrationEvidence(f.rel, f.content, f.content.search(MIGRATION_SPRING_SQL_INIT_RE))}（spring.sql.init 启动时执行）`);
+            }
+            // ②-4 Java 显式执行脚本
+            if (/\.java$/i.test(f.rel) && MIGRATION_JAVA_SQL_HINT_RE.test(f.content)) {
+                appliers.push(`${migrationEvidence(f.rel, f.content, f.content.search(MIGRATION_JAVA_SQL_HINT_RE))}（Java 启动期执行 SQL 脚本）`);
+            }
+            // ②-5 package.json 里的迁移脚本（脚本名/命令是迁移类即算：start 依赖它或部署时跑它）
+            if (path.posix.basename(f.rel).toLowerCase() === "package.json" && MIGRATION_SCRIPT_HINT_RE.test(f.content)) {
+                appliers.push(`${migrationEvidence(f.rel, f.content, f.content.search(MIGRATION_SCRIPT_HINT_RE))}（package.json 迁移脚本）`);
+            }
+        }
+        // ③ ORM 自动建表（不是 DDL 施加者，但会让"表不存在"不成立）
+        if (MIGRATION_AUTO_DDL_RE.test(f.content)) {
+            autoDdl.push(migrationEvidence(f.rel, f.content, f.content.search(MIGRATION_AUTO_DDL_RE)));
+        }
+    }
+
+    const [firstApplier = ""] = appliers;
+    if (firstApplier) {
+        const more = appliers.length > 1 ? `（另有 ${appliers.length - 1} 条证据）` : "";
+        return {
+            ok: true, sqlFile: carrier.rel, appliedBy: firstApplier, ddlAt, status: "applied",
+            note: `DDL 自举正常：载体 ${carrier.rel}${ddlAt ? `（建表语句在 ${ddlAt}）` : ""} 在启动期会被施加，证据 = ${firstApplier}${more}；HTTP 检查不会因"表不存在"报 500。`,
+        };
+    }
+    const [firstAuto = ""] = autoDdl;
+    if (firstAuto) {
+        return {
+            ok: true, sqlFile: carrier.rel, appliedBy: null, ddlAt, status: "undecided",
+            note: `迁移自举未判定（不报缺陷）：找到 DDL 载体 ${carrier.rel}${ddlAt ? `（建表语句在 ${ddlAt}）` : ""}，但全项目没有"启动时读它/执行它"的证据；不过发现了 ORM 自动建表开关（${firstAuto}）——表可能仍会由 ORM 建出来，静态判不了会不会 500。请自行确认：要么让启动流程执行 ${carrier.rel}，要么确认 ORM 自动建表与它一致（不一致时接口会报 Table '…' doesn't exist）。`,
+        };
+    }
+    return {
+        ok: false, sqlFile: carrier.rel, appliedBy: null, ddlAt, status: "not-applied",
+        note: `DDL 写了没人执行（R8）：找到 DDL 载体 ${carrier.rel}${ddlAt ? `（建表语句在 ${ddlAt}）` : ""}，但${scanned}里没有任何地方在启动时读它/执行它，也没有 ORM 自动建表开关——后端起来了表却不存在，HTTP 检查会撞 Table '…' doesn't exist 报 500。请二选一：① 启动时真实执行它（Node：db.exec(readFileSync("${carrier.rel}", "utf-8"))；Python：conn.executescript(open("${carrier.rel}").read())；Spring：spring.sql.init.mode=always + schema-locations 指到它）；② 在 package.json 里加 db:init 脚本并让 start 依赖它。`,
+    };
 }

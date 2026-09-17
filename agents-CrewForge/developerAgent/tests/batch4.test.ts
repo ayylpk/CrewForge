@@ -294,7 +294,7 @@ describe("batch4 / 集成", () => {
 const foreverTool = (tool = "readFile") => ({ kind: "tool", tool, args: { path: "backend/src/A.java" } });
 
 describe("batch4 / 预算与计账", () => {
-    it("达到 maxLlmCalls 后不再调用模型，且直接 blocked", async () => {
+    it("达到 maxLlmCalls 后不再调用模型，且先问人（人判停才 blocked）", async () => {
         const ledger = freshLedger();
         const { llm, count } = capturingLlm([foreverTool()]);
         const graph = buildDeveloperGraph({
@@ -307,8 +307,20 @@ describe("batch4 / 预算与计账", () => {
         })) as DeveloperState;
 
         expect(count()).toBe(2);            // 达到上限后第 3 次没有发生
-        expect(final.status).toBe("blocked");
+        // ★ 9/17 语义变更：预算耗尽的出口从"直接终态 blocked"改成**先问人**。
+        //   改造前整轮归零且人什么也决定不了（只收到一句"失败"）；现在出题等人，
+        //   人答"继续/降级"回循环接着干，答"停止"才收口——问人次数有界（maxEscalations）。
+        expect(final.status).toBe("waiting_human");
+        expect(final.human?.prompt ?? "").toContain("需要你决定什么");
         expect(final.llmCallsCompleted).toBe(2);
+
+        // 驱动侧的动作（index.ts invokeWithHuman 的同款形状）：回填 humanAnswer 复活
+        const stopped = await graph.invoke(
+            initialDeveloperState({ ...final, humanAnswer: "3" }),
+        ) as DeveloperState;
+        expect(stopped.status).toBe("blocked");
+        expect(stopped.human).toBeNull();
+        expect(count()).toBe(2);            // 问人的全过程没有再花一次模型调用
     });
 
     it("LLM 请求前崩溃仍然计入 planned call（llm_call_planned 已落账）", async () => {

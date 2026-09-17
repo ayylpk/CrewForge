@@ -5,7 +5,6 @@
 //   这两条都是"别把时间和额度烧在同一个坑里"的机制，必须有机器证据钉住。
 import { afterAll, describe, expect, it } from "bun:test";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { DeveloperLedger } from "../ledger";
 import { Workspace } from "../workspace";
@@ -15,14 +14,17 @@ import {
 import type { DeveloperLlm } from "../graph";
 import { initialDeveloperState, isTimeoutRepeated } from "../state";
 import type { ToolArgs, ToolContext, ToolRegistry } from "../tools/registry";
+import { cleanupTempDirsAfterTests, tmpDir } from "./_tmp";
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "cf-dev-timeout-"));
+const root = tmpDir("cf-dev-timeout");
 const opened: DeveloperLedger[] = [];
 let seq = 0;
 
+// 先关账本，再删树（顺序不能反：开着 sqlite 删树在 Windows 上是 EBUSY，见 _tmp.ts 文件头实测）。
 afterAll(() => {
     for (const l of opened) { try { l.close(); } catch { /* 已关 */ } }
 });
+cleanupTempDirsAfterTests();
 
 function ledgerFor(): DeveloperLedger {
     const l = DeveloperLedger.open(path.join(root, `to-${seq++}.db`), "p1:t1");

@@ -10,6 +10,12 @@ import { WorkspaceViolation } from "../workspace";
 import type { Workspace } from "../workspace";
 import { SandboxUnavailableError } from "./processSandbox";
 import type { ReadonlySubAgentCall } from "./readonlySubAgent";
+import { askHumanTool } from "./askHuman";
+import { probeEnvTool } from "./probeEnv";
+import { consultStationTool } from "./consultStation";
+// 召唤工位（层 B）的协议类型：与 developerAgent/protocol.ts 的形状约定不同——
+// 它是**跨工位**的协议（四个工位都实现同一份），所以定义住在 agents-CrewForge/consult.ts。
+import type { ConsultReply, ConsultRole } from "../../consult";
 
 export interface ToolContext {
     /** 唯一写盘/执行闸门 */
@@ -43,6 +49,39 @@ export interface ToolContext {
      *   只有只读工具盒，永远拿不到 ctx，也拿不到写盘 / Hub / Ledger / State 任何入口。
      */
     subagent?: ReadonlySubAgentCall;
+    /**
+     * 问人端口（9/17）：askHuman 工具的落点。
+     * 由 **Developer 侧**（graph.ts ctxOf ← index.ts 注入的 Questioner）提供；
+     * 未注入 = 该角色无权打扰人（子 Agent / Test 侧工具盒），askHuman 会**默认拒绝**，
+     * 而不是静默降级成"自己决定"。
+     */
+    askHuman?: (req: { question: string; options?: string[] }) => Promise<string>;
+    /**
+     * 验收记忆（9/17 回归冻结）：runAcceptance 用它读/写"上一次预演的逐条判据状态"。
+     * 由 graph 侧用 Ledger 实现（落库，跨阶段/跨进程不丢）——回归判定的基线必须比进程活得久，
+     * 否则每阶段起新进程就退化成"每轮都是首次预演"，回归永远抓不到。
+     * 未注入 = 不做回归判定（只报当轮结果，行为与改造前一致）。
+     */
+    acceptanceMemory?: {
+        load(): Record<string, "pass" | "fail" | "unevaluable"> | null;
+        save(status: Record<string, "pass" | "fail" | "unevaluable">): void;
+    };
+    /**
+     * 召唤真工位（层 B，咨询协议见 agents-CrewForge/consult.ts）：
+     * architect / pm / test-core / maintainer 四站，各自对自己**拥有的产物**有职权
+     * （架构师改计划/批次、测试澄清判据、PM 澄清需求、维护者出验收说明）。
+     *
+     *   ★ 端口只传 role/question/focus —— **没有 evidence 参数**是刻意的：
+     *     协议里的 evidence 是"发起方声明的背景"，模型手写的内容不该披着机器证据的皮
+     *     送出去（graph.ts 里 delegateReadonly 剥离模型自写 evidence 是同一手法）；
+     *     模型提供的背景材料由工具拼进 question 正文，并显式标注"未经机器核验"。
+     *   ★ 返回 null = 超时（工位没在时限内回话）——司机据此**降级**（自行决策 + 写明假设），
+     *     绝不允许挂起：这条线的断掉不该把整轮任务打死。
+     *   ★ 未注入 = 该角色无权召唤工位（只读子 Agent / Test 侧工具盒），工具默认拒绝。
+     *   ★ 工位永远不写生成项目的代码：写盘/执行只有 DEVELOPER_ROLE_NAME 有权限
+     *     （WRITE_TOOLS / EXEC_TOOLS 的角色闸），本端口不改变这条。
+     */
+    consultStation?: (req: { role: ConsultRole; question: string; focus?: string[] }) => Promise<ConsultReply | null>;
 }
 
 /** 唯一被允许写生成项目、并且唯一被允许执行命令的角色 */
@@ -243,7 +282,19 @@ export function createDeveloperProcessRegistry(): ToolRegistry {
         .register(stopProcessTool)
         // 验收预演（9/15 下沉）：一条调用跑完 COMPILE + CONTRACT 判据，
         // 替掉 r5 里"模型手写 selftest-*.mjs 自证"的 25 次自造验证。
-        .register(runAcceptanceTool);
+        .register(runAcceptanceTool)
+        // 问人（9/17）：模型主动求助。与 escalation.ts（代码强制升级）是一对——
+        // 没有这个工具，模型"想求助"只能写在助手文本里，而进程在跑、没人看得到，
+        // 于是变成自己硬扛到预算烧尽（s5b）。挂在扩展集，核心 10 件套不动。
+        .register(askHumanTool)
+        // 环境自省（9/17）：随时实测本机有什么，再决定走哪条路（只读、无副作用）
+        .register(probeEnvTool)
+        // 召唤真工位（9/17 拓扑升级·层 B）：司机在自己的循环里把问题送回**拥有该产物**的
+        // 工位（架构师/PM/测试/维护者），拿回意见**或**已生效的修订。
+        // 层 A（delegateReadonly 的两个顾问角色）只给意见；没有层 B，"契约不一致"这类
+        // 上游缺口在流程里就没有任何处置权，司机只能自己发明解释——这就是"换脑断层"。
+        // 与 askHuman/probeEnv 同挂扩展集：核心 10 件套不动（tools.test.ts 的 10 个工具清单不改）。
+        .register(consultStationTool);
 }
 
 /** 合并多个注册表（同名后者覆盖前者，冲突可见） */
@@ -253,7 +304,8 @@ export function mergeToolRegistries(...registries: readonly ToolRegistry[]): Too
     return merged;
 }
 
-/** Developer 实际使用的完整工具集（核心 10 + 扩展 5） */
+/** Developer 实际使用的完整工具集（核心 10 + 扩展 9：shell/httpRequest/进程三件套/
+ *  runAcceptance/askHuman/probeEnv/consultStation） */
 export function createFullDeveloperToolRegistry(): ToolRegistry {
     return mergeToolRegistries(createDeveloperToolRegistry(), createDeveloperProcessRegistry());
 }

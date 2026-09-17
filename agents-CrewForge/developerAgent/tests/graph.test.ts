@@ -45,7 +45,7 @@ const failure = (sig: string): TestFailure => ({
 });
 
 describe("graph / 结构写死", () => {
-    it("节点集合固定为规格定义的 12 个（9/15 分批加入 waitBatch / acceptBatch）", () => {
+    it("节点集合固定为规格定义的 13 个（9/15 加 waitBatch/acceptBatch；9/17 加 escalate 问人站）", () => {
         const compiled = compileGraph() as unknown as {
             nodes?: Record<string, unknown>;
             getGraph?: () => { nodes: Record<string, unknown> };
@@ -56,6 +56,9 @@ describe("graph / 结构写死", () => {
         expect(names).toEqual([
             "__start__",
             "acceptBatch", "bootstrapOrImplement", "developerBlocked", "developerReady",
+            // escalate（9/17）：所有保险丝的出口先到这里问人，人答"继续/降级"才回 loadContext；
+            // 只有人判停或问满次数才进 developerBlocked 终态。
+            "escalate",
             "handleTestResult", "inspectProject", "loadContext", "receiveTask", "repair",
             "requestTest", "runLocalChecks", "waitBatch",
         ]);

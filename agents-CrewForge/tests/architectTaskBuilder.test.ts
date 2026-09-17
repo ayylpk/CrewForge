@@ -13,9 +13,8 @@
 //   在 tests/architect-batch-dispatch.test.ts（脚本化 Fake ArchitectLlm）。
 // ============================================================
 
-import { afterAll, describe, expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { TransferStation } from "../Hub";
 import { parseInbound } from "../developerAgent/protocol";
@@ -35,11 +34,14 @@ import {
     parseArchitectSemantics, resolveGenericCommand, retryPromptFor,
 } from "../architectTaskBuilder";
 import type { ArchitectSemantics } from "../architectTaskBuilder";
+// Hub 侧与 developerAgent/tests 共用同一份临时目录实现（见 _tmp.ts 文件末「跨根引用」）
+import { cleanupTempDirsAfterTests, tmpDir } from "../developerAgent/tests/_tmp";
 
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "cf-arch-"));
-afterAll(() => {
-    try { fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 2 }); } catch { /* Windows 占用 */ }
-});
+// 删树交给 _tmp.ts：重试 + 退避，删不掉就大声报。原来这里是
+// `try { rmSync(..., maxRetries: 2) } catch { /* Windows 占用 */ }` —— 静默吞掉，
+// 于是 9/17 实测这个文件照样在 %TEMP% 里留下 cf-arch-XXXX（0.39 MB / 次）。
+const tmp = tmpDir("cf-arch");
+cleanupTempDirsAfterTests();
 
 // ---------- fixtures（充当「PM 结构化需求」与「LLM 语义输出」） ----------
 
@@ -197,7 +199,11 @@ describe("architect / 任务包装配", () => {
         expect(typeof built.packageHash).toBe("string");
         // LLM 的语义字段原样落地（不做二次发明）
         expect(task.requirementSnapshot.goal).toBe(SEMANTICS.goal);
-        expect(task.developerInstructions).toBe(SEMANTICS.instructions);
+        // ★ 9/17 变更同步：developerInstructions 现在**前置**一段程序拼的"拆解理由随行简报"
+        //   （sem.goal / stack.why / 工作项清单，治三次换脑断层）。语义正文仍原样落地——
+        //   这里断言"包含"而不是"全等"，守住的本意不变：机械字段不许改写 LLM 的语义正文。
+        expect(task.developerInstructions).toContain(SEMANTICS.instructions);
+        expect(task.developerInstructions.length).toBeGreaterThanOrEqual(SEMANTICS.instructions.length);
     });
 
     it("7. acceptanceChecks 由 Contract/目录**机械生成**，命令一个都不预写", () => {

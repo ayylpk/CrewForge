@@ -13,7 +13,6 @@
 
 import { describe, expect, test } from "bun:test";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import {
     buildReviewLedgerPayload, collectBlockingFindings, renderFindings, runTestAgentVerify, semanticGateReasons,
@@ -24,8 +23,12 @@ import type {
 } from "../../testAgentAdapter";
 import { renderReviewFindings } from "../graph";
 import type { TestFailure } from "../protocol";
+import { cleanupTempDirsAfterTests, tmpDir } from "./_tmp";
 
-const stubRoot = fs.mkdtempSync(path.join(os.tmpdir(), "cf-llm-review-"));
+// 桩目录统一由 _tmp.ts 建在本次运行的根目录下，收尾钩子重试删除、删不掉就大声报
+// （9/17 实测：这个文件跑一遍在 %TEMP% 里留 1 个 cf-llm-review-XXXX，约 1 MB）。
+const stubRoot = tmpDir("cf-llm-review");
+cleanupTempDirsAfterTests();
 const projectDir = path.join(stubRoot, "proj");
 fs.mkdirSync(projectDir, { recursive: true });
 

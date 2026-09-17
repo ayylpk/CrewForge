@@ -40,10 +40,17 @@ import { createReadonlyToolbox, type ReadonlyToolbox } from "./testAssistant";
 // 角色与请求 / 结果类型（规格三）
 // ============================================================
 
-export type ReadonlySubAgentRole = "explorer" | "debugger" | "ui-reviewer";
+export type ReadonlySubAgentRole =
+    | "explorer" | "debugger" | "ui-reviewer"
+    // ★ 9/17 拓扑升级（多 agent 保留版）：把"接力棒工位"变成"可召唤的专家"。
+    //   以前 PM/架构师/测试/维护者只在流水线的固定位置出现一次（发批→消费→退出→Java 再拉起），
+    //   中间失忆（"换脑断层"），模型判断力不累积。现在司机（developer）在自己循环里
+    //   **随时**可以召唤这两种顾问：架构审（结构性缺口）与验收审（会不会 404/白屏）。
+    //   团队一个工位没删——只是从"接力"改成"召唤"，这才是 Claude Code 的多 agent 形状。
+    | "architect-advisor" | "acceptance-advisor";
 
 export const READONLY_SUBAGENT_ROLES: readonly ReadonlySubAgentRole[] = [
-    "explorer", "debugger", "ui-reviewer",
+    "explorer", "debugger", "ui-reviewer", "architect-advisor", "acceptance-advisor",
 ];
 
 /**
@@ -71,7 +78,7 @@ export type ReadonlySubAgentEvidenceInput = z.infer<typeof RequestEvidenceSchema
 
 /** 统一请求接口（规格三）。role 非法 / question 为空 → 直接拒绝，不跑分析。 */
 export const ReadonlySubAgentRequestSchema = z.object({
-    role: z.enum(["explorer", "debugger", "ui-reviewer"]),
+    role: z.enum(["explorer", "debugger", "ui-reviewer", "architect-advisor", "acceptance-advisor"]),
     question: z.string().min(1),
     paths: z.array(z.string()).optional(),
     evidence: RequestEvidenceSchema.optional(),
@@ -92,7 +99,7 @@ const ResultEvidenceSchema = z.strictObject({
 });
 
 export const ReadonlySubAgentResultSchema = z.strictObject({
-    role: z.enum(["explorer", "debugger", "ui-reviewer"]),
+    role: z.enum(["explorer", "debugger", "ui-reviewer", "architect-advisor", "acceptance-advisor"]),
     ok: z.boolean(),
     rootCause: z.string(),
     evidence: z.array(ResultEvidenceSchema),
@@ -201,6 +208,20 @@ export const SUBAGENT_ROLE_PROMPTS: Record<ReadonlySubAgentRole, string> = {
         "组件库接入、Element Plus / TDesign 是否混用、响应式布局、视觉层级、白屏可能。",
         "不得：修改 Vue 文件；改 Contract；宣布页面通过；用静态文件推断 HTTP 已通过。",
         "渲染与白屏的**真实**行为需要运行证据，你只能给静态线索，其余进 cannotVerify。",
+    ].join(" "),
+    "architect-advisor": [
+        "你是只读架构顾问（Architect Advisor）：被司机在中途召唤，回答**结构性**问题——",
+        "目录/工程文件是否齐、路由与入口是否登记、数据库迁移文件是否有人用、契约文件是否在位、",
+        "需求与技术栈是否自洽（例如需求要求嵌入式数据库却选了需要外部服务的库）。",
+        "不得：改技术栈（那是架构师的决定）；改 Contract；替司机写代码；宣布计划已完成。",
+        "你的价值是**在司机跑偏之前叫停**：只报结构缺口与矛盾，逐条给文件证据。",
+    ].join(" "),
+    "acceptance-advisor": [
+        "你是只读验收顾问（Acceptance Advisor）：被司机在中途召唤，预判「这套东西拿去验收会挂在哪」。",
+        "只做静态预判：接口清单（HTTP 方法与路径）是否真的注册了、涉及的状态码分支",
+        "（409 冲突 / 201 创建 / 200 关闭这类语义）有没有对应实现、前端路由与页面是否接得上。",
+        "不得：跑服务、发 HTTP、宣布验收通过；也不得替司机改代码。",
+        "★ 你**没有执行权**，所以状态码的真实行为只能给「实现是否存在」的静态线索，其余进 cannotVerify。",
     ].join(" "),
 };
 
@@ -586,7 +607,140 @@ async function buildContextBrief(
         case "explorer": return briefExplorer(box, req, files);
         case "debugger": return briefDebugger(box, req, evidence, files);
         case "ui-reviewer": return briefUiReviewer(box, req, files);
+        case "architect-advisor": return briefArchitectAdvisor(box, req, files);
+        case "acceptance-advisor": return briefAcceptanceAdvisor(box, req, files);
     }
+}
+
+// ---------- 架构顾问：结构性缺口（司机跑偏之前叫停） ----------
+
+async function briefArchitectAdvisor(
+    box: ReadonlyToolbox, req: ReadonlySubAgentRequest, files: string[],
+): Promise<RoleBrief> {
+    const evidence: Ev[] = [];
+    const changes: string[] = [];
+    const risks: string[] = [];
+    const cannotVerify: string[] = [];
+
+    // ① 工程文件：没有工程入口 = 踩在沙子上（编译/构建门立刻挂）
+    const engFiles = files.filter((f) => ENGINEERING_FILES.includes(f.split("/").pop() ?? ""));
+    for (const f of engFiles.slice(0, 6)) {
+        evidence.push({ path: f, detail: "工程文件在位" });
+    }
+    if (engFiles.length === 0) {
+        changes.push("没有任何可识别的工程文件（package.json / pom.xml / pyproject.toml…）：先落工程骨架再写业务，否则构建门必挂");
+    }
+
+    // ② 路由登记：契约里有页面但 router 表为空 → / 白屏（R6 事故的形状）
+    const routerHits = await briefSearch(box, "path:\\s*['\"`]/", 8);
+    const routerFile = files.find((f) => /router[\/\\](index\.)?(ts|js)$/.test(f)) ?? files.find((f) => /router\.(ts|js)$/.test(f)) ?? null;
+    if (!routerFile) {
+        changes.push("没有路由文件（frontend/src/router/index.ts 一类）：若契约要求多页面，/ 会白屏");
+    } else if (routerHits.length === 0) {
+        evidence.push({ path: routerFile, detail: "路由文件存在，但没有任何 path: 登记 —— / 白屏" });
+        changes.push("在路由表里登记真实页面路由，并把首页同时注册到 path: \"/\"");
+    } else {
+        evidence.push(parseHit(routerHits[0]!));
+    }
+
+    // ③ 迁移文件：写了 DDL 却没人应用 → 表不存在 → 一片 500（R8 事故的形状）
+    const ddlFile = files.find((f) => /(^|\/)(ddl|schema|init)\.sql$/.test(f)) ?? null;
+    if (ddlFile) {
+        const applied = await briefSearch(box, "init\\.sql|ddl\\.sql|schema\\.sql|readFileSync\\(.*\\.sql", 6);
+        if (applied.length === 0) {
+            evidence.push({ path: ddlFile, detail: "存在 DDL 文件，但全项目找不到任何引用它的地方（启动流程没接）" });
+            changes.push("把 DDL 接进启动流程（或改用 ORM 自动建表），否则建表语句从不执行、接口全 500");
+        } else {
+            evidence.push(parseHit(applied[0]!));
+        }
+    }
+
+    // ④ 契约文件在位性（契约是上下游的共同真相，缺了就是各写各的）
+    const contractFile = files.find((f) => /CONTRACTS\.md$/i.test(f)) ?? null;
+    if (!contractFile) {
+        risks.push("没有找到 CONTRACTS.md：上下游对接口形状的共同约定缺失，容易出现前后端各写一套");
+    }
+
+    return {
+        text: [
+            `# Architect Advisor 只读摘要\n问题：${req.question}`,
+            `工程文件 ${engFiles.length} 个；路由文件 ${routerFile ?? "（缺）"}；DDL ${ddlFile ?? "（无）"}；契约 ${contractFile ?? "（缺）"}`,
+            ...evidence.map((e) => `- ${e.path}${e.line ? `:${e.line}` : ""} — ${e.detail}`),
+        ].join("\n"),
+        result: {
+            role: "architect-advisor", ok: true,
+            rootCause: evidence.length > 0
+                ? `结构性线索 ${evidence.length} 条（工程入口 / 路由登记 / 迁移接入 / 契约在位，逐条见 evidence）`
+                : "未发现结构性缺口（不代表设计正确——架构取舍仍需人判断）",
+            evidence: evidence.slice(0, 15),
+            recommendedChanges: changes.slice(0, 10),
+            risks: [...risks, "本角色不做架构取舍决策：技术栈/目录约定属于架构师与人的判断，不在这里改"],
+            confidence: evidence.length > 2 ? "medium" : "low",
+            cannotVerify: [
+                "「结构」是否**符合需求意图**（需需求原文 + 人的判断）",
+                "接口真实行为 / 状态码语义（无执行权，不发 HTTP）",
+                "构建是否真的通过（子 Agent 不跑 build）",
+            ],
+            readonly: true,
+        },
+    };
+}
+
+// ---------- 验收顾问：预判"拿去验收会挂在哪" ----------
+
+async function briefAcceptanceAdvisor(
+    box: ReadonlyToolbox, req: ReadonlySubAgentRequest, files: string[],
+): Promise<RoleBrief> {
+    const evidence: Ev[] = [];
+    const changes: string[] = [];
+    const risks: string[] = [];
+
+    // ① 接口清单（静态）：后端到底注册了哪些方法+路径
+    const routeHits = await briefSearch(box, "\\.(get|post|put|patch|delete)\\s*\\(", 16);
+    const endpointHits = await briefSearch(box, "app\\.(get|post|put|patch|delete)|router\\.(get|post|put|patch|delete)|@(Get|Post|Put|Patch|Delete)Mapping|@RequestMapping", 16);
+    const all = [...new Set([...routeHits, ...endpointHits])];
+    for (const h of all.slice(0, 10)) evidence.push(parseHit(h));
+    if (all.length === 0) {
+        changes.push("静态检索不到任何 HTTP 接口注册：验收的接口断言会全部 404 —— 先确认后端入口与路由挂载方式");
+    }
+
+    // ② 状态码分支：409/201 这类语义断言是验收的重灾区
+    const conflictHits = await briefSearch(box, "409|conflict|already|重复|已存在", 8);
+    if (conflictHits.length === 0) {
+        risks.push("找不到任何 409/冲突类分支：若判据要求「重复操作返回 409」，这条一定会挂（s5b 的 booking.* 就是这么全挂的）");
+    } else {
+        evidence.push(parseHit(conflictHits[0]!));
+    }
+
+    // ③ 前端是否接得上（有页面但没接口 / 有接口但没页面，都是验收挂点）
+    const routerHits = await briefSearch(box, "path:\\s*['\"`]/", 8);
+    if (all.length > 0 && routerHits.length === 0) {
+        risks.push("有后端接口但前端没有任何路由登记：页面渲染判据会挂（/ 白屏）");
+    }
+
+    return {
+        text: [
+            `# Acceptance Advisor 只读摘要\n问题：${req.question}`,
+            `静态接口命中 ${all.length} 处；409 类分支 ${conflictHits.length} 处；前端路由登记 ${routerHits.length} 处`,
+            ...evidence.map((e) => `- ${e.path}${e.line ? `:${e.line}` : ""} — ${e.detail}`),
+        ].join("\n"),
+        result: {
+            role: "acceptance-advisor", ok: true,
+            rootCause: all.length > 0
+                ? `静态接口清单 ${all.length} 处（含路由注册与状态码分支线索，逐条见 evidence）——拿去验收前请按判据逐条对账`
+                : "静态检索不到接口注册，验收接口断言大概率全部 404",
+            evidence: evidence.slice(0, 15),
+            recommendedChanges: changes.slice(0, 10),
+            risks: [...risks, "本角色**不执行**任何 HTTP：状态码的真实返回值只能由 runAcceptance / TestAgent 给证据"],
+            confidence: all.length > 0 ? "medium" : "low",
+            cannotVerify: [
+                "真实响应状态码与响应体字段（无执行权，不发请求）",
+                "鉴权/会话相关行为（需要跑起来的服务）",
+                "并发与冲突在运行时是否真的互斥",
+            ],
+            readonly: true,
+        },
+    };
 }
 
 // ---------- Explorer：目录 / 工程文件 / 入口 / 缺失基础 ----------

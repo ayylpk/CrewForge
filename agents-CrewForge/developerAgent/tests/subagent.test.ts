@@ -36,7 +36,12 @@ function w(rel: string, content: string): void {
 w("frontend/package.json", JSON.stringify({ name: "demo-fe", dependencies: { vue: "^3.4.0" } }));
 w("frontend/src/main.ts", "import { createApp } from 'vue'\nimport App from './App.vue'\ncreateApp(App).mount('#app')\n");
 w("frontend/src/router/index.ts", [
+    // ★ 9/17：夹具补一条真实的首页路由。此前这里只登记 /home 与 /ghost，
+    //   而引擎新增了"路由登记硬闸"（checkers.checkFrontendRoutes，抓 R6 白屏事故：
+    //   契约未登记页面路由 → / 什么都不渲染 → page.home 渲染判据必挂）。
+    //   闸门没有判错——缺 "/" 的真实应用里 / 确实白屏；不真实的是这个夹具。
     "const routes = [",
+    "  { path: '/', component: () => import('../views/Home.vue') },",
     "  { path: '/home', component: () => import('../views/Home.vue') },",
     "  { path: '/ghost', component: () => import('../views/Ghost.vue') },",
     "];",

@@ -10,6 +10,11 @@
 //   snapshotBefore / snapshotAfter。编译错误、启动错误必须原样传给 Developer。
 import { num, str, strList } from "./registry";
 import type { ToolContext, ToolResult, ToolSpec } from "./registry";
+import { normalizeScaffoldedScripts, summarizeNormalize } from "../scaffoldNormalize";
+
+/** 官方脚手架命令的识别（零 LLM 判定）：npm/pnpm/yarn/bun create|init，以及 create-* 家族。
+ *  命中且执行成功后触发产物归一化——见 scaffoldNormalize.ts 的 R5 说明。 */
+const SCAFFOLD_CMD_RE = /\b(?:npm|pnpm|yarn|bun)\s+(?:create|init|exec)\b|\bcreate-(?:vite|vue|react-app|next-app|nuxt|svelte)\b/i;
 
 export const runCommandTool: ToolSpec = {
     name: "runCommand",
@@ -37,9 +42,20 @@ export const runCommandTool: ToolSpec = {
             + (r.truncated ? ` [输出截断，原始输出：${r.rawOutputPath ?? "(未落盘)"}]` : "");
         const violations = r.violations ?? [];
         const violationLines = violations.map((v) => `[${v.code}] ${v.message}`);
+
+        // 脚手架后归一化：`npm create vite` 等生成的 build 脚本形态与引擎骨架不一致（R5），
+        // 跑完立刻归一到"build 只构建、type-check 独立"，不等到构建门才发现。
+        let normalizeLines: string[] = [];
+        if (r.exitCode === 0 && !r.timedOut && ctx.projectDirAbs && SCAFFOLD_CMD_RE.test(`${command} ${argv.join(" ")}`)) {
+            try {
+                normalizeLines = summarizeNormalize(normalizeScaffoldedScripts(ctx.projectDirAbs), ctx.projectDirAbs);
+            } catch (e) {
+                normalizeLines = [`[脚手架归一化] 失败（不影响命令本身）：${String((e as Error).message ?? e)}`];
+            }
+        }
         return {
             ok: r.exitCode === 0 && !r.timedOut && violations.length === 0,
-            output: [head, r.stdout.trim(), r.stderr.trim(), ...violationLines].filter(Boolean).join("\n"),
+            output: [head, r.stdout.trim(), r.stderr.trim(), ...violationLines, ...normalizeLines].filter(Boolean).join("\n"),
             meta: {
                 command, args: argv, cwd: r.cwd, cwdAbs: r.cwdAbs ?? null,
                 exitCode: r.exitCode, timedOut: r.timedOut, durationMs: r.durationMs,
@@ -57,6 +73,7 @@ export const runCommandTool: ToolSpec = {
                 softIsolation: r.softIsolation,
                 sandboxMode: r.sandboxMode,
                 sandboxBackend: r.sandboxBackend,
+                scaffoldNormalize: normalizeLines,
             },
         };
     },

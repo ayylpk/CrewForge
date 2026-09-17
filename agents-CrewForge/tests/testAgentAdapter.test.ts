@@ -7,9 +7,8 @@
 //   结构化 ENV 失败——**适配器永不伪造通过**。
 // ============================================================
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { parseInbound } from "../developerAgent/protocol";
 import type { TestFailure, TestPassed } from "../developerAgent/protocol";
@@ -17,6 +16,10 @@ import {
     VERIFY_AGENT_NAME, runTestAgentVerify,
     type AdapterVerifyRequest, type TestAgentAdapterOptions,
 } from "../testAgentAdapter";
+// Hub 侧的测试与 developerAgent/tests 共用同一份临时目录实现（见 _tmp.ts 文件末「跨根引用」）：
+// 这个文件原来用 `catch { /* ignore */ }` 吞掉删树失败 —— 9/17 实测它当时没漏，
+// 但"静默吞错"的口子正是 %TEMP% 攒到 911 个目录却没人发现的原因，所以一并换掉。
+import { cleanupTempDirsAfterTests, tmpDir } from "../developerAgent/tests/_tmp";
 
 const TESTAGENT_DIR = process.env.TESTAGENT_DIR ?? "F:/code/agent/testAgent";
 
@@ -39,12 +42,12 @@ let root: string;
 let projectDir: string;
 
 beforeAll(() => {
-    root = fs.mkdtempSync(path.join(os.tmpdir(), "cf-adapter-"));
+    root = tmpDir("cf-adapter");
     projectDir = path.join(root, "proj");
     fs.mkdirSync(path.join(projectDir, "backend"), { recursive: true });
     expect(fs.existsSync(path.join(TESTAGENT_DIR, "index.ts"))).toBe(true); // 本机缺仓就直接红，别假装测过
 });
-afterAll(() => { try { fs.rmSync(root, { recursive: true, force: true }); } catch { /* ignore */ } });
+cleanupTempDirsAfterTests();
 
 function req(overrides: Partial<AdapterVerifyRequest> = {}): AdapterVerifyRequest {
     return {

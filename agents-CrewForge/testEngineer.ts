@@ -47,6 +47,13 @@ import {
     runTestAgentVerify,
     type AdapterVerifyCheck, type TestAgentAdapterOptions, type VerifyAdapterOutcome,
 } from "./testAgentAdapter";
+// 召唤工位（9/17 拓扑升级·层 B）：司机中途召唤测试工位时，它**拥有判据的语义解释权**
+//   （criterion_clarification）——但**没有判定权**：通过/不通过只能来自独立 TestAgent
+//   的机器证据（本文件头注释的"三道自我校验"就是这条的代码落点）。
+import { handleConsultRequest } from "./consultStation";
+import type { ConsultContext } from "./consultStation";
+import { CONSULT_DRIVER } from "./consult";
+import type { ConsultRequest } from "./consult";
 
 /** developer 端 trustedTestAgents 将配成 ["test-core"]——注册名是信任链的一部分，不许改 */
 export const TEST_CORE_NAME = "test-core";
@@ -111,6 +118,14 @@ export interface TestEngineerDeps {
     orchestrator?: string;
     /** 真实现透传给 runTestAgentVerify 的选项（testAgentDir/env/reviewMode/timeoutMs…） */
     adapterOptions?: TestAgentAdapterOptions;
+    /**
+     * 召唤工位（层 B，9/17）的 LLM 端口：被司机召唤时用它组织回答（可选）。
+     *   ★ 不注入 = 确定性回答：只复述本工位**真实持有**的东西（判据 id、上一轮送检票、
+     *     已记录的判据澄清），confidence 恒为 "low" 并明说没有 LLM——绝不编事实。
+     *   ★ 这个端口与验收判定无关：它只是"回答问题"的能力，判据的通过/不通过
+     *     永远只能来自下面 verifier 的机器证据（本文件头注释第 3 段）。
+     */
+    consultLlm?: (prompt: string) => Promise<string>;
 }
 
 /** 默认真实现：薄适配器在外跑 testAgent --verify（崩溃/超时/身份不符都会落成结构化 ENV 失败） */
@@ -135,6 +150,16 @@ export class TestEngineer extends BaseAgent {
     private readonly now: () => number;
     /** 已处理过的轮票（correlationId|acceptanceHash|deadlineAt）→ 幂等去重 */
     private readonly seen = new Set<string>();
+    /**
+     * 召唤工位（层 B）：本工位**拥有**的产物 = 判据的语义澄清。
+     *   键 = `${taskId}:${checkId}`（判据 id 是全局判据空间里的名字，带上 taskId 更保险）。
+     *   记录之后：① 进 ownContext（下一次召唤就能看到）；② 随 test_request 的处理日志留痕。
+     *   ★ 它**不会**改变判据本身（改判据=改考试题）：澄清是给司机看的实现口径，
+     *     判据原文仍然是 developer 侧算 acceptanceHash 的那一份——两边不同源必然被拒。
+     */
+    private readonly criterionClarifications = new Map<string, { detail: string; at: number }>();
+    /** 最近一轮送检的票面（ownContext 的事实来源之一） */
+    private lastRound: { projectId: string; taskId: string; correlationId: string; acceptanceHash: string; deadlineAt: number } | null = null;
 
     /**
      * @param name 注册名——必须是 "test-core"（信任链约定，见 TEST_CORE_NAME）
@@ -147,6 +172,82 @@ export class TestEngineer extends BaseAgent {
         this.developerName = deps.developerName ?? DEVELOPER_NAME;
         this.now = deps.now ?? Date.now;
         this.on("test_request", { fromNames: [this.developerName] }, (ctx) => this.handleTestRequest(ctx.data));
+        // 召唤工位（9/17 层 B）：司机中途把问题送进来。
+        //   ★ 不按 fromNames 过滤：发错人的请求也要拿到一条**明确拒绝**的回复
+        //     （投递闸在 handleConsultRequest 里），静默躺在收件箱里是最坏的形状。
+        this.on("consult_request", ({ data }) => this.answerConsult(data as unknown as ConsultRequest));
+    }
+
+    /**
+     * 召唤应答（层 B）：ownContext = 本工位真实持有的判据/轮票/澄清；
+     * amend = 只有 criterion_clarification 一种（AMENDMENT_ISSUERS 里 test-core 的职权）。
+     */
+    private async answerConsult(req: ConsultRequest): Promise<void> {
+        const reply = await handleConsultRequest(req, this.buildConsultContext(req));
+        this.send(CONSULT_DRIVER, reply as unknown as Record<string, unknown>);
+        this.log(`应答召唤 ${reply.consultId}（confidence=${reply.confidence}`
+            + `${reply.refused ? "，已拒绝" : ""}${reply.amendment ? `，已签发 ${reply.amendment.kind}` : ""}）`);
+    }
+
+    private buildConsultContext(req: ConsultRequest): ConsultContext {
+        return {
+            role: "test-core",
+            // 本工位按**最近一轮送检票**认身份：没送过检就是"不持该维度"（空串），
+            // 不构成拒绝理由——但那时的回答也必然只能说"我还没收到任何送检"。
+            projectId: this.lastRound?.projectId ?? "",
+            taskId: this.lastRound?.taskId ?? "",
+            // 判据清单按**本次召唤点名的那件任务**去读（召唤里带了 taskId 就够读）；
+            // 没有送检记录也不妨碍"我能报出这个任务的判据 id"——事实就是事实。
+            ownContext: async () => this.renderOwnContext({
+                projectId: this.lastRound?.projectId
+                    || (typeof req?.projectId === "string" ? req.projectId : ""),
+                taskId: this.lastRound?.taskId
+                    || (typeof req?.taskId === "string" ? req.taskId : ""),
+            }),
+            ...(this.deps.consultLlm ? { llm: this.deps.consultLlm } : {}),
+            amend: async (a) => {
+                if (a.kind !== "criterion_clarification") return false;   // 越权 kind 一律退回（不改任何状态）
+                const checkId = typeof a.payload?.["checkId"] === "string" ? String(a.payload["checkId"]) : "";
+                const key = `${this.lastRound?.taskId || (typeof req?.taskId === "string" ? req.taskId : "") || "任务未知"}:${checkId || "(未指名判据)"}`;
+                this.criterionClarifications.set(key, { detail: a.detail, at: this.now() });
+                this.log(`已记录判据澄清 ${key}：${a.detail.slice(0, 200)}`);
+                return true;
+            },
+        };
+    }
+
+    /** 本工位持有的事实（判据 id / 送检票 / 已澄清项），没有任何推测与判定 */
+    private async renderOwnContext(scope: { projectId: string; taskId: string }): Promise<string> {
+        const round = this.lastRound;
+        let checks: string;
+        if (!this.deps.taskChecks) {
+            checks = "（未注入 deps.taskChecks：本工位看不到判据清单）";
+        } else if (!scope.taskId) {
+            checks = "（不知道要读哪个任务的判据：召唤里没带 taskId，本进程也还没收到送检）";
+        } else {
+            try {
+                const list = await this.deps.taskChecks({
+                    type: "test_request", projectId: scope.projectId, taskId: scope.taskId,
+                    correlationId: round?.correlationId ?? "", acceptanceHash: round?.acceptanceHash ?? "",
+                    deadlineAt: round?.deadlineAt ?? 0, targets: [], reason: "",
+                });
+                checks = list
+                    ? list.map((c) => String((c as { id?: unknown })?.id ?? "?")).join("、") || "（判据数组为空）"
+                    : "（taskChecks 返回 null：本任务没有可读的判据清单）";
+            } catch (e) {
+                checks = `（读判据失败：${(e as Error).message}）`;
+            }
+        }
+        const clar = [...this.criterionClarifications.entries()];
+        return [
+            "# 测试工位当前持有的事实",
+            `- 最近一轮送检票：${round ? `${round.projectId}/${round.taskId} corr=${round.correlationId} hash=${round.acceptanceHash} deadlineAt=${round.deadlineAt}` : "（本次进程内还没有收到任何 test_request）"}`,
+            `- 已处理轮票数：${this.seen.size}`,
+            `- ${scope.taskId ? `任务 ${scope.taskId} 的` : "本任务"}判据 id：${checks}`,
+            `- 已记录的判据澄清（${clar.length}）：${clar.map(([k, v]) => `${k} → ${v.detail}`).join("；") || "（无）"}`,
+            "- 不持有的信息：任何**通过/不通过**结论（判定权在独立 TestAgent 的机器证据）；",
+            "- 也不持有：生成项目的代码（司机）、计划与批次（架构师）、需求原文（PM）。",
+        ].join("\n");
     }
 
     private log(line: string): void {
@@ -160,6 +261,18 @@ export class TestEngineer extends BaseAgent {
     private async handleTestRequest(raw: Record<string, any>): Promise<void> {
         const req = this.parseRequest(raw);
         if (!req) return;
+        // 层 B：记下本轮机票，ownContext（被召唤时的事实来源）读它——不记的话，
+        // 被召唤时只能说"我不记得有送检"，而那句话对司机毫无用处。
+        this.lastRound = {
+            projectId: req.projectId, taskId: req.taskId, correlationId: req.correlationId,
+            acceptanceHash: req.acceptanceHash, deadlineAt: req.deadlineAt,
+        };
+        // 层 B：已签发过的判据澄清随本轮送检一起留痕（它是**实现口径**，不是判据本身——
+        // 判据原文仍以 developer 侧算 acceptanceHash 的那一份为准，改它必然不同源）
+        const clar = [...this.criterionClarifications.entries()];
+        if (clar.length > 0) {
+            this.log(`本轮生效的判据澄清 ${clar.length} 条（来自司机召唤）：${clar.map(([k]) => k).join("、")}`);
+        }
         this.log(`收到 test_request：${req.projectId}/${req.taskId} corr=${req.correlationId.slice(0, 12)}… hash=${req.acceptanceHash.slice(0, 8)}…（reason: ${req.reason.slice(0, 80) || "未给"}）`);
 
         // 幂等：同轮票只处理一次（Hub 重投/双发不重复烧 verify、不重复发结果）

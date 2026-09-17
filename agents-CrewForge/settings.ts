@@ -34,6 +34,37 @@ export interface RtSettings {
     stationSlots: number;
     /** T7b 工位工具模式：true=前后端开发用 read/write/edit 工具循环交付（端点兼容性 live 验证后再开） */
     toolMode: boolean;
+    /**
+     * ★ 上下文窗口（token）：该模型**真实**的最大输入 token，用户填的全局基准。
+     *   消费方：`contextBudget.resolveContextWindow` 的第 ② 优先级（阈值全是它的比例）。
+     *   null = 没配（**列还没建**也算没配）→ 引擎按 `[1m]` 模型名 / env / 产品默认 256_000
+     *   继续跑，并喊一行告警 + 台账留 degraded 痕迹。旁路原则同本文件其余字段。
+     */
+    contextWindow: number | null;
+    /** ★ T3 pro 档的上下文窗口覆盖（pro 档模型名可能是 `deepseek-v4-pro[1m]`，与 flash 档差一个数量级） */
+    contextWindowPro: number | null;
+}
+
+/**
+ * `sys_settings` 的两个窗口列 → `RtSettings.contextWindow / contextWindowPro`。
+ *
+ *   抽成**独立纯函数**（而不是写在 `refreshSettings` 的 `cached = {...}` 里）有两个硬理由：
+ *     ① 列**还没建**（`ALTER TABLE` 与设置页是另一件事）：缺列时 `r.context_window` 是 `undefined`，
+ *        这条路径必须**不抛、不静默变成 0**，而"读不到就退回下一步解析"正是它要保证的语义；
+ *     ② 纯函数才能被单测覆盖——DB 不在测试环境里，写进 `refreshSettings` 就只能靠真机验证。
+ *   口径与邻居一致：`Number(x ?? 0) || null`（**0/空/垃圾 → null = 没配**）。
+ *   注意这里**不**把 `"128k"` 这类串"聪明地"解析成数字（Number("128k") = NaN → null）：
+ *   坏数据当没配，回落下一步并告警，比猜一个数安全。`resolveContextWindow` 还会再解析一次。
+ */
+export function readContextWindowColumns(row: Record<string, unknown> | null | undefined): {
+    contextWindow: number | null;
+    contextWindowPro: number | null;
+} {
+    if (!row) return { contextWindow: null, contextWindowPro: null };
+    return {
+        contextWindow: Number(row["context_window"] ?? 0) || null,
+        contextWindowPro: Number(row["context_window_pro"] ?? 0) || null,
+    };
 }
 
 let cached: RtSettings | null = null;
@@ -47,6 +78,8 @@ export async function refreshSettings(force = false): Promise<void> {
         const [rows] = await pool.query<RowDataPacket[]>("SELECT * FROM sys_settings WHERE id = 1");
         const r = rows[0] as Record<string, unknown> | undefined;
         if (r) {
+            // 窗口两列走独立纯函数（缺列/垃圾 → null = 没配，交给下一步解析并告警）
+            const window = readContextWindowColumns(r);
             cached = {
                 modelName: (r.model_name as string)?.trim() || null,
                 modelPro: (r.model_pro as string)?.trim() || null,
@@ -60,6 +93,8 @@ export async function refreshSettings(force = false): Promise<void> {
                 llmConcurrency: Number(r.llm_concurrency ?? 6) || 6,
                 stationSlots: Number(r.station_slots ?? 5) || 5,
                 toolMode: Number(r.tool_mode ?? 0) === 1,   // 列缺失=关（旁路：默认走验证过的老路）
+                contextWindow: window.contextWindow,        // 列缺失（迁移未跑）=null → 引擎回落下一步并告警
+                contextWindowPro: window.contextWindowPro,
             };
             loadedAt = Date.now();
         }

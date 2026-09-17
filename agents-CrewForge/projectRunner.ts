@@ -24,12 +24,12 @@ import { finalizeProject } from "./engine/run/completion";
 import { StructuredOutputFailure } from "./llm";
 import { TransferStation, roles } from "./Hub";
 import type { BaseAgent } from "./BaseAgent";
-import { Manager } from "./manager";
+import { Manager, createLlmPmDeps } from "./manager";
 import { Architect } from "./architect";
 import { TestEngineer, TEST_CORE_NAME } from "./testEngineer";
 import { Maintainer } from "./maintainer";
-import { startDeveloperLine, makeTesterDeps } from "./developerTeamRunner";
-import { getProjectAgents, getProjectNodes, getEdges, getProjectConfirmMode, getProjectRequirement, getProjectPlan, updateProjectField } from "./Node";
+import { startDeveloperLine, makeTesterDeps, waitForBrakeStop } from "./developerTeamRunner";
+import { getProjectAgents, getProjectNodes, getEdges, getProjectConfirmMode, getProjectRequirement, getProjectPlan, readProjectFile, updateProjectField, upsertProjectFile } from "./Node";
 import { type Questioner } from "./GraphFactory";
 import { pickQuestioner } from "./confirm";
 import { closeTaskBridge, getTasksByProject, type Task } from "./task";   // 出口保险：退出前冲干净在途 sys_task 写（9/3 run10 T4 竞态）
@@ -38,6 +38,11 @@ import { archiveProjectDir } from "./runEnv";
 import { projectDir } from "./runEnv";
 import { refreshSettings } from "./settings";
 import { PhaseRequestMessageSchema } from "./messageProtocol";
+// 召唤工位（9/17 拓扑升级·层 B）：PM 侧的应答器（接线点说明见 answerPmConsult 注释）
+import { handleConsultRequest } from "./consultStation";
+import type { ConsultContext } from "./consultStation";
+import { CONSULT_DRIVER, parseConsultRequest } from "./consult";
+import type { ConsultRequest } from "./consult";
 
 
 export interface TeamBundle {
@@ -149,9 +154,133 @@ export async function findResumeIndex(projectId: number, phases: any[]): Promise
 }
 
 /**
+ * 层 B（9/17）召唤工位 —— **PM 侧应答器**。
+ *
+ *   为什么写在这里而不是 manager.ts：Manager 不是 BaseAgent，它没有消息循环
+ *   （`run()` 走 GraphFactory 的 runWithInteraction，由调用方喂输入）。
+ *   PM 座位上的收件箱一直由 drivePhases 这个循环代收（phase_request 就在这里被接走），
+ *   所以"PM 被召唤"的唯一合法接线点也是这里——**接线在消息被分派的地方**，
+ *   而不是硬塞进一个没有循环的类里（那只会变成一个永不触发的死代码）。
+ *
+ *   它拥有什么（ownContext）：需求原文（sys_project.description + clarified_req）
+ *     与正在驱动的阶段计划（dev_plan）。这两件正是 PM 的产物，也是它能澄清的东西。
+ *   它能签发什么（amend）：只有 requirement_clarification
+ *     —— 落 `sys_project_file` 的 `_pm/requirement-clarifications.md`（**不是**改写
+ *     clarified_req：那一列是 JSON.stringify({features})，往里塞散文会当场打断
+ *     所有读它的人——saveClarifiedReq/assemblePmPlan 都按 JSON 解）。
+ *
+ *   不抛：任何异常都变成一条 refused 回复（handleConsultRequest 的契约），
+ *   司机的召唤**永远不会把 runner 主流程打死**。
+ */
+async function answerPmConsult(
+    station: TransferStation, projectId: number, plan: unknown, phases: any[], content: string,
+    llm?: (prompt: string) => Promise<string>,
+): Promise<void> {
+    let raw: unknown = content;
+    try { raw = JSON.parse(content); } catch { /* 非 JSON：交给协议解析器给逐条原因 */ }
+    const parsed = parseConsultRequest(raw);
+    const fallbackTaskId = (raw as { taskId?: unknown })?.taskId;
+    const ctx: ConsultContext = {
+        role: "pm",
+        projectId: String(projectId),
+        // PM 不绑定单一任务（一个阶段一个 taskId，PM 服务整条流水）→ 空 = "不持该维度"
+        taskId: "",
+        ownContext: async () => {
+            let requirement = "";
+            try { requirement = await getProjectRequirement(projectId); }
+            catch (e) { requirement = `（需求原文读取失败：${(e as Error).message}）`; }
+            const clar = await readRequirementClarifications(projectId);
+            return [
+                "# 项目经理（PM）当前持有的产物",
+                `- 需求原文（sys_project.description + clarified_req）长度：${requirement.length}`,
+                requirement ? `- 需求原文（截断 2500 字符）：\n${requirement.slice(0, 2500)}` : "- 需求原文：**为空**（本工位手上没有需求，不能替你发明）",
+                `- 正在驱动的阶段计划（dev_plan）：${plan ? JSON.stringify(plan).slice(0, 1500) : "（无）"}`,
+                `- 阶段清单：${phases.map((p) => `p${p?.phase}「${p?.name}」`).join("、") || "（无）"}`,
+                `- 已落盘的需求澄清（${clar.length} 条，位于 sys_project_file 的 ${PM_CLARIFICATION_FILE}）：`
+                + (clar.length ? `\n${clar.map((c) => `  · ${c}`).join("\n")}` : "（无）"),
+                "- 不持有的信息：判据的语义与执行（测试）、计划与批次的拆解（架构师）、生成项目的代码（司机）。",
+            ].join("\n");
+        },
+        // LLM 端口：PM 本来就有模型（对话/细化/规划走同一批，见 createLlmPmDeps）。
+        // 接上它，PM 才能真的澄清需求；接不上（无 key/构造失败）就退回确定性复述——
+        // 应答器在两种模式下都不会编事实（没有 LLM 时它会明说"我没有 LLM 可用"）。
+        ...(llm ? { llm } : {}),
+        amend: async (a) => {
+            if (a.kind !== "requirement_clarification") return false;   // 越权 kind 一律退回
+            const existing = await readRequirementClarifications(projectId);
+            const line = `${new Date().toISOString()} ${a.detail}`;
+            try {
+                await upsertProjectFile(projectId, PM_CLARIFICATION_FILE, `${[...existing, line].join("\n")}\n`);
+            } catch (e) {
+                console.warn(`[runner] 需求澄清落盘失败（按未生效处理）：${(e as Error).message}`);
+                return false;
+            }
+            console.log(`[runner] 层 B：PM 已记录需求澄清 —— ${a.detail.slice(0, 200)}`);
+            return true;
+        },
+    };
+    const req = (parsed.ok ? parsed.value : raw) as ConsultRequest;
+    const reply = await handleConsultRequest(req, ctx);
+    // 回信目标恒为司机（协议只允许司机发起）
+    station.sendMessage("manager", CONSULT_DRIVER, JSON.stringify(reply));
+    console.log(`[runner] PM 应答召唤 ${reply.consultId}（confidence=${reply.confidence}`
+        + `${reply.refused ? "，已拒绝" : ""}${reply.amendment ? `，已签发 ${reply.amendment.kind}` : ""}`
+        + `，taskId=${String(fallbackTaskId ?? "")}）`);
+}
+
+/** 召唤请求的内容判据（不解析发送方，避免把合法召唤当成"发送方不对"静默 markDone 掉） */
+function isConsultRequestContent(content: string): boolean {
+    try {
+        return (JSON.parse(content) as { type?: unknown })?.type === "consult_request";
+    } catch {
+        return false;
+    }
+}
+
+/** 需求澄清的落盘位置（sys_project_file 逻辑路径，不是磁盘文件——不落进生成项目） */
+const PM_CLARIFICATION_FILE = "_pm/requirement-clarifications.md";
+
+/**
+ * PM 的召唤 LLM 端口（懒构造，只构造一次）。
+ *   · 走 createLlmPmDeps() 的 chat：与 PM 对话/细化/规划**同一个模型档位**，
+ *     不另造一条没人验证过的模型配置；
+ *   · 构造失败（无 key/配置坏）→ 返回 undefined，PM 退回确定性复述（明说没有 LLM），
+ *     绝不假装答过；
+ *   · 注意 chat 自带 120s 超时，而司机默认只等 90s（consultTimeoutMs）——
+ *     真耗时的召唤会以"超时降级"收场（司机自行继续 + 留 consult_timeout），
+ *     要它等更久就上调 consultTimeoutMs，别在这里偷偷改超时口径。
+ */
+let pmConsultLlmCache: ((prompt: string) => Promise<string>) | null | undefined;
+function pmConsultLlm(): ((prompt: string) => Promise<string>) | undefined {
+    if (pmConsultLlmCache === undefined) {
+        try {
+            const deps = createLlmPmDeps();
+            pmConsultLlmCache = async (prompt: string) => deps.chat([new HumanMessage(prompt)]);
+        } catch (e) {
+            console.warn(`[runner] PM 召唤端口构造失败，退回确定性复述：${(e as Error).message}`);
+            pmConsultLlmCache = null;
+        }
+    }
+    return pmConsultLlmCache ?? undefined;
+}
+
+async function readRequirementClarifications(projectId: number): Promise<string[]> {
+    try {
+        const text = await readProjectFile(projectId, PM_CLARIFICATION_FILE);
+        return (text ?? "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    } catch {
+        return [];   // 读不到 = 没有澄清（首次运行），不是错误
+    }
+}
+
+/**
  * 逐阶段下发架构师，等到每个阶段的 phase_request（阶段边界信号）。
  * 返回 "done"=全部阶段收工；"boundary"=在阶段边界主动收工（EXIT_AT_PHASE_BOUNDARY=1，
- * Java 对账器会拉下一个进程从续跑点接着干——9/2 拍板"按阶段起进程"，断点续跑白送）。
+ * Java 对账器会拉下一个进程从续跑点接着干——9/2 拍板"按阶段起进程"，断点续跑白送）；
+ * "paused"=开发线在**刹车检查点**等不到人确认（任务已留在 waiting_human、账本可续跑），
+ * 本进程必须干净退出——**这正是老板要的"没确认就终止进程、任务信息保留、下次接着拉起来"**。
+ * 不加这一条的话，本循环会一直等下一条 phase_request，最后被外层 --timeout-min 杀掉：
+ * 那正是 s4/s4c/s4d/s5b 的死法（进程被杀，连死因都没留下）。
  */
 async function drivePhases(
     station: TransferStation,
@@ -160,7 +289,7 @@ async function drivePhases(
     phases: any[],
     startIdx: number,
     exitAtBoundary: boolean,
-): Promise<"done" | "boundary"> {
+): Promise<"done" | "boundary" | "paused"> {
     for (let i = startIdx; i < phases.length; i++) {
         const isLast = i === phases.length - 1;
         station.sendMessage("manager", "architect", JSON.stringify({ type: "phase_plan", plan, phase: phases[i], projectId }));
@@ -168,10 +297,32 @@ async function drivePhases(
         // 收阶段边界：maintainer 发 phase_done → 架构师发 phase_request 给 manager —— runner 代为响应
         let data: any = null;
         while (!data) {
-            const req = await station.waitForMessage("manager");
-            if (!req || req.sender !== "architect") {
-                console.warn(`[runner] 拒绝阶段消息：发送方应为 architect，实际为 ${req?.sender ?? "?"}`);
-                if (req) station.markDone("manager");
+            // ★ 刹车暂停信号：开发线等不到人确认时会 requestBrakeStop()，这里必须能**醒过来**，
+            //   否则 waitForMessage 死等 → 外层超时杀进程（任务状态缺失、死因缺失）。
+            const raced = await Promise.race([
+                station.waitForMessage("manager").then((m) => ({ kind: "msg" as const, m })),
+                waitForBrakeStop().then(() => ({ kind: "paused" as const })),
+            ]);
+            if (raced.kind === "paused") {
+                console.log("[runner] 🌙 刹车检查点等不到人确认：开发线已保状态（waiting_human），本进程干净退出，"
+                    + "Java 对账器下次重新拉进程续跑（题号不变，人答过就消费）");
+                return "paused";
+            }
+            const req = raced.m;
+            if (!req) { station.markDone("manager"); continue; }
+            // ★ 层 B（9/17）召唤工位：PM 的收件箱**在这里**被消费（Manager 不是 BaseAgent，
+            //   没有自己的消息循环——PM 座位上的进出全由本函数代收，见文件头角色表）。
+            //   所以"PM 能不能被召唤"的接线点就在这里，而不是在 manager.ts 里。
+            //   判据用**内容**（consult_request）而不是发送方：先解析再决定，避免把
+            //   一条合法召唤当成"发送方不对"静默 markDone 掉（消息一旦 markDone 就没了）。
+            if (isConsultRequestContent(req.content)) {
+                station.markDone("manager");
+                await answerPmConsult(station, projectId, plan, phases, req.content, pmConsultLlm());
+                continue;   // 召唤不改变阶段边界状态：继续等真正的 phase_request
+            }
+            if (req.sender !== "architect") {
+                console.warn(`[runner] 拒绝阶段消息：发送方应为 architect，实际为 ${req.sender}`);
+                station.markDone("manager");
                 continue;
             }
             let raw: unknown;
@@ -314,7 +465,11 @@ export async function runProject(projectId: number, questioner: Questioner): Pro
         const gate = await runFinalGate(projectId, plan);
         await settleProject(projectId, gate);
     }
-    console.log("[runner] 流程结束");
+    // ★ paused（刹车检查点等不到人）：**不动项目终态、不落 blocked/failed**。
+    //   任务信息留在 developer 账本里（waiting_human + brake_paused），题号不变；
+    //   sys_project.status 保持 executing，Java 对账器"executing + 无活进程"就会重新拉进程续跑。
+    //   这正是老板要的"没确认就终止进程、任务信息保留、下次接着拉起来"。
+    console.log(`[runner] 流程结束（${outcome === "paused" ? "刹车暂停，等对账器续拉" : outcome}）`);
 }
 
 /**

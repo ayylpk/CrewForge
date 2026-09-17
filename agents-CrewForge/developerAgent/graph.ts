@@ -39,14 +39,188 @@ import type {
 } from "./protocol";
 import type { ReceiveResult } from "./hubAdapter";
 import { hashOf, type DeveloperLedger } from "./ledger";
+// 召唤真工位（9/17 层 B）：跨工位咨询协议（consult.ts / consultStation.ts 同源）
+import type { ConsultReply, ConsultRole } from "../consult";
 // 脚手架候选（9/15）：stackProfile → 官方脚手架候选清单，空项目初始化加速用
 import { scaffoldHintFor } from "./scaffold";
+// 脚手架产物归一化（9/17 R5）：`npm create vite` 的 build 脚本带类型检查，
+// 一个类型错误会伪装成"构建不出来"——进构建门前归一化
+import { normalizeScaffoldedScripts, summarizeNormalize } from "./scaffoldNormalize";
+// 求助（9/17）：保险丝的出口不再直接进终态，而是先问人（代码强制触发 + 确定性答案解析）
+import {
+    MAX_ESCALATIONS_PER_TASK, SAME_FAILURE_LIMIT,
+    buildEscalationQuestion, parseEscalationAnswer, shouldEscalate,
+} from "./escalation";
+import type { EscalationSnapshot } from "./escalation";
+// 上下文压缩接线（9/17）：Claude Code 的压缩机制（contextBudget.ts）**取代**了原来的
+// pruneHistory 字符折叠（退役理由见 contextCompaction.ts 文件头与下面那段注释）
+import { contextPrefixVersion, runContextGuard } from "./contextCompaction";
+import type { ContextBudgetOption, ContextGuardOutcome } from "./contextCompaction";
+import type {
+    AutoCompactTrackingState, ContextWindowSpec, SummaryRequest, SummaryResponse,
+} from "./contextBudget";
+import { getAutoCompactThreshold } from "./contextBudget";
 import type { ToolArgs, ToolContext, ToolResult, ToolRegistry } from "./tools/registry";
 import { DEVELOPER_ROLE_NAME, READONLY_TOOL_NAMES, WRITE_TOOLS, str, strList } from "./tools/registry";
 import type { Workspace } from "./workspace";
 import { createReadonlySubAgentDispatcher } from "./tools/readonlySubAgent";
 import type { ReadonlySubAgentEvidenceInput, ReadonlySubAgentLlm } from "./tools/readonlySubAgent";
 import { evaluateGuardrails, evaluateWriteBatch } from "./guardrails";
+// 前端路由登记硬闸（9/17 R6）：纯确定性检查，从 agents-CrewForge/checkers.ts 复用
+// 迁移引导闸（9/17 R8）：同一个 checkers.ts —— DDL 写了却没人应用 → 500
+import { checkFrontendRoutes, checkMigrationBootstrap } from "../checkers";
+// 环境自省（9/17）：实测本机工具链并渲染成简报，注入提示词供模型自选工具/脚手架
+import { probeEnvironmentMeta, renderEnvBrief } from "./envProbe";
+import type { EnvProbe, ProbeOutcome } from "./envProbe";
+
+// ---------- 环境自省缓存（进程内，探针自身另有 60s 记忆） ----------
+// 位置说明：探测器是**同步调用点之外**的异步动作，而 renderTask 是同步的，
+// 所以由 inspectProject 在开工前刷一次，renderTask 只读缓存——不把异步渗进模板渲染。
+
+/**
+ * 环境简报的**等待预算**（ms）：一轮开工最多为这份简报等这么久。
+ *
+ * 为什么必须有这道预算（9/17 实弹，用户立案的根因）：
+ *   简报是**信息性配料**——它只告诉模型"这台机器上有什么工具"（供它选脚手架/工具链），
+ *   不是开工的前置条件。此前 inspectProject 直接 `await 全量探测`，等于把一个可选的
+ *   好意变成了图开场路径上的**同步咽喉**：机器一忙，冷探测实测 4s（空载）~10.4s（满负载，
+ *   本机量到过），于是整轮开工连同用例一起翻车——`[5111.05ms]`、`[5094.40ms]` 那批失败，
+ *   而且"哪个用例翻车"每次都不一样（负载相关，不是逻辑相关）。
+ *
+ * 为什么是 2000ms（量出来的，不是拍的）：
+ *   · 命中探针的 60s 记忆时是 **0ms**（实测同一对象直接返回）——正常路径根本不用等；
+ *   · 冷探测实测最慢 4s（空载）/10.4s（满负载），所以 2s 一定会到点。**这是有意的**：
+ *     到点就回退，绝不让开工等探针（见 refreshEnvBrief 的三条回退）；
+ *   · 2s 远小于 bun 用例默认的 5s 上限，也小于图里其它确定性节点，所以"最坏情况"
+ *     只是让开工慢 2s，而不是让一轮开工变成随机失败。
+ */
+export const ENV_BRIEF_BUDGET_MS = 2000;
+
+/**
+ * 简报的来源。**台账必须诚实区分**四件事（"探测花了 0ms"不能被读成"探测很快"）：
+ *   · fresh      = 这一轮真的跑了探针；
+ *   · memo       = 命中了探针的 60s 进程内记忆（没真跑）；
+ *   · last-brief = 预算到点（或探测报错）→ 沿用上一次真探到的那一份；
+ *   · not-probed = 预算到点且本进程还没有过任何一份实测简报；
+ *   · failed     = 探测自己报错且没有上次结果可沿用。
+ */
+export type EnvBriefSource = "fresh" | "memo" | "last-brief" | "not-probed" | "failed";
+
+export interface EnvBriefOutcome {
+    /** 注入任务书 {{envBrief}} 的文本（永远非空：没探到也写清"没探到"） */
+    text: string;
+    source: EnvBriefSource;
+    /** true = 因为**等待预算到点**而回退（台账据此落 env_probe_timeout） */
+    timedOut: boolean;
+    /** 这一轮为简报实际等了多久（ms） */
+    waitedMs: number;
+}
+
+/** 当前用于渲染任务书的文本（可能是回退标记：超时不等于"没有工具"） */
+let envBriefCache = "";
+/** 上一次**真的探到**的简报：预算不够时回退用它（它自带探测时间戳，不冒充"本轮实况"） */
+let envBriefLastGood = "";
+
+/**
+ * 预算到点、且本进程还没有过实测简报时的替代文本（**必须**把"没探到"和"没有"分开写）。
+ * 为什么不能空着也不能写"什么都没装"：前者等于把能力悄悄丢掉，后者是**谎报事实**
+ * （模型会据此判定"离线/缺工具"，然后毫无必要地手写整个工程）。
+ */
+export function envBriefNotProbedText(budgetMs: number): string {
+    return [
+        "## 环境自检（本轮未完成）",
+        `本轮最多只为环境探测等 ${budgetMs}ms；探测没在预算内返回，这一轮就**不等了**。`,
+        "⚠️ 这**不是**「这台机器上什么都没有」，而是「这一轮没探到实况」——不要据此判定某工具缺失或已离线。",
+        "不确定某个工具/端口/联网状态时，用 probeEnv 工具或 runCommand 单点确认；初始化方式先按最保守的可用工具推进。",
+    ].join("\n");
+}
+
+/** 沿用上一次实测简报时的抬头（让模型知道这份不是本轮现探的） */
+export function envBriefReusedNote(budgetMs: number): string {
+    return `（本轮探测未在 ${budgetMs}ms 内返回——以下沿用上一次的实测结果，探测时间见下）`;
+}
+
+/**
+ * 刷新环境简报：**最多等 budgetMs**，到点立刻回退；探针永不阻塞、永不抛出、永不重试。
+ *
+ * 三条回退（都不抛、不重试、不阻塞这一轮）：
+ *   ① 探到了 → 用新简报（fresh；命中探针记忆则是 memo）；
+ *   ② 预算到点 → 用上一次真探到的简报（last-brief），没有就写明"本轮没探到"（not-probed）；
+ *   ③ 探测报错（探针按约定不抛，这是兜底）→ 同上，只是台账记 failed。
+ *
+ * ★ 预算到点为什么**不取消**那一次探测（"安全放弃"而不是"杀掉"，附实测依据）：
+ *   · 杀掉它 = 探针的记忆永远填不上：冷探测本来就要 4s，2s 就被砍掉的话，
+ *     **本进程里那份简报就永远不会出现**（用户明令：不许把"可选信息"换成"永久没有"）；
+ *   · 不杀它也只是"没人等它"：它跑完会把结果写进探针的 60s 记忆（probeEnvironmentMeta
+ *     内部完成），并在下面被**接进缓存**——同一个任务后面还会渲染多次任务书
+ *     （每个工作项一次），届时这条简报就自然出现了；下一个任务则直接命中记忆（0ms）。
+ *   · 不杀它有没有代价？有，且已量过：探测的子进程会让**宿主进程**在退出线上多等一会儿
+ *     （实测：一个只有这一条用例的 `bun test` 文件，用例本身 0.32s 就完了，进程却活到
+ *     **4.2s** 才退——等的是那 18 个探针子进程里最慢的一个；上界就是探针自己的
+ *     单探针上限 DEFAULT_TIMEOUT_MS = 15s，到点 killProbe 杀子进程）。
+ *     **为什么还是选它**：另一条路（预算到点就 abort）会把探针的记忆一起砍掉——
+ *     冷探测实测 4s > 2s 预算，于是"本进程里这份简报永远不会出现"，
+ *     那正好是用户明令禁止的"拿能力换 flake"。两条路的取舍是量出来的，不是偏好。
+ *     而在**真实套件**里这个尾巴根本量不到：全套 42/49 个文件的墙钟没有变长
+ *     （engine 57.2~58.8s / hub 76.1~77.0s，见交付报告），因为记忆是进程内共享的，
+ *     每个进程只在**开局**探一次，那一次早在套件结束前就跑完了。
+ */
+export async function refreshEnvBrief(o?: {
+    /** 注入点（测试用）：默认就是 envProbe 的真探测 */
+    probe?: () => Promise<ProbeOutcome>;
+    /** 注入点（测试用）：默认 renderEnvBrief */
+    render?: (p: EnvProbe) => string;
+    budgetMs?: number;
+}): Promise<EnvBriefOutcome> {
+    const budgetMs = o?.budgetMs ?? ENV_BRIEF_BUDGET_MS;
+    const probe = o?.probe ?? (() => probeEnvironmentMeta());
+    const render = o?.render ?? renderEnvBrief;
+    const startedAt = Date.now();
+
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const budgetHit = new Promise<"budget">((resolve) => {
+        timer = setTimeout(() => resolve("budget"), budgetMs);
+    });
+    // 两种结局都收敛成"值"：即便预算先到点，这份探测也不会变成 unhandled rejection
+    const running: Promise<{ ok: true; outcome: ProbeOutcome } | { ok: false; error: unknown }> =
+        Promise.resolve()
+            .then(() => probe())
+            .then(
+                (outcome) => ({ ok: true as const, outcome }),
+                (error: unknown) => ({ ok: false as const, error }),
+            );
+
+    const adopt = (outcome: ProbeOutcome): EnvBriefOutcome => {
+        const text = render(outcome.probe);
+        envBriefLastGood = text;
+        envBriefCache = text;
+        return { text, source: outcome.memoHit ? "memo" : "fresh", timedOut: false, waitedMs: Date.now() - startedAt };
+    };
+
+    const raced = await Promise.race([running, budgetHit]);
+    if (timer !== null) clearTimeout(timer);
+
+    if (raced !== "budget") {
+        if (raced.ok) return adopt(raced.outcome);
+        // 探测报错：有上次结果就用上次的，没有就如实写"探测失败"（绝不编造工具清单）
+        const text = envBriefLastGood !== ""
+            ? envBriefLastGood
+            : `（环境探测失败：${String((raced.error as Error)?.message ?? raced.error)}——按最保守的可用工具继续）`;
+        envBriefCache = text;
+        return {
+            text, source: envBriefLastGood !== "" ? "last-brief" : "failed",
+            timedOut: false, waitedMs: Date.now() - startedAt,
+        };
+    }
+
+    // ★ 预算到点：立刻回退（不再等、不重试）。探针继续在后台跑完，并把结果接进缓存。
+    void running.then((r) => { if (r.ok) adopt(r.outcome); });
+    const waitedMs = Date.now() - startedAt;
+    const hasLast = envBriefLastGood !== "";
+    const text = hasLast ? `${envBriefReusedNote(budgetMs)}\n${envBriefLastGood}` : envBriefNotProbedText(budgetMs);
+    envBriefCache = text;
+    return { text, source: hasLast ? "last-brief" : "not-probed", timedOut: true, waitedMs };
+}
 
 // ============================================================
 // 命令指纹与超时策略（规格五）
@@ -225,135 +399,33 @@ export function clipArgsForModel(args: ToolArgs): ToolArgs {
 }
 
 // ============================================================
-// 历史总量护栏（9/15 批 B）—— 防越窗的确定性压缩，**不是**记忆/摘要
+// 历史总量护栏（9/15 批 B 的字符折叠）—— **已退役**（9/17）
 //
-//   为什么需要：history 单条有 clipForModel 封顶 8192，但**总量无上限**。
-//   条数由 maxSteps 决定（可配，实弹里用到过 30），30 × 8192 ≈ 245K 字符，
-//   足够顶爆任何 128K 窗口的模型。越窗 = API 400 = 这一步白烧，连败几次任务就死了。
+//   原机制：pruneHistory(history) 在发车前数总字符，超 96_000 就把最老的条目
+//   **原地折成骨架**（output 换成一段"本条已移除"的标记），并配三个常量
+//   HISTORY_BUDGET_CHARS / HISTORY_PROTECT_CHARS / HISTORY_FOLD_TARGET_RATIO 与
+//   一张 HISTORY_FOLDED_NOTE 文案。它连同 `tests/history-prune.test.ts` 一起搬走了。
 //
-//   口径（对齐四家参考的**确定性层**，零 LLM、零额外请求）：
-//     · 触发看**总量字符**——量的就是 realLlm 真正 stringify 发出去的那一份，不估不猜；
-//     · 最近 HISTORY_PROTECT_CHARS 个字符**永不折叠**（模型手头的工作集不许被抽走，
-//       这是 dsh/opencode/cc 三家共同的红线：cc 原话是"清空全部结果会让模型失去全部工作上下文"）；
-//     · 从**最老**的条目开始折，**一旦降到预算内立刻停手**（最小干预；
-//       opencode 甚至要求"省下的量不够多就不折"，同一个意思——防过度压缩）；
-//     · 被折条目**保留 tool + 参数摘要 + ok**：模型仍知道"我做过什么、成没成"，
-//       只是拿不到旧输出的正文——这样它不会误以为"没查过"而重跑，也不会凭空脑补结果；
-//     · 折叠**幂等**（打 folded 标记，重复扫描不二次切割）且**明示**（绝不静默）。
+//   为什么退役（不是"换个写法"，是**机制冲突**）：
+//     ① 它改的是 history 的**中部**（老条目在中间），而 prompt 前缀缓存吃的是
+//        "最长公共前缀"——中部一动，前面全部失效。r5 实测 22 次折叠 = 22 次全量重算
+//        （`cache=39936 → 10240`），这是 r5 比 r4 慢 5 分钟的直接原因之一
+//        （证据原本就写在这个文件里，不是我编的）。
+//     ② 接进来的机制（contextBudget.ts，Claude Code 的压缩）语义是**整份替换**：
+//        产出"边界标记 + 摘要 + 保留段"这一份全新的稳定前缀，并回报 prefixVersion。
+//        两种语义并存 = 新前缀背后还有人在改中部 → "稳定前缀"不稳，缓存照样重算，
+//        两次代价都白付。所以**必须在同一次改动里退役**，不能"留着当双保险"。
+//     ③ 量的口径不同：旧折叠数**字符**（96_000 字符 ≈ 24K token），新机制数 **token**
+//        （cc 点名的 CANONICAL 口径）。两个坐标系并存时谁先响谁说了算，
+//        台账（history_folded vs context_compacted）会互相矛盾、无法解释。
 //
-//   为什么不上 LLM 摘要：那要多一次 API 调用 + 一段延迟，而墙钟 97.8% 本来就在等 LLM。
-//   确定性折叠零成本零延迟，先把"越窗"这个硬故障堵上；摘要层等真机数据证明不够再谈。
+//   退役后"防越窗"这件事由谁负责：`contextCompaction.ts` 的 runContextGuard ——
+//   发车前量 token → 与**从窗口推出来的**阈值比较 → 该压就压（整份替换）→
+//   压不回来就落台账并走问人站。**不再有任何字符折叠路径**。
+//   唯一保留的是"单条记录"层面的裁剪（clipArgsForModel / clipForModel，见上），
+//   那一条没被退役：它裁的是**单条**的体积，不碰历史结构，也不改变已有前缀。
 // ============================================================
 
-/** 历史总字符预算；超过就从最老的条目开始折叠 */
-export const HISTORY_BUDGET_CHARS = 96_000;
-
-/**
- * 折叠目标线（9/15 批 E 修正）：超预算时**折到预算的这个比例**，而不是"降到预算即停"。
- *
- *   为什么改：r5 实测 22 次折叠事件，绝大多数只折 1-2 条（"省 662""省 736"）——
- *   最小干预的代价是**折得又碎又勤**，而每次折叠都改动历史前缀 →
- *   整个 prompt 的前缀缓存全线重算（铁证：`cache=39936 → 10240`）。
- *   22 次折叠 = 22 次全量重算，这是 r5 比 r4 慢 5 分钟的直接原因之一。
- *
- *   折到 70% 意味着"一次多折一些，换来更长的免折窗口"：
- *   设每次折叠后距下次触发要再涨 30% 预算（约 2.9 万字符），折叠频率至少减半。
- *   代价是模型更早失去一些老条目的细节——但它们本来就已经被折过一轮了。
- */
-export const HISTORY_FOLD_TARGET_RATIO = 0.7;
-/** 最近这段字符数永不折叠（从最新一条往回累计；约 4 条满额工具结果） */
-export const HISTORY_PROTECT_CHARS = 32_768;
-/** 折叠后放在 output 位置的标记文案（模型看得到，明示这里被移除过） */
-export const HISTORY_FOLDED_NOTE =
-    "[历史折叠] 本条工具结果已从上下文移除（工具名与参数摘要保留）。"
-    + "该调用**已经按原样执行过**，改动已落盘——不要因此重做一遍；"
-    + "需要这条结果的内容请重新调用该工具，或直接读文件核对。";
-
-export interface HistoryPruneResult {
-    /** 本次折叠的条目数 */
-    folded: number;
-    charsBefore: number;
-    charsAfter: number;
-}
-
-/** 一条 history 条目的字符数（= realLlm 真正发出去的 JSON 形态） */
-function historyEntryChars(entry: unknown): number {
-    try { return JSON.stringify(entry)?.length ?? 0; } catch { return 0; }
-}
-
-/** 折叠条目里单个字符串参数的保留上限（比 clipArgsForModel 更狠——这里连"记录"都不留全） */
-const FOLDED_ARG_FIELD_LIMIT = 200;
-
-/**
- * 折后保留的参数摘要：**逐字段**处理，只压大块字符串。
- *
- *   不能把整个 args 换成一个摘要串——`path` 这类**定位信息**必须原样留住，
- *   否则模型折叠后连"我写过哪个文件 / 在哪个目录跑的"都不知道，
- *   一知半解比不知道更危险（会去猜、去重做）。压掉的只有正文本身。
- */
-function foldArgsDigest(args: unknown): unknown {
-    if (!args || typeof args !== "object") return args ?? {};
-    const out: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(args as Record<string, unknown>)) {
-        out[key] = typeof value === "string" && value.length > FOLDED_ARG_FIELD_LIMIT
-            ? `${value.slice(0, FOLDED_ARG_FIELD_LIMIT)}…（原 ${value.length} 字符，已省略）`
-            : value;
-    }
-    return out;
-}
-
-/**
- * 历史总量护栏：超预算时把**最老**的工具结果条目折成骨架（原地修改 history）。
- *
- *   只折"带 tool 字段"的条目——error / reminder 这类小条目承载的是**指令语义**
- *   （比如重复调用提醒），折掉会把刹车片一起拆了，而且它们本来就不占地方。
- */
-export function pruneHistory(history: unknown[], o?: {
-    budgetChars?: number;
-    protectChars?: number;
-    /** 折叠目标线比例（缺省 0.7）；显式传 1 即恢复"降到预算即停"的旧行为（测试兼容） */
-    foldTargetRatio?: number;
-}): HistoryPruneResult {
-    const budget = o?.budgetChars ?? HISTORY_BUDGET_CHARS;
-    const protect = o?.protectChars ?? HISTORY_PROTECT_CHARS;
-    // 折到 target 而不是 budget：一次多折些，换更长的免折窗口（见常量注释）
-    const ratio = o?.foldTargetRatio ?? HISTORY_FOLD_TARGET_RATIO;
-    const target = Math.max(0, Math.floor(budget * Math.min(1, Math.max(0.1, ratio))));
-
-    let total = 0;
-    for (const e of history) total += historyEntryChars(e);
-    if (total <= budget) return { folded: 0, charsBefore: total, charsAfter: total };
-
-    // 保护窗：从最新一条往回累计，累计量没超 protect 的条目全部进保护区
-    let protectedFrom = history.length;
-    let acc = 0;
-    for (let i = history.length - 1; i >= 0; i--) {
-        acc += historyEntryChars(history[i]);
-        if (acc > protect) break;
-        protectedFrom = i;
-    }
-
-    let folded = 0;
-    let chars = total;
-    for (let i = 0; i < protectedFrom && chars > target; i++) {
-        const raw = history[i];
-        if (!raw || typeof raw !== "object") continue;
-        const entry = raw as Record<string, unknown>;
-        if (typeof entry["tool"] !== "string") continue;      // 只折工具结果
-        if (entry["folded"] === true) continue;               // 幂等：已折过的不再动
-        const before = historyEntryChars(entry);
-        history[i] = {
-            tool: entry["tool"],
-            args: foldArgsDigest(entry["args"]),
-            ok: entry["ok"] === true,
-            output: HISTORY_FOLDED_NOTE,
-            folded: true,
-        };
-        chars -= before - historyEntryChars(history[i]);
-        folded++;
-    }
-    return { folded, charsBefore: total, charsAfter: chars };
-}
 
 /**
  * 重复调用提醒（9/15 加，参考 dsh repeat-tool-reminder）。
@@ -607,6 +679,16 @@ export interface DeveloperLlm {
          */
         budget: { used: number; total: number };
     }): Promise<unknown>;
+    /**
+     * ★ 压缩摘要口（9/17 接线）：cc 的 compact 调用**走的是同一套模型客户端**
+     *   （`compact.ts:1292-1326` 用 forked agent 发一份 System=摘要提示词、tools 只剩
+     *   Read、thinking 关掉的请求）。本仓库对应的实现是
+     *   `realLlm.createRealLlmSummarizer`（见那里的注释：为什么不走 next()）。
+     *
+     *   为什么是可选：Fake / 包装器的 llm 天然没有这一口。**不实现 = 引擎没有摘要能力**，
+     *   于是压缩这动作不存在，越过阻塞线时只会去问人（如实降级，不假装压过）。
+     */
+    summarize?(request: SummaryRequest): Promise<SummaryResponse>;
 }
 
 /** 模型输出 → 决策（形状不对返回 null，由调用方当一步失败处理） */
@@ -693,6 +775,26 @@ export interface ToolLoopResult {
     /** 被批准的语义化超时延长记录 */
     timeoutExtensions: { fingerprint: string; reason: string }[];
     transcript: { tool: string; ok: boolean; output: string }[];
+    /**
+     * ★ 9/17 上下文护栏的观测面（接线的另一半：节点要把"该问人了"变成 state.human）。
+     *   不接 contextBudget 时（存量调用点）这里是一份空壳：compactions=0、blocked=null。
+     */
+    context: {
+        /** 本轮 loop 里**真实**压缩了几次（= 前缀版本号增量） */
+        compactions: number;
+        /** 台账里的前缀版本号（= context_compacted 行数；无压缩则与进来时相同） */
+        prefixVersion: number;
+        /** 跨轮携带的熔断器状态（压缩失败几次就在这里；节点不必自己存） */
+        tracking: AutoCompactTrackingState | null;
+        /** 非 null = **这一条请求发不出去**：不硬发、不截断，节点必须去问人（waiting_human） */
+        blocked: {
+            detail: string;
+            used: number;
+            window: ContextWindowSpec;
+            /** 自动压缩线（从窗口推出；问人题面要写清"该压的线在哪"） */
+            threshold: number;
+        } | null;
+    };
 }
 
 export async function runToolLoop(o: {
@@ -722,6 +824,11 @@ export async function runToolLoop(o: {
     subagentUsesLlm?: boolean;
     /** B2：带入的验收无进展计数（跨 loop 累积；缺省从 0 / 空 起） */
     acceptanceStall?: { count: number; key: string | null };
+    /**
+     * ★ 9/17 上下文护栏接线（Claude Code 的压缩机制，取代已退役的 pruneHistory）。
+     *   **不传 = 完全不接线**（量都不量：存量调用点/测试行为逐字节不变）。
+     */
+    contextBudget?: ContextBudgetOption;
 }): Promise<ToolLoopResult> {
     const toolDefs = o.tools.describe();
     const history: unknown[] = [];
@@ -754,6 +861,17 @@ export async function runToolLoop(o: {
     let stallKey: string | null = o.acceptanceStall?.key ?? null;
     let acceptanceStallStopped = false;
     /**
+     * ★ 9/17 上下文护栏的运行状态（只在接线时才有值）：
+     *   · ctxPrefixVersion = 台账里 context_compacted 的行数（**跨 resume 可复原**，
+     *     所以"前缀换了第几版"这件事不怕进程重启）；
+     *   · ctxCompactions = 本轮 loop 真实压缩次数（回给节点/台账）；
+     *   · ctxBlocked = 最后一次判定为"发不出去"的证据（非 null → 循环立刻停手去问人）。
+     */
+    let ctxPrefixVersion = o.contextBudget ? contextPrefixVersion(o.ledger) : 0;
+    let ctxCompactions = 0;
+    let ctxTracking: AutoCompactTrackingState | null = null;
+    let ctxBlocked: ContextGuardOutcome | null = null;
+    /**
      * 记账一次工具结果，判断"验收失败集合是否零变化"。
      *   "n/a"      = 不是验收预演结果（别的工具，不参与检测）；
      *   "progress" = 有进展（全绿，或失败集合变了）；
@@ -776,7 +894,7 @@ export async function runToolLoop(o: {
      * 返回一条**软提醒**（只提醒不拦截——拦不拦由模型自己判断，引擎不替它决定）。
      */
     const noteRepeat = (tool: string, args: ToolArgs): string | null => {
-        const key = `${tool} ${canonicalArgsKey(args)}`;
+        const key = `${tool} ${canonicalArgsKey(args)}`;
         if (key === repeatKey) repeatStreak++;
         else { repeatKey = key; repeatStreak = 1; }
         if (!REPEAT_REMINDER_THRESHOLDS.includes(repeatStreak)) return null;
@@ -787,21 +905,53 @@ export async function runToolLoop(o: {
     };
 
     while (steps < maxSteps) {
+        // ★ 9/17 上下文护栏（取代 9/15 批 B 的 pruneHistory 字符折叠）：
+        //   量 token（cc 的 CANONICAL 口径）→ 与**从窗口推出来的**阈值比 → 该压就压
+        //   （整份替换，绝不改中部）→ 压不回来就判"这一条发不出去"。
+        //   放在**预占额度之前**是有意的，两条理由：
+        //     ① 压缩自己也要花一次调用（摘要），那一格额度由下面 charge 统一预占——
+        //        "没发出去的请求"绝不该白占一格（否则崩溃恢复会把它当事实读出来）；
+        //     ② blocked 那一轮**根本不会发请求**，也就不该有 llm_call_planned 行。
+        if (o.contextBudget) {
+            const guard = await runContextGuard({
+                ...o.contextBudget,
+                history,
+                ledger: o.ledger,
+                taskId: o.ctx.taskId,
+                turnCounter: steps,
+                charge: () => {
+                    if (planned + 1 > budget) return false;   // 没额度 → 不压（如实降级）
+                    planned++;
+                    o.ledger.appendEvent("llm_call_planned", {
+                        taskId: o.ctx.taskId, seq: planned,
+                        // 记账口径与主循环分开：这一步是**压缩**调用（cc 的 querySource:'compact'）
+                        querySource: "compact",
+                    });
+                    return true;
+                },
+                canCharge: () => planned + 1 <= budget,
+            });
+            ctxTracking = guard.tracking;
+            if (guard.compacted && guard.history !== history) {
+                // ★ **整份替换**（cc 的 `messagesForQuery = buildPostCompactMessages(result)`）：
+                //   边界 → 摘要 → 保留段 → 附件 → hooks 的顺序就是"压缩后模型看到什么"的
+                //   全部定义。history 是 const，所以就地换内容，而不是换引用。
+                history.splice(0, history.length, ...guard.history);
+                ctxCompactions++;
+            }
+            ctxPrefixVersion = guard.prefixVersion;
+            // 摘要调用真的花了额度 → 计进本轮的 planned/completed（已预占的也在 planned 里）
+            completed += guard.summaryCalls.completed;
+            if (guard.blocked) {
+                ctxBlocked = guard;
+                break;        // 不发这一条：交给节点 → 问人站（waiting_human）
+            }
+        }
+
         // ★ 预占额度：先扣再发。崩在请求中途时，planned 已经落账，不会漏计这次调用。
         if (planned + 1 > budget) { budgetStopped = true; break; }
         planned++;
         o.ledger.appendEvent("llm_call_planned", { taskId: o.ctx.taskId, seq: planned });
-
-        // ★ 9/15 批 B：发车前过一遍总量护栏（纯字符计数、零 LLM、零延迟）。
-        //   放在这里而不是 push 之后，是因为这是 history **唯一**被送出去的地方——
-        //   在这一处设闸，就没有任何路径能绕过它（连错误路径 push 进去的条目也一并受管）。
-        const prune = pruneHistory(history);
-        if (prune.folded > 0) {
-            o.ledger.appendEvent("history_folded", {
-                taskId: o.ctx.taskId, seq: planned + 1, folded: prune.folded,
-                charsBefore: prune.charsBefore, charsAfter: prune.charsAfter,
-            });
-        }
 
         let raw: unknown;
         try {
@@ -1069,6 +1219,20 @@ export async function runToolLoop(o: {
         changedFiles, finished, budgetStopped, timeoutRepeated, timeoutSignature,
         acceptanceStall: { count: stallCount, key: stallKey, stopped: acceptanceStallStopped },
         fingerprints, timeoutExtensions, transcript,
+        context: {
+            compactions: ctxCompactions,
+            prefixVersion: ctxPrefixVersion,
+            tracking: ctxTracking,
+            blocked: ctxBlocked
+                ? {
+                    detail: ctxBlocked.detail ?? "CONTEXT_OVERFLOW（细节缺失）",
+                    used: ctxBlocked.used,
+                    window: ctxBlocked.window,
+                    // 自动压缩线一并带出：问人题面里要写清"该压的线在哪"，人才好判断
+                    threshold: getAutoCompactThreshold(ctxBlocked.window),
+                }
+                : null,
+        },
     };
 }
 
@@ -1113,14 +1277,42 @@ export interface DeveloperGraphDeps {
     maxSubagentCalls?: number;
     /** 仅测试用：注入/替换角色分析器（模拟挂起、坏输出等） */
     subagentRunners?: Parameters<typeof createReadonlySubAgentDispatcher>[0]["runners"];
+    /**
+     * 问人端口（9/17）：askHuman 工具用它向人提问并等回答。
+     * 由 index.ts 注入**同一个** Questioner（pickQuestioner 三分流），
+     * 保证"模型主动问"与"保险丝强制问"走同一条通道、同一套超时/自动兜底语义。
+     * 不注入 = askHuman 默认拒绝（测试与只读子 Agent 环境）。
+     */
+    askHuman?: (req: { question: string; options?: string[] }) => Promise<string>;
+    /**
+     * 召唤真工位（9/17 拓扑升级·层 B）：consultStation 工具用它把问题送回**拥有该产物**
+     * 的工位（architect / pm / test-core / maintainer），拿回意见或**已生效的修订**。
+     * 由 index.ts 注入（真正的收发+等待+停车+记账都在那里）；不注入 = 工具默认拒绝
+     * （测试与只读子 Agent 环境拿不到它，与 askHuman 同款默认拒绝）。
+     */
+    consultStation?: (req: { role: ConsultRole; question: string; focus?: string[] }) => Promise<ConsultReply | null>;
     maxStepsPerLoop?: number;
     maxLlmCalls?: number;
     /** 入口配置的授权根：任务声明只能在其中收窄，**不能扩大** */
     configuredAllowedRoots?: readonly string[];
     /** 等待 TestAgent 结果的时限（毫秒）；过期到达的消息一律拒绝。默认 15 分钟 */
     waitTestTimeoutMs?: number;
+    /**
+     * 整轮墙钟的绝对截止时刻（团队线 developerTeamRunner 注入的刹车，见 brake.ts）。
+     * **只用来夹等待窗口**：waiting_test 的窗口不许活得比整轮墙钟还久——否则刹车到点时
+     * 账本上还挂着一条"正在等测试"，读起来像系统在等，其实整轮已经超时了。
+     * 不传 = 零行为变化（hub-runner / 存量测试逐字节不变）。
+     */
+    wallClockDeadlineAt?: number;
     /** LLM 连续失败容忍次数（透传给 runToolLoop；0/缺省=规格原语义，一次失败即抛） */
     llmErrorTolerance?: number;
+    /**
+     * ★ 9/17 上下文压缩接线（Claude Code 的压缩机制，取代已退役的 pruneHistory）。
+     *   由 index.ts 装配：模型名 / 档位 / 窗口设置值在**装配处**才知道（图不知道"这一档
+     *   模型叫什么"）；摘要口默认取 `llm.summarize`（见 contextBudgetOf）。
+     *   **不传 = 完全不接线**（连 token 都不量：存量测试与只读场景逐字节不变）。
+     */
+    contextBudget?: ContextBudgetOption;
     /** 仅测试用：覆盖 prompts/skills 目录读取 */
     readTextFile?: (absPath: string) => string;
 }
@@ -1237,6 +1429,10 @@ export function intersectRoots(configured: readonly string[], requested: readonl
 }
 
 export function routeAfterLocalChecks(state: DeveloperState, maxLlmCalls = 40): LocalCheckRoute {
+    // ★ 9/17 上下文越窗：这一轮的请求发不出去（压实不动）→ 不推进、不预检，直接交问人站
+    //   （装配层把 "developerBlocked" 这个出口映射到 escalate 节点，与其它保险丝同一个入口）。
+    //   放在最前：越窗是"连话都说不出去"，继续往下走只会再撞一次同一条线。
+    if (state.contextBlocked) return "developerBlocked";
     // ★ 搬运①（claude-code SerialBatchEventUploader 的 per-item fresh budget 口径）：
     //   验证失败（state.error 非空）时共享池闸让位——修复环有自己的独立新鲜预算
     //   （REPAIR_LLM_BUDGET，见 repair 节点），只受修复轮次/重复失败/停滞闸约束。
@@ -1295,6 +1491,9 @@ export type ImplementRoute = "continueWorkItems" | "runLocalChecks" | "waitBatch
  * batched=false 时上面这条 if 短路不进，legacy 分支逐字节不变（金标准：tests/graph.test.ts）。
  */
 export function routeAfterImplement(state: DeveloperState, maxLlmCalls = 40): ImplementRoute {
+    // ★ 9/17 上下文越窗（同 routeAfterLocalChecks）：请求发不出去 → 交问人站（装配层映射到 escalate）。
+    //   放在最前：此时推进工作项 / 跑预检都只会再撞一次阻塞线，白烧。
+    if (state.contextBlocked) return "developerBlocked";
     // ★ B2：验收预演连续零进展 → 直接停手。放最前：此时再推进工作项 / 再跑预检都只是烧预算，
     //   模型自调 runAcceptance 空转（p7 的 23 次）正是被这条拦下的。
     if (isAcceptanceStalled(state)) return "developerBlocked";
@@ -1362,7 +1561,14 @@ export function buildDeveloperGraph(deps: DeveloperGraphDeps) {
     const maxLlmCalls = deps.maxLlmCalls ?? 40;
     const maxSteps = deps.maxStepsPerLoop ?? 12;
     // 9/16 用户指令 ×1.5：15min → 22.5min（与 retry-policy.json waitTestTimeoutMs 同步）
-    const waitTestTimeoutMs = deps.waitTestTimeoutMs ?? 22.5 * 60_000;
+    // ★ 9/17：再按整轮墙钟夹一次（wallClockDeadlineAt 未注入时不生效）——等待窗口的意义是
+    //   "给 tester 留时间"，不是"让整轮多活 22.5 分钟"；下限 1s，避免负数/零窗口。
+    const waitTestTimeoutMs = Math.max(1_000, Math.min(
+        deps.waitTestTimeoutMs ?? 22.5 * 60_000,
+        deps.wallClockDeadlineAt === undefined
+            ? Number.POSITIVE_INFINITY
+            : deps.wallClockDeadlineAt - Date.now(),
+    ));
 
     const send = (target: string, message: OutboundMessage): void => {
         try { deps.port.send(target, message); }
@@ -1401,6 +1607,22 @@ export function buildDeveloperGraph(deps: DeveloperGraphDeps) {
         };
     };
 
+    /**
+     * ★ 上下文护栏的接线参数（9/17）。
+     *   · 模型名 / 档位 / 窗口设置值由装配处（index.ts）给——图自己不知道"这一档模型叫什么"；
+     *   · **摘要口取主循环同一个 llm**：压缩调用与决策调用必须走同一个客户端
+     *     （同端点、同凭据、同观测口径）。这也是 cc 的语义：压缩是同一个 agent 的一次
+     *     forked 调用，不是另一个服务。包装器没实现 summarize 时就没有这一口 →
+     *     引擎如实降级成"只会问人，不会假装压过"。
+     */
+    const contextBudgetOf = (): { contextBudget?: ContextBudgetOption } => {
+        const base = deps.contextBudget;
+        if (!base) return {};                       // 不接线：连量都不量（存量行为逐字节不变）
+        const summarize = base.summarize
+            ?? (deps.llm.summarize ? (r: SummaryRequest) => deps.llm.summarize!(r) : undefined);
+        return { contextBudget: { ...base, ...(summarize ? { summarize } : {}) } };
+    };
+
     const ctxOf = (state: DeveloperState): ToolContext => ({
         workspace: deps.workspace,
         owner: "developerAgent",
@@ -1413,6 +1635,29 @@ export function buildDeveloperGraph(deps: DeveloperGraphDeps) {
         ...(deps.analyzer ? { analyzer: deps.analyzer } : {}),
         // 主 Agent 唯一能调用子 Agent 的通道；子 Agent 拿不到这个 ctx 本身
         subagent: (req) => dispatchSubagent(state.taskId, req, machineEvidenceOf(state)),
+        // 问人端口（9/17）：askHuman 工具的落点。由 index.ts 注入同一个 Questioner，
+        // 所以 Web 气泡卡 / 终端 stdin / AUTO_CONFIRM 三种形态与 escalate 问人站完全一致。
+        // **未注入时 askHuman 直接拒绝**（子 Agent 与测试里的只读工具盒拿不到它）。
+        ...(deps.askHuman ? { askHuman: deps.askHuman } : {}),
+        // 召唤真工位（9/17 层 B）：consultStation 工具的落点。**未注入时工具直接拒绝**——
+        // 与 askHuman 同款默认拒绝，不静默降级成"自己编一个架构师的意见"。
+        ...(deps.consultStation ? { consultStation: deps.consultStation } : {}),
+        // 验收记忆（9/17 回归冻结）：基线落 Ledger，**跨阶段起新进程也不丢**。
+        // 若只放内存，每阶段重启后都会退化成"首次预演"，回归永远抓不到（s4 的死因就白防了）。
+        acceptanceMemory: {
+            load: () => {
+                const events = deps.ledger.listEvents();
+                for (let i = events.length - 1; i >= 0; i--) {
+                    const ev = events[i];
+                    if (ev?.type !== "acceptance_criteria_status") continue;
+                    const payload = ev.payload as { status?: unknown } | null;
+                    const s = payload?.status;
+                    if (s && typeof s === "object") return s as Record<string, "pass" | "fail" | "unevaluable">;
+                }
+                return null;
+            },
+            save: (status) => deps.ledger.appendEvent("acceptance_criteria_status", { status }),
+        },
     });
 
     /**
@@ -1518,6 +1763,8 @@ const blueprintCoverageOf = (state: DeveloperState): string => {
             // 官方脚手架候选（9/15）：空项目初始化加速用。栈名只进数据表不进技能；
             // 无候选（未收录栈/无 stackProfile）时是空串，不产生空节、零扰动。
             scaffoldHint: scaffoldHintFor(state.stackProfile),
+            // 本机环境实况（9/17）：探测器实测的工具链/脚手架可行性/端口/联网，供模型自选工具
+            envBrief: envBriefCache || "（本轮尚未探测到环境实况——按最保守的可用工具继续）",
             // 视觉指导按**工作项 kind** 派发（不是按栈名硬编码）：见 readSkillBundle
             activeSkill: readSkillBundle(skillName, item?.kind ?? null),
             currentTree: tree,
@@ -1602,6 +1849,8 @@ const blueprintCoverageOf = (state: DeveloperState): string => {
         waitBatch: "acceptBatch",
         acceptBatch: "loadContext",
         repair: "runLocalChecks",
+        // 问人站的恢复入口是它自己：崩溃在"等人回答"上，重启后仍从这里复活消费 humanAnswer
+        escalate: "escalate",
         developerReady: "developerReady",
         developerBlocked: "developerBlocked",
     };
@@ -1688,6 +1937,26 @@ const blueprintCoverageOf = (state: DeveloperState): string => {
 
     const inspectProject = async (state: DeveloperState): Promise<Partial<DeveloperState>> => {
         deps.ledger.enterNode("inspectProject", state.status);
+        // 环境自省（9/17）：开工前实测一次"这台机器上到底有什么"（npm/npx/pnpm/bun、脚手架可行性、
+        // java/mvn、无头浏览器、端口、联网），渲染成简报随任务书注入——模型据此**自己决定**
+        // 用什么工具初始化（例如 npm 可用 + registry 可达 → 走 `npm create vite@latest`），
+        // 而不是照着手写模板硬干。探针自身带 60s 记忆，重复调用不重复花钱。
+        // ★ 9/17 修：这里**最多等 ENV_BRIEF_BUDGET_MS 就往下走**——简报是信息性配料，
+        //   绝不当开工的同步咽喉（到点回退 + 继续探测，见 refreshEnvBrief 的注释）。
+        const brief = await refreshEnvBrief();
+        const briefLines = brief.text.split("\n").length;
+        if (brief.timedOut) {
+            // 到点这件事必须留痕，且要写清"等了多久 + 用的是什么回退"——
+            // 否则下次看到"简报是上一轮的"会以为是谁写错了，而不是"这轮没等到"。
+            deps.ledger.appendEvent("env_probe_timeout", {
+                waitedMs: brief.waitedMs, budgetMs: ENV_BRIEF_BUDGET_MS, fallback: brief.source, briefLines,
+            });
+        } else {
+            // source 区分 fresh / memo：**不**把"命中 60s 记忆"记成"探测很快"
+            deps.ledger.appendEvent("env_probed", {
+                source: brief.source, waitedMs: brief.waitedMs, briefLines,
+            });
+        }
         // withMeta：要的是文件**元数据**（path/size/hash/language），不是全文——
         // 全文会撑爆 state，也没必要：需要内容时再用 readFile 读。
         const res = await deps.tools.invoke("inspectTree", ctxOf(state), { limit: 300, withMeta: true });
@@ -1766,7 +2035,27 @@ const blueprintCoverageOf = (state: DeveloperState): string => {
             onWrite,
             subagentUsesLlm: deps.subagentLlm !== undefined,
             acceptanceStall: { count: state.acceptanceStallCount, key: state.acceptanceStallKey },
+            ...contextBudgetOf(),
         });
+        // ★ 9/17：上下文越窗 → 这一轮的请求**发不出去**（不硬发、不截断）。
+        //   出口与所有保险丝一样：先进问人站（同一个 waiting_human / state.human 通道），
+        //   由 escalate 节点组题，答案由 index.invokeWithHuman 回填后复活（resumeFrom=escalate）。
+        if (loop.context.blocked) {
+            deps.ledger.exitNode("bootstrapOrImplement", "waiting_human", {
+                contextOverflow: true, steps: loop.steps,
+                used: loop.context.blocked.used, threshold: loop.context.blocked.threshold,
+            });
+            return next(state, "waiting_human", {
+                contextBlocked: loop.context.blocked.detail,
+                error: loop.context.blocked.detail,
+                resumeFrom: "escalate",
+                llmCallsPlanned: state.llmCallsPlanned + loop.llmCallsPlanned,
+                llmCallsCompleted: state.llmCallsCompleted + loop.llmCallsCompleted,
+                toolCalls: state.toolCalls + loop.toolCalls,
+                changedFiles: loop.changedFiles,
+                completedToolCalls: loop.fingerprints,
+            });
+        }
         deps.ledger.exitNode("bootstrapOrImplement", "implementing", {
             steps: loop.steps, changed: loop.changedFiles.length, budgetStopped: loop.budgetStopped,
         });
@@ -1816,6 +2105,16 @@ const blueprintCoverageOf = (state: DeveloperState): string => {
      */
     const runLocalChecks = async (state: DeveloperState): Promise<Partial<DeveloperState>> => {
         deps.ledger.enterNode("runLocalChecks", state.status);
+        // 安全网（9/17 R5）：不管模型走 `npm create vite` 还是手写 package.json，
+        // 进构建门之前都把 "类型检查 && 构建" 归一成 "build 只构建 + type-check 独立"。
+        // 理由：create-vite 模板的 build = "vue-tsc -b && vite build"，一个类型错误 → exit=1
+        // → 会被记成"构建失败"，而真实原因只是类型检查。归一化让两者各归各位（进台账可审计）。
+        try {
+            const norm = summarizeNormalize(normalizeScaffoldedScripts(state.projectDir), state.projectDir);
+            if (norm.length > 0) deps.ledger.appendEvent("scaffold_normalized", { notes: norm });
+        } catch (e) {
+            deps.ledger.appendEvent("scaffold_normalize_failed", { error: String((e as Error).message ?? e) });
+        }
         const problems: string[] = [];
         const noBuildEntry: string[] = [];
         const ctx = ctxOf(state);
@@ -1846,6 +2145,50 @@ const blueprintCoverageOf = (state: DeveloperState): string => {
                 const tail = String(result.output ?? "").slice(-1200);
                 problems.push(`${target} build 失败（exit=${String(result.meta?.["exitCode"])}）：${tail}`);
             }
+        }
+        // 前端路由登记硬闸（9/17 R6）：此前这条只打一行警告——
+        //   「[skeleton] 契约未登记任何页面路由：router 表为空（可运行但不注册任何页面，/ 会白屏）」
+        // 没人据此行动，于是渲染判据（page.home 要求 / 有可见文本 + <input>）必挂。
+        // 现在它是**预检项**：不进 NO_BUILD_ENTRY（那不是"未验证"，是确定的缺陷），
+        // 直接进 problems → 触发修复回路，修不好就走到问人站。
+        if (roots.has("frontend") && fs.existsSync(path.join(state.projectDir, "frontend"))) {
+            const routes = checkFrontendRoutes(state.projectDir);
+            if (!routes.ok && routes.file) {
+                // ★ 只有"确实存在路由文件、却登记不全"才算缺陷——这正是 R6 白屏事故的形状
+                //   （[skeleton] 契约未登记任何页面路由：router 表为空 → / 白屏 → 渲染判据必挂）。
+                //   产物形态不同（缺 src/、前端目录残缺）不在这里拦：那是构建/其它预检的活，
+                //   在这里拦会把"还没搭完"误判成"路由写错了"，制造假阴性修复回路。
+                problems.push(`前端路由未登记（/ 会白屏）：${routes.detail}`);
+                deps.ledger.appendEvent("frontend_routes_missing", {
+                    detail: routes.detail, evidence: routes.evidence, file: routes.file,
+                });
+            } else if (!routes.ok) {
+                // 判不出来（产物形态不同 / 非字面量路由表）→ 只留痕，不拦路（宁漏不误杀）
+                deps.ledger.appendEvent("frontend_routes_unverified", {
+                    detail: routes.detail, evidence: routes.evidence,
+                });
+            }
+        }
+
+        // 迁移引导闸（9/17 R8）：真实跑里 ddl.sql / db/init.sql **写了却从没被应用**，
+        // 于是 HTTP 判据撞 `Table '...' doesn't exist` → 一片 500（s1 实录），
+        // 而模型看着 500 只会去改路由/参数，方向完全跑偏。
+        // 口径（宁漏不误杀）：applied / undecided 一律放行，只有**确实写了 DDL 却没人用**
+        // （not-applied）才算缺陷——静态检查证明不了"DDL 真的执行成功"，所以只抓这一种形状。
+        try {
+            const migration = checkMigrationBootstrap(state.projectDir);
+            if (migration.status === "not-applied") {
+                problems.push(`数据库迁移未接入启动流程（会 500）：${migration.note}`);
+                deps.ledger.appendEvent("migration_not_applied", {
+                    sqlFile: migration.sqlFile, ddlAt: migration.ddlAt, note: migration.note,
+                });
+            } else if (migration.status === "undecided") {
+                deps.ledger.appendEvent("migration_undecided", {
+                    sqlFile: migration.sqlFile, note: migration.note,
+                });
+            }
+        } catch (e) {
+            deps.ledger.appendEvent("migration_check_failed", { error: String((e as Error).message ?? e) });
         }
         const error = problems.length > 0 ? problems.join("；") : null;
         if (noBuildEntry.length > 0) {
@@ -2019,7 +2362,26 @@ const blueprintCoverageOf = (state: DeveloperState): string => {
             llmErrorTolerance: deps.llmErrorTolerance,
             subagentUsesLlm: deps.subagentLlm !== undefined,
             acceptanceStall: { count: state.acceptanceStallCount, key: state.acceptanceStallKey },
+            ...contextBudgetOf(),
         });
+
+        // ★ 9/17：上下文越窗（修复环同样适用）→ 不硬发、不截断，先去问人站。
+        //   注意这里**不写 recordFailure / 不累加 stalledRepairs**：这不是"修了但没动文件"
+        //   （那会误伤——模型根本没得到发言机会），是"这一条请求压根发不出去"。
+        if (loop.context.blocked) {
+            deps.ledger.exitNode("repair", "waiting_human", {
+                contextOverflow: true, attempt, used: loop.context.blocked.used,
+            });
+            return next(state, "waiting_human", {
+                contextBlocked: loop.context.blocked.detail,
+                error: loop.context.blocked.detail,
+                resumeFrom: "escalate",
+                llmCallsPlanned: state.llmCallsPlanned + loop.llmCallsPlanned,
+                llmCallsCompleted: state.llmCallsCompleted + loop.llmCallsCompleted,
+                toolCalls: state.toolCalls + loop.toolCalls,
+                changedFiles: loop.changedFiles,
+            });
+        }
 
         deps.ledger.recordFailure({
             taskId: state.taskId, attempt, signature, category,
@@ -2076,6 +2438,141 @@ const blueprintCoverageOf = (state: DeveloperState): string => {
         return next(state, "ready");
     };
 
+    // ---------- 问人站（9/17）：保险丝的出口先到这里，而不是直接死 ----------
+
+    /** 未完成的工作项（排除已搁置的）——"计划还剩几个单元"的唯一口径 */
+    const unfinishedUnitIds = (state: DeveloperState): string[] => {
+        const done = new Set(state.completedWorkItems ?? []);
+        const deferred = new Set(state.deferredWorkItems ?? []);
+        return (state.workItems ?? []).map((w) => w.id).filter((id) => !done.has(id) && !deferred.has(id));
+    };
+
+    /** 从错误文本里挖"只有人才能解决"的环境缺口（确定性文本判定，不猜语义） */
+    const envGapsFrom = (err: string | null | undefined): string[] => {
+        const e = String(err ?? "");
+        if (!e) return [];
+        const gaps: string[] = [];
+        if (/ANTHROPIC_AUTH_TOKEN|ANTHROPIC_BASE_URL|API[_ ]?KEY|apiKey|401|unauthorized/i.test(e)) gaps.push("模型凭据/端点未配置（401 或未配置）");
+        if (/EADDRINUSE|address already in use|端口.*被占|port .* in use/i.test(e)) gaps.push("端口被占用（本机已有进程占用）");
+        if (/ECONNREFUSED.*(3306|mysql)|MySQL|数据库连接/i.test(e)) gaps.push("数据库连接不可用（MySQL 未起/凭据不对）");
+        if (/ENOENT.*\b(java|mvn|npm|node|bun)\b|command not found/i.test(e)) gaps.push("外部命令缺失（java/mvn/npm/node 之一）");
+        if (/SQLITE_READONLY|readonly database/i.test(e)) gaps.push("数据库文件只读（路径对启动 cwd 敏感）");
+        return gaps;
+    };
+
+    /**
+     * 问人站：所有保险丝（重复失败 / 停滞 / 修复耗尽 / 预算超限 / 超时重复）的出口先到这里。
+     *
+     *   改造前的形状是"保险丝 → developerBlocked（终态）"：整轮归零，人只收到一句"失败"，
+     *   什么也决定不了，只能重跑（s5b 195 次调用烧尽后就是这么死的）。
+     *   改造后：先问人。人答"继续"→ 重置保险丝并给回修复预算；答"降级"→ 搁置未完成单元、
+     *   按现状收口（搁置项如实记账，绝不假装完成）；答"停止"或已问满次数 → 才进 blocked 终态。
+     *
+     *   问人是**有界**的（maxEscalations，默认 2）：它是能力，不是无限续命。
+     */
+    const escalate = async (state: DeveloperState): Promise<Partial<DeveloperState>> => {
+        deps.ledger.enterNode("escalate", state.status);
+        const unfinished = unfinishedUnitIds(state);
+        const tf = state.lastTestFailure ?? null;
+        // 失败摘要用协议里真实存在的字段拼（category/command/exitCode/signature/阻断发现），
+        // 没有 reason 这种字段就不编——问人问题里的证据必须是真的。
+        const failureText = tf
+            ? `[${tf.category}] ${tf.command} exit=${tf.exitCode}｜signature=${tf.failureSignature}`
+                + (tf.blockingFindingTitles?.length ? `｜阻断发现：${tf.blockingFindingTitles.slice(0, 3).join("；")}` : "")
+            : null;
+        const snapshot: EscalationSnapshot = {
+            taskId: state.taskId,
+            status: state.status,
+            workItem: state.currentWorkItemId ?? null,
+            lastError: state.error ?? failureText,
+            // "同一次失败"的口径：验收零变化计数 / 停滞修复计数里的较大者（都是"没进展"的直接证据）
+            sameFailureStreak: Math.max(state.acceptanceStallCount ?? 0, state.stalledRepairs ?? 0),
+            sameFailureLimit: SAME_FAILURE_LIMIT,
+            budgetExhausted: isBudgetExceeded(state, maxLlmCalls),
+            // 引擎侧暂无墙钟（只有 live/runner 有），如实置 false——不编造诊断
+            wallClockExhausted: false,
+            envGaps: envGapsFrom([state.error, tf?.stderr].filter(Boolean).join("\n")),
+            destructive: null,
+            // ★ 协议里早就埋好的求助信号（TestFailureSchema.needsHuman 的原文注释：
+            //   "true = 需要人工确认（审查不可用/不确定），不是交给 Developer 去修的代码问题"）。
+            //   开发者在循环里修不了它——这正是该问人的场景，之前它只会变成一次 repair 空转。
+            ambiguity: tf?.needsHuman
+                ? `验收器判定需要人工确认（${tf.reviewReason ?? tf.category}）：审查不可用或结论不确定，不是能靠改代码消除的问题`
+                : null,
+            unfinishedUnits: unfinished.length,
+            escalationsUsed: state.escalationsUsed ?? 0,
+            maxEscalations: state.maxEscalations ?? MAX_ESCALATIONS_PER_TASK,
+            // ★ 9/17 上下文越窗：这一轮的 LLM 请求**发不出去**（压缩也救不回来）。
+            //   它是最急的一类求助（连话都说不出去），放在 shouldEscalate 的第一优先。
+            contextOverflow: state.contextBlocked ?? null,
+        };
+
+        const trigger = shouldEscalate(snapshot);
+        if (!trigger) {
+            // 没有可问的理由（问够了 / 无匹配触发）→ 老老实实进终态，不拿无效问题打扰人
+            deps.ledger.exitNode("escalate", "no_trigger");
+            return next(state, "blocked", { human: null, humanAnswer: null });
+        }
+
+        // 第一次进入：出题、出图、等人（图不阻塞；答案由 index 侧回填 humanAnswer 复活）
+        if (state.humanAnswer == null) {
+            const q = buildEscalationQuestion(trigger, snapshot);
+            deps.ledger.appendEvent("escalation_asked", {
+                reason: trigger.reason, questionId: q.questionId,
+                diagnosis: trigger.diagnosis, unfinishedUnits: unfinished.length,
+            });
+            send(targets.maintainer, {
+                type: "developer_progress", projectId: state.projectId, taskId: state.taskId,
+                stage: "escalation",
+                note: `卡住求助（${trigger.reason}）：${trigger.diagnosis}`,
+            });
+            deps.ledger.exitNode("escalate", "waiting_human", { reason: trigger.reason, questionId: q.questionId });
+            return { human: q, humanAnswer: null, status: "waiting_human", resumeFrom: "escalate" };
+        }
+
+        // 复活：消费人的答案
+        const decision = parseEscalationAnswer(state.humanAnswer);
+        const used = (state.escalationsUsed ?? 0) + 1;
+        deps.ledger.appendEvent("escalation_answered", {
+            reason: trigger.reason, raw: decision.raw, action: decision.action, note: decision.note, escalationsUsed: used,
+        });
+
+        if (decision.action === "stop") {
+            deps.ledger.exitNode("escalate", "stopped_by_human");
+            return next(state, "blocked", {
+                human: null, humanAnswer: null, escalationsUsed: used,
+                // 人已判停，越窗标记一并收掉：终态里不该留一个"还在等压缩"的字段
+                contextBlocked: null,
+                error: `人工判定停止：${decision.raw}（卡住原因：${trigger.diagnosis}）`,
+            });
+        }
+
+        const patch: Partial<DeveloperState> = {
+            human: null, humanAnswer: null, escalationsUsed: used,
+            // 重置保险丝：人既然说"继续"，就给他一次**干净的**修复预算，而不是立刻再次撞闸
+            repairAttempts: 0, stalledRepairs: 0,
+            acceptanceStallCount: 0, acceptanceStallKey: null,
+            timeoutRepeated: false, timeoutSignature: null,
+            humanGuidance: decision.guidance ? [decision.guidance] : [],
+            // ★ 越窗标记必须清掉：不清的话 routeAfterImplement/LocalChecks 会一直把我们送回
+            //   问人站（同一个判断每轮都成立 → 打转）。人答"继续/降级"= 这一页翻过去了；
+            //   若下一轮仍然越窗，护栏会**重新**判定并重新出题（次数由 maxEscalations 兜底）。
+            contextBlocked: null,
+        };
+        if (decision.action === "narrow") {
+            // 降级：搁置未完成单元（如实记账），修复预算收紧到 1 轮，按现状收口
+            patch.deferredWorkItems = unfinished;
+            patch.maxRepairAttempts = 1;
+            patch.error = null;
+            deps.ledger.appendEvent("escalation_narrowed", { deferred: unfinished });
+        } else {
+            patch.maxRepairAttempts = 2;
+            patch.error = null;
+        }
+        deps.ledger.exitNode("escalate", decision.action, { reason: trigger.reason, action: decision.action });
+        return next(state, "implementing", patch);
+    };
+
     const developerBlocked = async (state: DeveloperState): Promise<Partial<DeveloperState>> => {
         deps.ledger.enterNode("developerBlocked", state.status);
         const fallback = state.timeoutRepeated
@@ -2110,6 +2607,8 @@ const blueprintCoverageOf = (state: DeveloperState): string => {
         .addNode("waitBatch", withCheckpoint("waitBatch", waitBatch))
         .addNode("acceptBatch", withCheckpoint("acceptBatch", acceptBatch))
         .addNode("repair", withCheckpoint("repair", repair))
+        // 问人站（9/17）：所有保险丝的出口（原 developerBlocked）先导到这里
+        .addNode("escalate", withCheckpoint("escalate", escalate))
         .addNode("developerReady", withCheckpoint("developerReady", developerReady))
         .addNode("developerBlocked", withCheckpoint("developerBlocked", developerBlocked))
         // 入口按状态分派（规格三 + 9/15 分批）：全新任务从 receiveTask 开始；
@@ -2122,7 +2621,7 @@ const blueprintCoverageOf = (state: DeveloperState): string => {
             [
                 "receiveTask", "inspectProject", "loadContext", "bootstrapOrImplement",
                 "runLocalChecks", "requestTest", "handleTestResult", "repair",
-                "developerReady", "developerBlocked", "waitBatch", "acceptBatch",
+                "escalate", "developerReady", "developerBlocked", "waitBatch", "acceptBatch",
             ])
         .addEdge("receiveTask", "inspectProject")
         .addEdge("inspectProject", "loadContext")
@@ -2133,7 +2632,9 @@ const blueprintCoverageOf = (state: DeveloperState): string => {
             continueWorkItems: "loadContext",
             runLocalChecks: "runLocalChecks",
             waitBatch: "waitBatch",          // 分批：批没到，本项做完就出图（不裸跑下一项）
-            developerBlocked: "developerBlocked",   // ★ B2：验收连续零进展 → 停手上报
+            // ★ 9/17：出口从终态 developerBlocked 改成问人站 escalate——
+            //   路由函数的返回值**不动**（金标准测试照旧），只改装配层的映射。
+            developerBlocked: "escalate",
         })
         // ★ 路径名 → 真实节点：数组型 pathMap 只接受**真实节点名**，
         //   而 "loadContext" 恰好就是真实节点名，所以这里数组写法也能过；
@@ -2141,7 +2642,7 @@ const blueprintCoverageOf = (state: DeveloperState): string => {
         .addConditionalEdges("runLocalChecks", (s: DeveloperState) => routeAfterLocalChecks(s, maxLlmCalls), {
             requestTest: "requestTest",
             repair: "repair",
-            developerBlocked: "developerBlocked",
+            developerBlocked: "escalate",    // ★ 9/17：改问人站（同上，路由函数返回值不动）
             continueWorkItems: "loadContext",
             waitBatch: "waitBatch",          // ★ 判据未齐绝不送检/绝不 repair——先等批
         })
@@ -2154,10 +2655,20 @@ const blueprintCoverageOf = (state: DeveloperState): string => {
         // waiting_item→inspecting 的非法迁移，把"错投递"炸成 failed，违反防御语义。
         .addConditionalEdges("acceptBatch", (s: DeveloperState) =>
             s.status === "waiting_item" ? END : "loadContext", [END, "loadContext"])
-        .addConditionalEdges("handleTestResult", (s: DeveloperState) => routeAfterTestResult(s, maxLlmCalls), [
-            "repair", "developerReady", "developerBlocked",
-        ])
+        .addConditionalEdges("handleTestResult", (s: DeveloperState) => routeAfterTestResult(s, maxLlmCalls), {
+            repair: "repair",
+            developerReady: "developerReady",
+            developerBlocked: "escalate",    // ★ 9/17：改问人站（数组写法换成 pathMap，语义不变）
+        })
         .addEdge("repair", "runLocalChecks")
+        // 问人站出口（9/17）：
+        //   · 已经出题等人（human != null）→ END 出图，index 侧 ask 回填 humanAnswer 后复活；
+        //   · 人已判停 / 已问满次数 → 进终态 developerBlocked；
+        //   · 人答"继续/降级" → 回 loadContext 接着干活（保险丝已重置，预算已给回）。
+        .addConditionalEdges("escalate", (s: DeveloperState) =>
+            s.human != null ? END
+                : s.status === "blocked" ? "developerBlocked" : "loadContext",
+            [END, "developerBlocked", "loadContext"])
         .addEdge("developerReady", END)
         .addEdge("developerBlocked", END)
         .compile();

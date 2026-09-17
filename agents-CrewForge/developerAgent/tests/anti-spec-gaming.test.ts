@@ -12,7 +12,6 @@
 
 import { afterAll, describe, expect, it } from "bun:test";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import {
     ANTI_SPEC_GAMING_MARKER, ANTI_SPEC_GAMING_SKILL, buildDeveloperGraph,
@@ -27,18 +26,22 @@ import { acceptanceHashOf } from "../protocol";
 import type { ArchitectTask, InboundMessage, TestFailure } from "../protocol";
 import { runTestAgentVerify } from "../../testAgentAdapter";
 import type { AdapterVerifyRequest, TestAgentAdapterOptions } from "../../testAgentAdapter";
+import { cleanupTempDirsAfterTests, tmpDir } from "./_tmp";
 
-const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "cf-anti-gaming-"));
+const projectDir = tmpDir("cf-anti-gaming");
 fs.mkdirSync(path.join(projectDir, "backend"), { recursive: true });
 fs.mkdirSync(path.join(projectDir, "frontend"), { recursive: true });
 const workspace = new Workspace({ projectDir, allowedRoots: ["backend", "frontend"] });
 const opened: DeveloperLedger[] = [];
 let dbSeq = 0;
 
+// 先关账本（开着 sqlite 删树在 Windows 上必 EBUSY，见 _tmp.ts 文件头实测），再交给 _tmp.ts 删树。
+// 老写法是 `catch { /* Windows 句柄未放不拦测试 */ }` —— 9/17 实测这个文件确实会偶尔在 %TEMP%
+// 里留下 cf-anti-gaming-XXXX（0.92 MB）：清理偶发失败就被静默吞掉了。
 afterAll(() => {
     for (const l of opened) l.close();
-    try { fs.rmSync(projectDir, { recursive: true, force: true }); } catch { /* Windows 句柄未放不拦测试 */ }
 }, 30_000);
+cleanupTempDirsAfterTests();
 
 function freshLedger(): DeveloperLedger {
     const l = DeveloperLedger.open(path.join(projectDir, `asg-${dbSeq++}.db`), "p1:t1:default");
@@ -302,10 +305,9 @@ describe("anti-spec-gaming / 失败证据与裁判边界", () => {
 // ---------- 适配器：伪造 allFailures / 假 pass 一律拦下 ----------
 
 let stubRoot: string | null = null;
-afterAll(() => { if (stubRoot) { try { fs.rmSync(stubRoot, { recursive: true, force: true }); } catch { /* ignore */ } } });
 
 function stubOpts(name: string, body: string, o: Partial<TestAgentAdapterOptions> = {}): TestAgentAdapterOptions {
-    stubRoot ??= fs.mkdtempSync(path.join(os.tmpdir(), "cf-asg-stub-"));
+    stubRoot ??= tmpDir("cf-asg-stub");
     const d = path.join(stubRoot, `stub-${name}`);
     fs.mkdirSync(d, { recursive: true });
     fs.writeFileSync(path.join(d, "index.ts"), body, "utf-8");

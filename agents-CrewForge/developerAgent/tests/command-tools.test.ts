@@ -15,7 +15,6 @@
 //   全部走显式 `sandbox: { mode: "soft" }`；真实模式（strict）下这些一律不可用。
 import { afterAll, describe, expect, it } from "bun:test";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { Workspace } from "../workspace";
 import { DeveloperLedger } from "../ledger";
@@ -24,8 +23,9 @@ import type { ToolContext } from "../tools/registry";
 import { resolveShell } from "../tools/shell";
 import { parseTarget } from "../tools/httpRequest";
 import { createDeveloperAgent } from "../index";
+import { cleanupTempDirsAfterTests, tmpDir } from "./_tmp";
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "cf-dev-cmd-"));
+const root = tmpDir("cf-dev-cmd");
 /**
  * 用**真的 node**（不是测试运行器自己的可执行文件）。
  * 之前用 process.execPath，在 `bun test` 里它指向 bun.exe——那样"node --version"
@@ -36,10 +36,13 @@ const registry = createFullDeveloperToolRegistry();
 const opened: DeveloperLedger[] = [];
 let seq = 0;
 
-// 清理：只关账本（同 sandbox.test.ts：Windows 上删树会把 hook 超时打爆）
+// 清理分两步，**顺序不能反**：先关账本（这些用例建真 sqlite，开着库删树在 Windows 上必 EBUSY），
+// 再交给 _tmp.ts 删树（重试 + 退避 + 大超时）。老写法只关账本、把目录丢给系统清理，
+// 就是 %TEMP% 里越攒越多的那个漏点。bun 的钩子按注册顺序执行，所以清理钩子必须写在下面之后。
 afterAll(() => {
     for (const l of opened) { try { l.close(); } catch { /* 已关 */ } }
 });
+cleanupTempDirsAfterTests();
 
 function newProject(name: string): string {
     const dir = path.join(root, name);

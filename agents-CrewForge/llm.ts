@@ -24,7 +24,13 @@ export const DEFAULT_MODEL_JSON = JSON.stringify({
 export const DEFAULT_TIMEOUT_MS = 300_000;
 
 /** 结构化输出失败重试次数（含首次） */
-export const DEFAULT_RETRIES = 3;
+/**
+ * 结构化输出重试：5 次 + 间隔递增退避（2026-09-17，用户拍板）。
+ * 背景：a1 实测 DeepSeek 偶发空响应（Text:""），3 连拒即整局报废（零产出）——
+ * 服务商抖动不该等价于流程死刑。退避 1s→2s→4s→8s（Attempt 2~5 之间）。
+ */
+export const DEFAULT_RETRIES = 5;
+const RETRY_BACKOFF_MS = [0, 1000, 2000, 4000, 8000];
 
 /** 简单调用：返回模型文本回复（不做结构化解析） */
 export async function callLLM(
@@ -133,6 +139,9 @@ export async function retryStructuredResult<T>(
             lastCategory = classifyStructuredError(message);
             console.warn(`${label} LLM 失败（第 ${attempt}/${retries} 次，${lastCategory}）：${message.slice(0, 140)}`);
             if (attempt >= retries) break;
+            // ★ 间隔递增退避：给服务商喘息窗口，空响应/限流类抖动大多能自愈
+            const backoff = RETRY_BACKOFF_MS[Math.min(attempt, RETRY_BACKOFF_MS.length - 1)] ?? 0;
+            if (backoff > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, backoff);
             feedback = attempt === 1
                 ? `\n\n## 上次输出校验失败，必须根据以下错误修正后重新输出（只输出合法 JSON，不要 Markdown 或说明）\n${message.slice(0, 400)}`
                 : `\n\n## 连续两次校验失败：**改为缩小输出**——只填最小必需字段，数组最多 2 项，每个字符串不超过 80 字，不要嵌套不必要的对象，不要任何解释文字。上次错误：\n${message.slice(0, 400)}`;
