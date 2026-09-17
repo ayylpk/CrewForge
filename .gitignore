@@ -52,3 +52,6 @@ agents-CrewForge/developerAgent/live/mysite/
 agents-CrewForge/developerAgent/live/ts-site/
 agents-CrewForge/developerAgent/live/ts-site-v2/
 
+
+# ===== WorkBuddy 本地笔记（不提交）=====
+.workbuddy/
