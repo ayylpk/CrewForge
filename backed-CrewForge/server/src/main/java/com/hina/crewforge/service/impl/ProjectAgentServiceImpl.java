@@ -121,12 +121,23 @@ public class ProjectAgentServiceImpl implements ProjectAgentService {
     @Override
     public void deleteByIds(String ids) {
         // 格式: "projectId-id1-id2-id3" —— projectId 仅作过滤, userId 从 JWT 取(防删别人的)
-        String[] parts = ids.split("-");
-        Long projectId = Long.parseLong(parts[0]);
+        // 9/17 修隐患：前端拼串时空数组会造出 "/api/project-agent/5-"，
+        //   split 后尾段是空串 → Long.parseLong("") 抛 NumberFormatException → 全局兜底 500；
+        //   就算挡住了，idList 为空时 SQL 还会拼出 IN () 语法错。统一在入口挡掉，给出可读原因。
+        String[] parts = ids == null ? new String[0] : ids.split("-");
+        if (parts.length < 2 || parts[0].isBlank()) {
+            throw new BaseException("删除参数格式应为 projectId-id1-id2…，实收: " + ids);
+        }
+        Long projectId = Long.parseLong(parts[0].trim());
         Long userId = BaseContext.getCurrentUserId();
         List<Long> idList = new ArrayList<>();
         for (int i = 1; i < parts.length; i++) {
-            idList.add(Long.parseLong(parts[i]));
+            if (!parts[i].isBlank()) {
+                idList.add(Long.parseLong(parts[i].trim()));
+            }
+        }
+        if (idList.isEmpty()) {
+            throw new BaseException("未指定要删除的项目成员 id: " + ids);
         }
         LocalDateTime now = LocalDateTime.now();
         // 1. 删除项目成员行

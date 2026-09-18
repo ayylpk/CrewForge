@@ -188,12 +188,18 @@ public class AgentPoolServiceImpl implements AgentPoolService {
     @Transactional
     public void deleteByIds(String ids) {
         // 格式: "id1-id2-id3"（userId 不拼在路径里了, 从 JWT 取当前登录用户）
-        String[] parts = ids.split("-");
-        Long userId = BaseContext.getCurrentUserId();
+        // 9/17 同 project-agent 的加固：空段会让 Long.parseLong("") 抛 NumberFormatException（500），
+        // 空集合还会拼出 IN () 语法错。挡在入口，给可读原因。
         List<Long> idList = new ArrayList<>();
-        for (String part : parts) {
-            idList.add(Long.parseLong(part));
+        for (String part : (ids == null ? new String[0] : ids.split("-"))) {
+            if (!part.isBlank()) {
+                idList.add(Long.parseLong(part.trim()));
+            }
         }
+        if (idList.isEmpty()) {
+            throw new BaseException("未指定要删除的 Agent id: " + ids);
+        }
+        Long userId = BaseContext.getCurrentUserId();
         LocalDateTime now = LocalDateTime.now();
         // 1. 删除池 Agent
         agentMapper.deleteByIds(idList, userId, now);

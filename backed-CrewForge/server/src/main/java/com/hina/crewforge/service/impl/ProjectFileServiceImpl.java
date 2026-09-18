@@ -51,9 +51,9 @@ public class ProjectFileServiceImpl extends ServiceImpl<ProjectFileMapper, Proje
     public List<ProjectFileVO> listByProjectId(Long projectId) {
         // 审计漏洞①（9/15）：文件树=项目内容的全量目录，必须先过归属锁再碰缓存
         projectGuard.requireOwned(projectId);
-        // 缓存优先
+        // 缓存优先（读缓存是"加速"不是"命门"：Redis 不可达必须回源，不许把接口带崩）
         String key = listKey(projectId);
-        String cached = redisTemplate.opsForValue().get(key);
+        String cached = cacheGet(key);
         if (cached != null) {
             try {
                 return objectMapper.readValue(cached, new TypeReference<List<ProjectFileVO>>() {});
@@ -77,6 +77,23 @@ public class ProjectFileServiceImpl extends ServiceImpl<ProjectFileMapper, Proje
             log.warn("项目文件列表缓存写入失败: {}", e.getMessage());
         }
         return vos;
+    }
+
+    /**
+     * 读缓存的容错版（与写路径同口径）：Redis 不可达返回 null，让调用方回源。
+     *
+     * 为什么必须包：application.yml 里 Redis 指向虚拟机(192.168.183.129)，
+     * 那台机器经常不在线，而裸调 redisTemplate.opsForValue().get() 会抛
+     * RedisConnectionFailureException → 全局兜底 500 → 执行面板文件树整个拉不出来。
+     * 缓存只是加速层，数据真相在 MySQL，所以读失败一律降级为"没命中"。
+     */
+    private String cacheGet(String key) {
+        try {
+            return redisTemplate.opsForValue().get(key);
+        } catch (Exception e) {
+            log.warn("项目文件缓存读取失败，回源: {}", e.getMessage());
+            return null;
+        }
     }
 
     /** 写操作后清缓存：list + 该项目的 detail */
@@ -154,7 +171,7 @@ public class ProjectFileServiceImpl extends ServiceImpl<ProjectFileMapper, Proje
             throw new BaseException("文件不存在: " + id);
         }
         String key = detailKey(entity0.getProjectId(), id);
-        String cached = redisTemplate.opsForValue().get(key);
+        String cached = cacheGet(key);
         if (cached != null) {
             try {
                 ProjectFileVO vo = objectMapper.readValue(cached, ProjectFileVO.class);

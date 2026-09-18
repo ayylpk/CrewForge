@@ -14,9 +14,12 @@ public class WebConfig implements WebMvcConfigurer {
     @Override
     public void addCorsMappings(CorsRegistry registry) {
         registry.addMapping("/api/**")
-                // Vite 默认 5173，被占用时可能起 5174
-                .allowedOrigins("http://localhost:5173", "http://localhost:5174")
+                // 只认"本机 + 任意端口"：vite 默认 5173，被占用会自动往上顶（5174/5175…），
+                // 且 localhost 与 127.0.0.1 在浏览器眼里是两个 origin。
+                // 写死端口列表 = 换个端口就整站 CORS 报错（9/17 实测 5173 被别的项目占着）。
+                .allowedOriginPatterns("http://localhost:[*]", "http://127.0.0.1:[*]")
                 .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
-                .allowedHeaders("*");
+                .allowedHeaders("*")
+                .maxAge(3600);
     }
 }

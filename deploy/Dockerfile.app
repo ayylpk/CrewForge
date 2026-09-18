@@ -54,7 +54,7 @@ COPY --from=build /app.jar /app/app.jar
 COPY agents-CrewForge /app/agents-CrewForge
 COPY backed-CrewForge/mvnw backed-CrewForge/mvnw.cmd /app/backed-CrewForge/
 COPY backed-CrewForge/.mvn /app/backed-CrewForge/.mvn
-COPY sql /app/sql
+COPY backed-CrewForge/sql /app/sql
 
 # 产物树与工作区（挂卷持久化）
 RUN mkdir -p /app/runs /app/runs/_verify
@@ -64,8 +64,11 @@ ENV RUNS_ROOT=/app/runs \
     JAVA_BASE_URL=http://127.0.0.1:8080
 
 EXPOSE 8080
-# 健康检查：后端起来即算健康（生成项目的验收另有 run-report）
-HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=5 \
-  CMD curl -fsS http://127.0.0.1:8080/actuator/health || curl -fsS http://127.0.0.1:8080/ || exit 1
+# 健康检查：只探"HTTP 端口在应答"。
+# ⚠️ 不能打 /actuator/health：server/pom.xml 里没有 spring-boot-starter-actuator，
+#    那个地址恒 404 → 容器会永远卡在 unhealthy（原实现就是这个坑）。
+# 这里刻意不带 -f：401（JWT 拦截）/404 都算"进程活着"，只有连不上才判死。
+HEALTHCHECK --interval=30s --timeout=5s --start-period=90s --retries=5 \
+  CMD curl -s -o /dev/null http://127.0.0.1:8080/api/settings || exit 1
 
 CMD ["java", "-jar", "/app/app.jar"]

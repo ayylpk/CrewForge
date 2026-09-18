@@ -37,14 +37,11 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-data-redis</artifactId>
         </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-cache</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.springframework.boot</groupId>
-            <artifactId>spring-boot-starter-websocket</artifactId>
-        </dependency>
+        <!-- 9/17 删除两项零引用依赖：
+             · spring-boot-starter-cache —— 全仓没有 @Cacheable/@CacheEvict，
+               缓存是 ProjectFileServiceImpl 直接用 StringRedisTemplate 手写的；
+             · spring-boot-starter-websocket —— 全仓没有任何 WebSocket/STOMP 配置或 handler，
+               前端也是纯 10s 轮询。留着会让人以为"看板有推送"。 -->
 
         <!-- 数据库 -->
         <dependency>
@@ -75,10 +72,8 @@
             <groupId>org.springframework.security</groupId>
             <artifactId>spring-security-crypto</artifactId>
         </dependency>
-        <dependency>
-            <groupId>com.alibaba.fastjson2</groupId>
-            <artifactId>fastjson2</artifactId>
-        </dependency>
+        <!-- 9/17 删掉 com.alibaba.fastjson2:fastjson2：全仓零 import，
+             所有 JSON 处理都走 Jackson（ObjectMapper）。 -->
         <dependency>
             <groupId>com.github.xiaoymin</groupId>
             <artifactId>knife4j-openapi3-jakarta-spring-boot-starter</artifactId>

@@ -12,10 +12,12 @@ import com.hina.crewforge.common.exception.BaseException;
 import com.hina.crewforge.common.result.PageResult;
 import com.hina.crewforge.mapper.ProjectFileMapper;
 import com.hina.crewforge.mapper.ProjectMapper;
+import com.hina.crewforge.mapper.TaskMapper;
 import com.hina.crewforge.pojo.QueryParam.ProjectQueryParam;
 import com.hina.crewforge.pojo.dto.ProjectDTO;
 import com.hina.crewforge.pojo.entity.Project;
 import com.hina.crewforge.pojo.entity.ProjectFile;
+import com.hina.crewforge.pojo.entity.Task;
 import com.hina.crewforge.pojo.vo.ProjectVO;
 import com.hina.crewforge.service.ProjectService;
 import lombok.extern.slf4j.Slf4j;
@@ -42,6 +44,8 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
 
     @Autowired
     private ProjectFileMapper projectFileMapper;
+    @Autowired
+    private TaskMapper taskMapper;
     @Autowired
     private ObjectMapper objectMapper;
 
@@ -73,13 +77,14 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
         }
         wrapper.orderByDesc(Project::getCreateTime);
 
-        // 4. 组装返回(一次分组查本页所有项目的文件数, 避免 N+1)
+        // 4. 组装返回(一次分组查本页所有项目的文件数/任务进度, 避免 N+1)
         List<Project> list = baseMapper.selectList(wrapper);
         // PageHelper 拦截后返回的 List 实际是 Page 对象, 强转取 total
         Page<Project> p = (Page<Project>) list;
-        Map<Long, Long> fileCounts = countProjectFiles(
-                p.getResult().stream().map(Project::getId).collect(Collectors.toList()));
-        List<ProjectVO> vos = p.getResult().stream().map(pr -> toVO(pr, fileCounts)).collect(Collectors.toList());
+        List<Long> ids = p.getResult().stream().map(Project::getId).collect(Collectors.toList());
+        Map<Long, Long> fileCounts = countProjectFiles(ids);
+        Map<Long, Integer> progresses = countTaskProgress(ids);
+        List<ProjectVO> vos = p.getResult().stream().map(pr -> toVO(pr, fileCounts, progresses)).collect(Collectors.toList());
         return new PageResult<>(p.getTotal(), vos);
     }
 
@@ -103,9 +108,16 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
         baseMapper.insert(project);
     }
 
-    /** 项目状态合法值（与 sys_project.status 列注释一致） */
+    /**
+     * 项目状态合法值（与 sys_project.status 列注释一致）
+     *
+     * ⚠️ blocked 必须在内：引擎的 decideProjectStatus（agents-CrewForge/engine/run/state.ts）
+     * 在"跑完了但交付关没验证过"（finalGateStatus=skipped_unverified）时落的就是 blocked，
+     * 它是引擎的三终态之一（done/failed/blocked）。这里漏了它 = 引擎写得进库、
+     * Web 侧却被判非法状态 —— 前端也就无法把 blocked 项目重新拉起来。
+     */
     private static final List<String> VALID_STATUS =
-            List.of("draft", "clarifying", "planning", "executing", "paused", "done", "failed");
+            List.of("draft", "clarifying", "planning", "executing", "paused", "done", "failed", "blocked");
 
     @Override
     public void update(Long id, ProjectDTO dto) {
@@ -120,11 +132,12 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
         if (StringUtils.hasText(dto.getStatus()) && !VALID_STATUS.contains(dto.getStatus())) {
             throw new BaseException("非法项目状态: " + dto.getStatus());
         }
-        // 3. JSON 字符串字段传了必须是合法 JSON 数组（防脏数据落库）
-        validateJsonArray(dto.getTechStack(), "techStack");
-        validateJsonArray(dto.getDevPlan(), "devPlan");
-        validateJsonArray(dto.getDirTree(), "dirTree");
-        validateJsonArray(dto.getBusinessModules(), "businessModules");
+        // 3. JSON 字符串字段传了必须是合法 JSON 结构（防脏数据落库）
+        //    注意是"数组或对象"都可以，理由见 validateJsonShape 的注释（引擎写的是信封对象）
+        validateJsonShape(dto.getTechStack(), "techStack");
+        validateJsonShape(dto.getDevPlan(), "devPlan");
+        validateJsonShape(dto.getDirTree(), "dirTree");
+        validateJsonShape(dto.getBusinessModules(), "businessModules");
 
         Project project = new Project();
         BeanUtils.copyProperties(dto, project);
@@ -134,15 +147,26 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
         baseMapper.updateById(project);
     }
 
-    /** JSON 数组校验: 没传(null/空)不校验; 传了必须是合法 JSON 数组, 否则抛业务异常 */
-    private void validateJsonArray(String json, String field) {
+    /**
+     * JSON 结构校验：没传(null/空)不校验；传了必须是合法 JSON **数组或对象**。
+     *
+     * ⚠️ 9/17 修「devPlan 必须是 JSON 数组」把真实数据挡在门外：
+     *   引擎（架构师工位）往这几列写的是**信封对象**，不是裸数组。9/17 对现网 22 行实测统计：
+     *     dev_plan         1 数组 / 19 对象 → {risks, phases, project, features, mvp_scope, uiProfile}
+     *     tech_stack       1 数组 / 12 对象 → {why, tables, moduleTech, techniques}
+     *     business_modules 0 数组 / 13 对象 → {risks, modules, summary, deliverables}
+     *   而前端进页面读回整行、保存时又整行发回来（该往返已在 CreateProjectView 修掉），
+     *   于是任何一次保存都被这条校验打成 400 ——「功能清单存不进去」的真因。
+     *   校验的本意是"防脏数据落库"（挡标量、挡坏 JSON），不该把系统自己产出的形状判为非法。
+     */
+    private void validateJsonShape(String json, String field) {
         if (!StringUtils.hasText(json)) {
             return;
         }
         try {
             JsonNode node = objectMapper.readTree(json);
-            if (!node.isArray()) {
-                throw new BaseException(field + " 必须是 JSON 数组");
+            if (!node.isArray() && !node.isObject()) {
+                throw new BaseException(field + " 必须是 JSON 数组或对象");
             }
         } catch (Exception e) {
             if (e instanceof BaseException) {
@@ -175,7 +199,8 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
         // （与 update/delete 同源，复用 checkOwnership，防 IDOR 越权读取）
         checkOwnership(project, "查看");
         Map<Long, Long> fileCounts = countProjectFiles(Collections.singletonList(id));
-        return toVO(project, fileCounts);
+        Map<Long, Integer> progresses = countTaskProgress(Collections.singletonList(id));
+        return toVO(project, fileCounts, progresses);
     }
 
     @Override
@@ -214,13 +239,14 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
         return baos.toByteArray();
     }
 
-    private ProjectVO toVO(Project project, Map<Long, Long> fileCounts) {
+    private ProjectVO toVO(Project project, Map<Long, Long> fileCounts, Map<Long, Integer> progresses) {
         ProjectVO vo = new ProjectVO();
         BeanUtils.copyProperties(project, vo);
         vo.setFileCount(fileCounts.getOrDefault(project.getId(), 0L));
         vo.setModuleCount(parseModuleCount(project.getBusinessModules()));
-        // TODO: 暂无任务表, 进度先返回 0; 待 sys_task 落地后按任务统计
-        vo.setProgress(0);
+        // 真实进度：sys_task 里 done 占比（9/17 修——原来恒返回 0，
+        // 而 ProjectsView 是 v-if="p.progress > 0" 才渲染进度条，等于那根条永远不存在）
+        vo.setProgress(progresses.getOrDefault(project.getId(), 0));
         return vo;
     }
 
@@ -240,6 +266,32 @@ public class ProjectServiceImpl extends ServiceImpl<ProjectMapper, Project> impl
             counts.put(projectId, cnt);
         }
         return counts;
+    }
+
+    /**
+     * 一次分组查询出多个项目的任务进度（0-100）。
+     * 进度 = sys_task 里 status='done' 的行数 / 总行数；无任务行按 0（=前端不渲染进度条）。
+     * 任务状态四态与看板同源（todo/doing/done/failed），所以这里的百分比和看板永远对得上。
+     */
+    private Map<Long, Integer> countTaskProgress(List<Long> projectIds) {
+        Map<Long, Integer> progresses = new HashMap<>();
+        if (projectIds.isEmpty()) {
+            return progresses;
+        }
+        QueryWrapper<Task> wrapper = new QueryWrapper<>();
+        // 逻辑删除由 @TableLogic 自动追加 deleted = 0
+        wrapper.select("project_id",
+                        "COUNT(*) AS task_cnt",
+                        "SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) AS done_cnt")
+                .in("project_id", projectIds)
+                .groupBy("project_id");
+        for (Map<String, Object> row : taskMapper.selectMaps(wrapper)) {
+            Long projectId = ((Number) row.get("project_id")).longValue();
+            long total = ((Number) row.get("task_cnt")).longValue();
+            long doneCnt = row.get("done_cnt") == null ? 0L : ((Number) row.get("done_cnt")).longValue();
+            progresses.put(projectId, total <= 0 ? 0 : (int) Math.round(doneCnt * 100.0 / total));
+        }
+        return progresses;
     }
 
     /** 业务模块数 = businessModules JSON 数组长度, 解析失败按 0 */

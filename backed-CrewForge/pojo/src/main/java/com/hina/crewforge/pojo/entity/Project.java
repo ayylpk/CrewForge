@@ -47,11 +47,15 @@ public class Project {
     private String projectDir;
     /** 创建人ID */
     private Long createUser;
-    /** 创建时间 */
-    @TableField(fill = FieldFill.INSERT)
+    /**
+     * 创建时间 / 最后更新时间
+     *
+     * 9/17：去掉了原来的 @TableField(fill = INSERT / INSERT_UPDATE) —— 本库**没有**
+     * MetaObjectHandler（见 ProjectRun/Task 的同类注释），fill 不会发生；
+     * 这两个值一直是由 ProjectServiceImpl 在 create/update 里手填的。
+     * 留着 fill 只会让人以为存在自动填充。
+     */
     private LocalDateTime createTime;
-    /** 最后更新时间 */
-    @TableField(fill = FieldFill.INSERT_UPDATE)
     private LocalDateTime updateTime;
     /** 逻辑删除: 0-未删除, 1-已删除 */
     @TableLogic

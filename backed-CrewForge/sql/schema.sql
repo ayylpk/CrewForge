@@ -2,6 +2,9 @@
 -- ============================================================
 -- CrewForge 基线 Schema（9/2 阶段 0，mysqldump --no-data 现网导出）
 -- 已排除：sys_project_version / sys_permission（8/26 删租户遗留孤儿表，代码不再引用）
+--   ⚠️ 9/17 补记：上面这句以前只是"导出时排除了"，现网库里那两张表当时**还在**。
+--   9/17 已用 migration_drop_legacy_tenant.sql 真正 DROP 掉，同时删掉
+--   sys_project.tenant_id / project_type 两列。现在基线与现网一致（已用空库灌本文件核对）。
 -- 用法：CREATE DATABASE crewforge; mysql --default-character-set=utf8mb4 crewforge < schema.sql
 -- 维护：新表 DDL 先入 migration_*.sql 执行现网，再重导本文件保持单一真相
 -- ============================================================
@@ -28,7 +31,8 @@ CREATE TABLE `sys_agent` (
   `update_time` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   `deleted` tinyint DEFAULT '0' COMMENT '逻辑删除',
   PRIMARY KEY (`id`),
-  KEY `idx_tenant` (`user_id`)
+  -- 9/17 改名：这个索引索引的是 user_id（池按用户隔离），idx_tenant 是租户时代的遗留名字
+  KEY `idx_user_id` (`user_id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=9 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='自定义Agent池表';
 /*!40101 SET character_set_client = @saved_cs_client */;
 DROP TABLE IF EXISTS `sys_agent_edge`;
@@ -96,16 +100,17 @@ DROP TABLE IF EXISTS `sys_project`;
 /*!50503 SET character_set_client = utf8mb4 */;
 CREATE TABLE `sys_project` (
   `id` bigint NOT NULL AUTO_INCREMENT COMMENT '主键ID',
-  `tenant_id` bigint DEFAULT NULL COMMENT '所属团队ID(NULL=个人项目)',
-  `project_type` tinyint DEFAULT '1' COMMENT '项目类型: 1-个人项目, 2-团队项目',
+  -- 9/17 删除：tenant_id / project_type 是租户+团队时代的列，
+  -- 实体 Project 早已写明"砍掉团队功能后已移除"，代码既不读也不写。
+  -- 现网 22 行里只有 1 行（id=8「hina」）残留真值，已随 migration_drop_legacy_tenant.sql 清掉。
   `name` varchar(200) NOT NULL COMMENT '项目名称',
   `description` text COMMENT '项目描述(原始需求)',
   `clarified_req` text COMMENT '需求澄清后的结构化文档(Markdown)',
-  `business_modules` json DEFAULT NULL COMMENT 'AI拆分的业务模块列表(JSON)',
-  `tech_stack` json DEFAULT NULL COMMENT '技术栈方案(JSON)',
-  `dev_plan` json DEFAULT NULL COMMENT '开发计划(JSON)',
+  `business_modules` json DEFAULT NULL COMMENT 'AI拆分的业务模块列表(JSON)。⚠️双形状：网页写裸数组；引擎写 {risks, modules, summary, deliverables} 信封',
+  `tech_stack` json DEFAULT NULL COMMENT '技术栈方案(JSON)。⚠️双形状：网页写裸数组（架构师页编辑后写 {信封, technologies}）；引擎写 {why, tables, moduleTech, techniques}',
+  `dev_plan` json DEFAULT NULL COMMENT '开发计划(JSON)。⚠️双形状：网页写 [{name,tasks,progress}]；引擎写 {risks, phases:[{goal,name,risk,phase,uiStyle,features,dependencies,relative_effort}], project, features, mvp_scope, uiProfile}',
   `dir_tree` json DEFAULT NULL COMMENT '项目目录树(JSON数组)',
-  `status` varchar(30) DEFAULT 'draft' COMMENT '状态: draft/clarifying/planning/executing/paused/done/failed',
+  `status` varchar(30) DEFAULT 'draft' COMMENT '状态: draft/clarifying/planning/executing/paused/done/failed/blocked(引擎"跑完但交付关未验证")',
   `confirm_mode` tinyint DEFAULT '1' COMMENT '确认模式: 0-全绿灯, 1-混合(默认),\r\n  2-手动',
   `project_dir` varchar(500) DEFAULT NULL COMMENT '服务器上项目文件目录',
   `create_user` bigint DEFAULT NULL COMMENT '创建人ID',
@@ -113,7 +118,6 @@ CREATE TABLE `sys_project` (
   `update_time` datetime DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
   `deleted` tinyint DEFAULT '0' COMMENT '逻辑删除',
   PRIMARY KEY (`id`),
-  KEY `idx_tenant` (`tenant_id`),
   KEY `idx_status` (`status`)
 ) ENGINE=InnoDB AUTO_INCREMENT=9 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='项目表';
 /*!40101 SET character_set_client = @saved_cs_client */;

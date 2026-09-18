@@ -36,8 +36,7 @@
     </properties>
 
     <dependencyManagement>
-        <dependencies>
-            <!-- MyBatis-Plus -->
+        <dependencies>            <!-- MyBatis-Plus -->
             <dependency>
                 <groupId>com.baomidou</groupId>
                 <artifactId>mybatis-plus-spring-boot3-starter</artifactId>
@@ -97,4 +96,30 @@
             </dependency>
         </dependencies>
     </dependencyManagement>
+
+    <build>
+        <pluginManagement>
+            <plugins>
+                <!--
+                    surefire 加 -Djdk.attach.allowAttachSelf=true。
+                    为什么必须加：Mockito 5 默认用 ByteBuddy 的 **inline mock maker**，
+                    它要往当前 JVM 动态挂一个 agent。默认走"另起进程自附加"，
+                    而受限环境（沙箱/受管容器/CI）通常禁止 spawn 外部进程，于是整批
+                    Mockito 测试在初始化阶段就炸：
+                      IllegalStateException: Could not self-attach to current VM using external process
+                      → Could not initialize plugin: interface org.mockito.plugins.MockMaker
+                    9/17 实测：本项目既有的 ProjectFileServiceGuardTest 9/9 全红就是这个原因，
+                    和被测代码无关。加上这个属性后改走**进程内**自附加，测试即恢复可跑
+                    （scripts/verify.ps1 的"backend tests"那一步才真正有意义）。
+                -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <configuration>
+                        <argLine>-Djdk.attach.allowAttachSelf=true</argLine>
+                    </configuration>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+    </build>
 </project>
