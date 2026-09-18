@@ -43,6 +43,14 @@ export interface ToolContext {
     /** 只读子 Agent（旧通道）：能分析、能解释，**不能写盘**。未注入时 delegateReadonly 直接拒绝 */
     analyzer?: (req: { question: string; paths?: string[] }) => Promise<string>;
     /**
+     * 观测端口（9/18）：工具把自己身上"值得记账的事"写进台账。
+     *
+     *   为什么需要它：只读工具的返回**不进 completed_tool_call**（见 graph 的只读免缓存策略），
+     *   于是"readFile 去重到底命中几次"在台账里查不到——9/18 想量这个指标时才发现是个盲区。
+     *   与 askHuman/consultStation 同款：**未注入就是没有**，工具不静默降级、也不报错。
+     */
+    note?: (event: string, payload?: Record<string, unknown>) => void;
+    /**
      * 只读子 Agent（统一接口，tools/readonlySubAgent.ts）：
      * delegateReadonly 带 role 参数时走这里——结构化请求 / 结构化结果 / 严格 Schema。
      * ★ 这个端口由 **Developer 侧**（graph.ts ctxOf）注入；子 Agent 自身的运行环境里

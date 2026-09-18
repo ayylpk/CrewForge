@@ -5,7 +5,7 @@
 import { describe, expect, it } from "bun:test";
 import {
     DEFAULT_GUARDRAILS, MAX_SINGLE_WRITE_BYTES, MAX_WRITES_PER_BATCH,
-    evaluateGuardrails, evaluateWriteBatch,
+    evaluateGuardrails, evaluateWriteBatch, matchDangerous,
 } from "../guardrails";
 
 describe("C1 护栏：危险 shell 命令一律拒绝（代码级，不靠提示词）", () => {
@@ -19,6 +19,40 @@ describe("C1 护栏：危险 shell 命令一律拒绝（代码级，不靠提示
         expect(evaluateGuardrails("shell", { command: "npm run build 2>&1 | tail -50" })).toBe(null);
         expect(evaluateGuardrails("shell", { command: "node src/app.js" })).toBe(null);
         expect(evaluateGuardrails("shell", { command: "findstr /i todo src\\*.js" })).toBe(null);
+    });
+
+    // ★ 9/18 回归（实测误伤）：原正则 `\b(format|mkfs|diskpart)\b` 里，`\b` 在 "Format-Table"
+    //   的 t 与 - 之间成立，于是 PowerShell 的格式化 cmdlet 被判成"格式化/分区命令"。
+    //   现场代价：s1 那轮 19 分钟里 guardrail_denied 连开 9 枪，agent 换写法重试→又中→再换，
+    //   后半程预算几乎全耗在这个死循环上。下面这几条必须放行。
+    it("★ PowerShell 的 Format-* cmdlet / docker --format 不再误判为格式化命令", () => {
+        const 放行 = [
+            'powershell -Command "Get-ChildItem | Format-Table -AutoSize"',
+            "powershell -NoProfile -Command $o=@(); $o+=(Get-Service | Format-List Name)",
+            'powershell -Command "docker ps --format {{.Names}}"',
+            "curl -sS -o NUL -w format=%{http_code} https://example.com",
+        ];
+        for (const cmd of 放行) {
+            expect(matchDangerous(cmd)).toBe(null);
+            expect(evaluateGuardrails("shell", { command: cmd })).toBe(null);
+        }
+        // 真格式化照拦（不能因为修误伤把真危险也放了）
+        for (const cmd of [
+            "format C:", "format.com /q D:", "format /q", "format", "mkfs.ext4 /dev/sda1", "diskpart",
+            "mkdir build & format D: /q",          // 命令段中间也算
+        ]) {
+            expect(evaluateGuardrails("shell", { command: cmd })?.id).toBe("dangerous-shell");
+        }
+    });
+
+    it("★ 拒绝理由要说清「命中哪条」，否则验尸只能靠猜", () => {
+        const v = evaluateGuardrails("shell", { command: 'Get-Service x | Format-Table -AutoSize' });
+        expect(v).toBe(null);                       // cmdlet 放行，自然没有理由
+        const denied = evaluateGuardrails("shell", { command: "format D: /q" })!;
+        expect(denied.reason).toContain("命中");
+        expect(denied.reason).toContain("格式化命令（format）");
+        expect(matchDangerous("del /s /q build")).toContain("递归静默删除");
+        expect(matchDangerous("rm -rf /")).toContain("递归强制删除");
     });
 
     it("runCommand 的 args 数组也会拼起来检查", () => {

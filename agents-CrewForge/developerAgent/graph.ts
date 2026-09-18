@@ -65,7 +65,7 @@ import { DEVELOPER_ROLE_NAME, READONLY_TOOL_NAMES, WRITE_TOOLS, str, strList } f
 import type { Workspace } from "./workspace";
 import { createReadonlySubAgentDispatcher } from "./tools/readonlySubAgent";
 import type { ReadonlySubAgentEvidenceInput, ReadonlySubAgentLlm } from "./tools/readonlySubAgent";
-import { evaluateGuardrails, evaluateWriteBatch } from "./guardrails";
+import { dangerousProbeText, evaluateGuardrails, evaluateWriteBatch, matchDangerous } from "./guardrails";
 // 前端路由登记硬闸（9/17 R6）：纯确定性检查，从 agents-CrewForge/checkers.ts 复用
 // 迁移引导闸（9/17 R8）：同一个 checkers.ts —— DDL 写了却没人应用 → 500
 import { checkFrontendRoutes, checkMigrationBootstrap } from "../checkers";
@@ -580,7 +580,15 @@ export async function invokeWithFingerprintCache(o: {
     //   放在缓存查找**之前**：否则一条早于护栏存在的缓存结果会绕过它。
     const guard = evaluateGuardrails(o.tool, o.args);
     if (guard) {
-        o.ledger.appendEvent("guardrail_denied", { tool: o.tool, rule: guard.id, reason: guard.reason });
+        // ★ 9/18：连同"被判定的原文"和"命中的是哪条模式"一起记账。
+        //   原先只记 tool + rule + 通用 reason，验尸时 9 条 guardrail_denied 长得一模一样，
+        //   只能靠时间戳去猜踩的是哪个命令。现在一眼可查。
+        const probe = dangerousProbeText(o.args);
+        o.ledger.appendEvent("guardrail_denied", {
+            tool: o.tool, rule: guard.id, reason: guard.reason,
+            matched: matchDangerous(probe),
+            text: probe.length > 300 ? `${probe.slice(0, 300)}…` : probe,
+        });
         return {
             cached: false,
             fingerprint,
@@ -1293,6 +1301,18 @@ export interface DeveloperGraphDeps {
     consultStation?: (req: { role: ConsultRole; question: string; focus?: string[] }) => Promise<ConsultReply | null>;
     maxStepsPerLoop?: number;
     maxLlmCalls?: number;
+    /**
+     * 调用数预算的**可变读数**（9/18 加，治"加时加了个寂寞"）。
+     *
+     *   为什么需要它：`maxLlmCalls` 是图**创建时定格**的常量，而刹车加时只前移墙钟
+     *   （`grantBrakeExtension` 原先不碰调用数）。于是一个**调用数**耗尽的任务，
+     *   人答"继续：加时 30 分钟"之后下一圈 `callAllowance` 原地不动、立刻再次到顶——
+     *   白烧 MAX_ESCALATIONS_PER_TASK 的次数，最后判 blocked（s1-crud-min 实测：
+     *   活几乎干完、ac-1/ac-2 都 exit=0，却被这条判死）。
+     *   传了这个 ref，图每次判预算都读**当前值**，加时改 ref 即当场生效，无需重建 handle。
+     *   不传 = 用 `maxLlmCalls`，行为与改造前逐字节一致（存量测试不受影响）。
+     */
+    llmBudgetRef?: { value: number };
     /** 入口配置的授权根：任务声明只能在其中收窄，**不能扩大** */
     configuredAllowedRoots?: readonly string[];
     /** 等待 TestAgent 结果的时限（毫秒）；过期到达的消息一律拒绝。默认 15 分钟 */
@@ -1558,7 +1578,12 @@ export function buildDeveloperGraph(deps: DeveloperGraphDeps) {
     /** 受信 TestAgent 名单来自代码配置；默认空 = 谁也不信（安全默认） */
     const trustedTestAgents: readonly string[] = deps.trustedTestAgents ?? [];
     const readText = deps.readTextFile ?? defaultRead;
-    const maxLlmCalls = deps.maxLlmCalls ?? 40;
+    /**
+     * 调用数天花板：**每次现读**，不缓存成常量。
+     *   有 `llmBudgetRef` 时读 ref（刹车加时可当场抬高，无需重建 handle）；否则读创建时的
+     *   `maxLlmCalls`——后者与改造前完全等价（不传 ref 的存量调用方零扰动）。
+     */
+    const maxLlmCallsOf = (): number => deps.llmBudgetRef?.value ?? deps.maxLlmCalls ?? 40;
     const maxSteps = deps.maxStepsPerLoop ?? 12;
     // 9/16 用户指令 ×1.5：15min → 22.5min（与 retry-policy.json waitTestTimeoutMs 同步）
     // ★ 9/17：再按整轮墙钟夹一次（wallClockDeadlineAt 未注入时不生效）——等待窗口的意义是
@@ -1632,6 +1657,9 @@ export function buildDeveloperGraph(deps: DeveloperGraphDeps) {
         // 只有引擎知道判据原文，模型不该从 history 里回忆——这里如实注入。
         projectDirAbs: state.projectDir,
         acceptanceChecks: state.acceptanceChecks ?? [],
+        // 观测端口（9/18）：工具层"值得记账的事"落台账。首个消费者是 readFile 去重命中——
+        // 只读工具的返回不进 completed_tool_call，不从这里记就永远量不到去重效果。
+        note: (event, payload) => deps.ledger.appendEvent(event, { taskId: state.taskId, ...(payload ?? {}) }),
         ...(deps.analyzer ? { analyzer: deps.analyzer } : {}),
         // 主 Agent 唯一能调用子 Agent 的通道；子 Agent 拿不到这个 ctx 本身
         subagent: (req) => dispatchSubagent(state.taskId, req, machineEvidenceOf(state)),
@@ -2030,7 +2058,7 @@ const blueprintCoverageOf = (state: DeveloperState): string => {
             task: ctxMsg?.task ?? renderTask(state, skillName, ""),
             skill: readSkillBundle(skillName, item?.kind ?? null),
             maxSteps,
-            llmBudget: Math.max(0, maxLlmCalls - state.llmCallsPlanned),
+            llmBudget: Math.max(0, maxLlmCallsOf() - state.llmCallsPlanned),
             llmErrorTolerance: deps.llmErrorTolerance,
             onWrite,
             subagentUsesLlm: deps.subagentLlm !== undefined,
@@ -2488,7 +2516,7 @@ const blueprintCoverageOf = (state: DeveloperState): string => {
             // "同一次失败"的口径：验收零变化计数 / 停滞修复计数里的较大者（都是"没进展"的直接证据）
             sameFailureStreak: Math.max(state.acceptanceStallCount ?? 0, state.stalledRepairs ?? 0),
             sameFailureLimit: SAME_FAILURE_LIMIT,
-            budgetExhausted: isBudgetExceeded(state, maxLlmCalls),
+            budgetExhausted: isBudgetExceeded(state, maxLlmCallsOf()),
             // 引擎侧暂无墙钟（只有 live/runner 有），如实置 false——不编造诊断
             wallClockExhausted: false,
             envGaps: envGapsFrom([state.error, tf?.stderr].filter(Boolean).join("\n")),
@@ -2628,7 +2656,7 @@ const blueprintCoverageOf = (state: DeveloperState): string => {
         .addEdge("loadContext", "bootstrapOrImplement")
         // 实现节点的出口是**动态**的：还有工作项没做完 → 回 loadContext 推进下一项；
         // 全做完（或预算/超时收紧）→ 才跑整站本地预检。见 routeAfterImplement 的注释。
-        .addConditionalEdges("bootstrapOrImplement", (s: DeveloperState) => routeAfterImplement(s, maxLlmCalls), {
+        .addConditionalEdges("bootstrapOrImplement", (s: DeveloperState) => routeAfterImplement(s, maxLlmCallsOf()), {
             continueWorkItems: "loadContext",
             runLocalChecks: "runLocalChecks",
             waitBatch: "waitBatch",          // 分批：批没到，本项做完就出图（不裸跑下一项）
@@ -2639,7 +2667,7 @@ const blueprintCoverageOf = (state: DeveloperState): string => {
         // ★ 路径名 → 真实节点：数组型 pathMap 只接受**真实节点名**，
         //   而 "loadContext" 恰好就是真实节点名，所以这里数组写法也能过；
         //   仍用对象写法显式声明，避免"路由名必须等于节点名"这个隐含耦合。
-        .addConditionalEdges("runLocalChecks", (s: DeveloperState) => routeAfterLocalChecks(s, maxLlmCalls), {
+        .addConditionalEdges("runLocalChecks", (s: DeveloperState) => routeAfterLocalChecks(s, maxLlmCallsOf()), {
             requestTest: "requestTest",
             repair: "repair",
             developerBlocked: "escalate",    // ★ 9/17：改问人站（同上，路由函数返回值不动）
@@ -2655,7 +2683,7 @@ const blueprintCoverageOf = (state: DeveloperState): string => {
         // waiting_item→inspecting 的非法迁移，把"错投递"炸成 failed，违反防御语义。
         .addConditionalEdges("acceptBatch", (s: DeveloperState) =>
             s.status === "waiting_item" ? END : "loadContext", [END, "loadContext"])
-        .addConditionalEdges("handleTestResult", (s: DeveloperState) => routeAfterTestResult(s, maxLlmCalls), {
+        .addConditionalEdges("handleTestResult", (s: DeveloperState) => routeAfterTestResult(s, maxLlmCallsOf()), {
             repair: "repair",
             developerReady: "developerReady",
             developerBlocked: "escalate",    // ★ 9/17：改问人站（数组写法换成 pathMap，语义不变）

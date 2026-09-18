@@ -9,6 +9,7 @@
 import { str } from "./registry";
 import type { ToolContext, ToolResult, ToolSpec } from "./registry";
 import { isObserved, markObserved } from "./observedFiles";
+import { forgetRead } from "./readDedup";
 
 export const writeFileTool: ToolSpec = {
     name: "writeFile",
@@ -46,6 +47,10 @@ export const writeFileTool: ToolSpec = {
         const r = ctx.workspace.writeAtomic(target, String(raw), { owner: ctx.owner, taskId: ctx.taskId });
         // 写 = 观察：模型写过的内容它自己知道，后续覆盖不再要求重读
         markObserved(ctx.taskId, ctx.owner, r.path);
+        // ★ 9/18：写成功后必须让读去重失效——下次读要看到**落盘后的真实内容**
+        //   （原子替换后可能与模型发来的不同），不能拿旧的 readFile 结果顶替。
+        forgetRead(ctx.taskId, ctx.owner, r.path);
+        forgetRead(ctx.taskId, ctx.owner, target);
         return { ok: true, output: `已写入 ${r.path}（${r.bytes} 字节）`, meta: { ...r } };
     },
 };

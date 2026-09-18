@@ -26,6 +26,11 @@ export interface GuardrailRule {
     when?: (args: ToolArgs) => boolean;
     /** 拒绝理由（回灌模型 + 记账，要能让人一眼看懂"违反了哪条、为什么"） */
     reason: string;
+    /**
+     * 可选：补一句"具体踩在哪"。命中时拼进 reason 尾部。
+     * 9/18 加——专门治"deny 了但没人知道为什么 deny"的验尸困难。
+     */
+    explain?: (args: ToolArgs) => string | null;
 }
 
 /** 单个 writeFile 一次写入的正文上限（字节）——防"一条命令铺一个大文件" */
@@ -37,31 +42,61 @@ export const MAX_WRITES_PER_BATCH = 6;
 const DANGEROUS_SHELL_PATTERNS: readonly { re: RegExp; why: string }[] = [
     { re: /\brm\s+-[a-z]*r[a-z]*f|\brm\s+-[a-z]*f[a-z]*r/i, why: "递归强制删除（rm -rf）" },
     { re: /\bdel\s+\/[a-z]*s[^\n]*\/[a-z]*q|\bdel\s+\/[a-z]*q[^\n]*\/[a-z]*s/i, why: "递归静默删除（del /s /q）" },
-    { re: /\b(format|mkfs|diskpart)\b/i, why: "格式化/分区命令" },
+    // ★ 9/18 修误伤（实测出来的，不是推测）：
+    //   原写法是一条 `\b(format|mkfs|diskpart)\b`，而 `\b` 在 "Format-Table" 的 t 与 - 之间**是成立的**
+    //   （词字符 → 非词字符），于是 PowerShell 的 Format-Table / Format-List、乃至 `docker ps --format`
+    //   全被判成"格式化/分区命令"。实测判据：`/\bformat\b/i.test('Get-ChildItem | Format-Table')` === true。
+    //   后果（9/18 s1 那轮，19 分钟 / 88 次工具调用）：guardrail_denied 连开 9 枪，
+    //   agent 只能换写法重试 → 又中 → 再换，后半程预算几乎全耗在这个死循环上。
+    //   现在三头都钉住，只认"命令段开头 + 带目标的 format"：
+    //     · 前缀是命令边界（行首 / 空白 / & | ; ( " ' `）——`docker ps --format` 这种**选项**不命中；
+    //     · 后缀不紧跟 - 或字母——`Format-Table` / `Format-List` 这种 cmdlet 不命中；
+    //     · **必须带目标**：盘符（`format C:`）、斜杠选项（`format /q`）或光杆（`format`，交互式一样危险）
+    //       ——`curl -w format=%{http_code}` 这种把 format 当变量名/键名的写法不命中。
+    //   实测过的误伤样本（这三条都必须放行）：
+    //     Get-ChildItem | Format-Table -AutoSize ／ docker ps --format {{.Names}} ／ curl -w format=%{http_code}
+    { re: /(^|[\s&|;("'`])format(\.com|\.exe)?\s*([a-z]:|\/|$)/i, why: "格式化命令（format）" },
+    { re: /\bmkfs(\.[a-z0-9]+)?\b/i, why: "格式化/分区命令（mkfs）" },
+    { re: /\bdiskpart\b/i, why: "磁盘分区工具（diskpart）" },
     { re: /\b(shutdown|reboot)\b/i, why: "关机/重启命令" },
     { re: /:\s*\(\s*\)\s*\{[^}]*\}\s*;\s*:/, why: "fork 炸弹" },
 ];
 
-const hitsDangerous = (text: string): boolean => DANGEROUS_SHELL_PATTERNS.some((p) => p.re.test(text));
+/**
+ * 命中即返回那一条的人话理由（`why`），没命中返回 null。
+ *
+ *   为什么返回"理由"而不是布尔：台账与回灌都要写清"到底踩了哪条"。
+ *   9/18 验尸那次，`guardrail_denied` 只记了 tool + rule + 一句通用 reason，
+ *   于是只能拿时间戳去猜是哪个命令被判了——这次连开 9 枪到底踩的是什么，全靠反推正则。
+ */
+export function matchDangerous(text: string): string | null {
+    for (const p of DANGEROUS_SHELL_PATTERNS) if (p.re.test(text)) return p.why;
+    return null;
+}
+
+/** 把工具入参拼成一段可判定的文本——runCommand 的 args 也要一起看，否则 "rm" + ["-rf","/"] 会漏 */
+export function dangerousProbeText(args: ToolArgs): string {
+    const head = String(args["command"] ?? "");
+    const rest = Array.isArray(args["args"]) ? (args["args"] as unknown[]).map(String).join(" ") : "";
+    return rest ? `${head} ${rest}` : head;
+}
+
+const hitsDangerous = (text: string): boolean => matchDangerous(text) !== null;
 
 export const DEFAULT_GUARDRAILS: readonly GuardrailRule[] = [
     {
         id: "dangerous-shell",
         tool: "shell",
-        when: (args) => hitsDangerous(String(args["command"] ?? "")),
+        when: (args) => hitsDangerous(dangerousProbeText(args)),
+        explain: (args) => matchDangerous(dangerousProbeText(args)),
         reason: "禁止执行危险/破坏性 shell 命令（递归删除、格式化、关机、fork 炸弹）。"
             + "若确需清理，只针对项目内明确路径、用可审计的单条命令。",
     },
     {
         id: "dangerous-runCommand",
         tool: "runCommand",
-        when: (args) => {
-            const all = [
-                String(args["command"] ?? ""),
-                ...(Array.isArray(args["args"]) ? (args["args"] as unknown[]).map(String) : []),
-            ].join(" ");
-            return hitsDangerous(all);
-        },
+        when: (args) => hitsDangerous(dangerousProbeText(args)),
+        explain: (args) => matchDangerous(dangerousProbeText(args)),
         reason: "禁止执行危险/破坏性命令（递归删除、格式化、关机等）。",
     },
     {
@@ -90,7 +125,10 @@ export function evaluateGuardrails(
     for (const r of rules) {
         if (r.tool !== "*" && r.tool !== tool) continue;
         if (r.when && !r.when(args)) continue;
-        return { id: r.id, reason: r.reason };
+        // ★ 9/18：把"具体踩了哪条"拼进 reason（有 explain 才有）。回灌给模型的也是这一句，
+        //   所以模型能看见"是 format 被判了"，而不是笼统一句"危险命令"→ 它才不会原地重试。
+        const why = r.explain?.(args) ?? null;
+        return { id: r.id, reason: why ? `${r.reason}（命中：${why}）` : r.reason };
     }
     return null;
 }

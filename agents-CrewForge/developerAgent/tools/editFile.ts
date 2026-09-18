@@ -6,6 +6,7 @@
 //   多数情况还要再 readFile 一遍才能定位（又一轮往返）。给行号 = 少一轮。
 import { str } from "./registry";
 import type { ToolContext, ToolResult, ToolSpec } from "./registry";
+import { forgetRead } from "./readDedup";
 
 /** find 在 content 中出现的行号列表（1 起，逐个命中都报） */
 export function hitLines(content: string, find: string): number[] {
@@ -53,6 +54,9 @@ export const editFileTool: ToolSpec = {
             : `命中 ${hits} 处，替换 ${applied} 处`;
 
         const r = ctx.workspace.writeAtomic(target, after, { owner: ctx.owner, taskId: ctx.taskId });
+        // ★ 9/18：改了内容 → 读去重必须失效（同 writeFile 的理由）
+        forgetRead(ctx.taskId, ctx.owner, r.path);
+        forgetRead(ctx.taskId, ctx.owner, target);
         return {
             ok: true,
             output: `已修改 ${r.path}（${detail}）`,
