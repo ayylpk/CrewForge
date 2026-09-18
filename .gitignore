@@ -35,9 +35,13 @@ DeskTop-CrewForge/
 agents-CrewForge/runs/
 
 # ===== 引擎编译产物/测试临时文件 =====
-agents-CrewForge/dist-node/
+# 9/17 由 `agents-CrewForge/dist-node/` 改成通配：写死单条路径时，别的目录的同类产物
+# 就漏在规则外（_legacy-agents/dist-node 只能靠它自己子项目的 .gitignore 兜）。
+**/dist-node/
 *.pid
 smoke-input*
+# 前端无测试框架：scripts/check-json-merge.cjs 靠 tsc 现编 utils/json.ts 到这里的临时产物
+.tmp-jsoncheck/
 # 阶段2起 RUNS_ROOT 统一指仓库根 runs/（产物树 pN/_archive/logs 不入库）
 runs/
 # Developer 本机 soft 冒烟的隔离工作区（生成的临时项目 / Ledger / 运行报告都不入库）

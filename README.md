@@ -83,12 +83,22 @@ cd fronted-CrewForge && npm install && npm run dev    # :5173
 **运行成本**（T3 双档；粗估，首两轮 live 实测校准）：demo 档（架构师/测试/前端 pro）≈ ¥8~20/轮；回归档（全 flash）≈ ¥2~4/轮。切换零改码：设置页填「Pro 档模型」+ 角色档位 JSON，30s 热生效；都不填 = 全局名单档。
 
 **已知边界**（诚实清单，熔断降级后在此记录）：
-- 进度字段恒 0（sys_task 已可用且状态真实，统计口径在阶段 4 随冒烟一并做）
+- ~~进度字段恒 0~~ → **9/17 已修**：`ProjectServiceImpl` 按 `sys_task` 的 done 占比分组聚合，`ProjectVO.progress` 已是真实百分比（前端进度条此前 `v-if="progress > 0"` 恒不渲染，现已生效）
 - 测试工位已有机械三查（编译/色值/渲染真开页面）+ 六项清单纸审，但**"全树能 build"仍无物理证据**——阶段 4 冒烟补（sys_settings.smoke_build）
 - 渲染审依赖本机 Edge + 生成物 `bun install` 成功；起不来自动 skip 带理由进测试报告（不静默、不拦路）
 - `DeskTop-CrewForge` 桌面端为前端暴力拷贝，已封存于仓库外（`F:/code/_archive/`，真做时壳引用 web dist）
 
 ## 说明
 
-- `_legacy-agents/`：第一代引擎归档，仅留档对照，不参与构建。
+- **第一代引擎归档（`_legacy-agents/`）已于 2026-09-17 移出工作区。** 它从来不参与构建/测试/类型检查
+  （零 import），留着只是在树里多一个目录；26 个跟踪文件全部留在 git 里，随时可取回：
+  ```
+  git show 4264873:_legacy-agents/manager.ts          # 看单个文件
+  git checkout 4264873 -- _legacy-agents              # 整体恢复到工作区
+  ```
+  ⚠️ 同目录下的 `.env` **从未进过 git**（被 `**/.env` 拦住），已随目录一起删除且不可恢复 ——
+  里面有一把 `TAVILY_API_KEY`（DeepSeek 那把与 `agents-CrewForge/.env` 是同一把，副本而已）。
+  当前引擎代码没有任何一处读该变量，需要时去 Tavily 后台重签即可。
+  引擎源码里"移植自 `_legacy-agents/xxx.ts`"那几处注释是**历史出处说明**（描述代码从哪搬来），
+  文件删掉后这些说法依然成立，只是要查原文得走上面的 `git show`。
 - 进程模型：**按阶段起进程**——引擎进程跑完一个阶段即退出，Java 对账（`sys_project.status=executing` 且无活进程 → 重拉下一阶段），崩溃恢复由 `sys_task` 状态机天然给出。
