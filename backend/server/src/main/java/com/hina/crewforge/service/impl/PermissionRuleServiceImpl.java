@@ -1,6 +1,7 @@
 package com.hina.crewforge.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.hina.crewforge.common.exception.BaseException;
 import com.hina.crewforge.mapper.ConfirmMapper;
 import com.hina.crewforge.mapper.PermissionRuleMapper;
 import com.hina.crewforge.pojo.entity.Confirm;
@@ -80,6 +81,25 @@ public class PermissionRuleServiceImpl implements PermissionRuleService {
         if (rule.getSource() == null) rule.setSource(PermissionRule.SOURCE_USER);
         if (rule.getEnabled() == null) rule.setEnabled(1);
 
+        // ---------- 写入校验（9/18）：把"宽规则盖住窄规则"挡在**入库之前** ----------
+        // 为什么在这里挡、而不是事后检测提示：
+        //   事后检测只能告诉你"这条永远不会生效"，问题照样存在、还得你自己去删；
+        //   写入时挡掉则遮蔽**根本不会产生**。防住永远比解释已经坏了的东西便宜。
+        if (PermissionRule.BEHAVIOR_ALLOW.equals(rule.getBehavior()) && rule.getEnabled() == 1) {
+            if (isDangerousAllow(rule.getRuleContent())) {
+                throw new BaseException("这条 allow 太宽（`" + rule.getRuleContent()
+                        + "`）：它的前缀是解释器 / shell / 包运行器 / 下载器，等价于放开任意代码执行。"
+                        + "请收窄到具体命令，例如 `python manage.py:*` 而不是 `python:*`。");
+            }
+            PermissionRule shadowed = findShadowedDeny(rule);
+            if (shadowed != null) {
+                throw new BaseException("这条 allow 会盖住既有的 deny 规则 `" + shadowed.getRuleContent()
+                        + "`（" + shadowed.getSource() + " 层）：判定按来源优先级取首个命中，"
+                        + "而这条 allow 的优先级不低于它、模式又能匹配它 —— 那条 deny 将永久失效。"
+                        + "请把 allow 收窄到具体命令（例如 `git status:*` 而不是 `git:*`）。");
+            }
+        }
+
         PermissionRule exist = ruleMapper.selectOne(new LambdaQueryWrapper<PermissionRule>()
                 .eq(PermissionRule::getProjectId, rule.getProjectId())
                 .eq(PermissionRule::getToolName, rule.getToolName())
@@ -100,6 +120,37 @@ public class PermissionRuleServiceImpl implements PermissionRuleService {
         log.info("[perm] 规则已写入 #{} {} ({}) → {} @{}", rule.getId(), rule.getToolName(),
                 rule.getRuleContent(), rule.getBehavior(), rule.getSource());
         return rule;
+    }
+
+    /**
+     * 这条 allow 会不会让某条既有 deny 永久失效？
+     *
+     * 判据两条同时成立才算：
+     *   ① **优先级不低于**：allow 的来源优先级 &lt;= deny 的（数越小越优先）。
+     *      若 allow 优先级更低，它排在 deny 后面，永远轮不到它命中 —— 不构成遮蔽。
+     *      等于的情况也拦：同层内按 id 先后，顺序是"碰运气"，靠运气生效的 deny 不算 deny。
+     *   ② **模式能匹配**：用判定用的同一套匹配函数，拿 allow 的模式去匹配 deny 的**模式串**。
+     *      `git:*` 能匹配 `git push:*` → 那条 deny 想拦的命令，allow 会先命中并放行。
+     *
+     * 为什么用"匹配模式串"当判据：判定跑的是一条条**具体命令**，而规则描述的是命令集合。
+     * 要判断"集合 A 是否吃掉了集合 B"，在只支持前缀/通配的这套语法里，
+     * "A 的模式能否匹配 B 的模式串"就是可判定且不误报的近似 —— 它只会漏（保守），不会错杀。
+     */
+    private PermissionRule findShadowedDeny(PermissionRule allow) {
+        List<PermissionRule> denies = ruleMapper.selectList(new LambdaQueryWrapper<PermissionRule>()
+                .in(PermissionRule::getProjectId, globalAnd(allow.getProjectId()))
+                .eq(PermissionRule::getEnabled, 1)
+                .eq(PermissionRule::getToolName, allow.getToolName())
+                .eq(PermissionRule::getBehavior, PermissionRule.BEHAVIOR_DENY));
+        for (PermissionRule d : denies) {
+            // 整工具级 deny（无内容）不参与：那种遮蔽关系是"整工具禁掉"，属于另一种事，
+            // 而且它优先级一高就该把整个工具禁掉，不该被"有条更宽的 allow"解释成遮蔽。
+            if (d.getRuleContent() == null || d.getRuleContent().isBlank()) continue;
+            if (d.getRuleContent().equals(allow.getRuleContent())) continue;   // 同一条（更新场景）
+            if (rank(allow.getSource()) > rank(d.getSource())) continue;       // ① 优先级更低 → 遮不住
+            if (matches(allow.getRuleContent(), d.getRuleContent().trim())) return d;  // ② 模式覆盖
+        }
+        return null;
     }
 
     @Override
