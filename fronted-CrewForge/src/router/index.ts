@@ -19,8 +19,10 @@ const router = createRouter({
   routes: [
     { path: '/login', name: 'login', component: LoginView },
     { path: '/projects', name: 'projects', component: ProjectsView },
-    // 新建项目页（配置区 + AI 对话区）
-    { path: '/projects/new', name: 'project-new', component: () => import('../views/CreateProjectView.vue') },
+    // 新建项目不再是独立路由：改为台账页里的弹窗（CreateProjectSheet），
+    // 因为原 /projects/new 与下面这条需求对话页的配置区高度重复。见该组件顶部注释。
+    // 保留一条重定向：否则旧书签会掉进 /projects/:id 里当成 id="new" 的项目去查。
+    { path: '/projects/new', redirect: '/projects' },
     // 需求对话（复用项目经理工作台：确认具体功能，带 :id 即澄清模式）
     {
       path: '/projects/:id/pm',

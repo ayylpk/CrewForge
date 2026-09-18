@@ -40,6 +40,7 @@ import { fetchProjectById, updateProject } from '../api/project'
 import { fetchPendingConfirms, parseOptions, type ConfirmQuestion } from '../api/confirm'
 import { answerConfirm as answerConfirmApi } from '../api/confirm'
 import { usePolling } from '../composables/usePolling'
+import { pmAnswer, type PmSnapshot } from '../utils/pmChat'
 import { toast } from '../utils/toast'
 
 const router = useRouter()
@@ -86,10 +87,11 @@ const confirmBusy = ref(false)
 
 async function pollConfirms() {
   const id = routeProjectId.value
-  if (id == null) return // 没有有效项目号：直接跳过，别打成 ?projectId=NaN
+  if (id == null || projectGone.value) return // 无效 id / 项目已删：都别发
   try {
     pendingConfirms.value = await fetchPendingConfirms(id)
-  } catch {
+  } catch (e) {
+    if (isProjectGone(e)) markProjectGone()
     /* 后端未就绪等：本轮不弹卡，下轮 10s 再试（卡是增强不是控制，永不拦看板） */
   }
 }
@@ -211,11 +213,12 @@ const lastStatus = new Map<number, TaskStatus>()
 /** 10s 轮询——看板唯一数据源=sys_task（施工卡 1-4：mock 已撤，一切以库里为准） */
 async function pollTasks() {
   const projectId = Number(route.params.id)
-  if (!projectId) return
+  if (!projectId || projectGone.value) return
   let list: ApiTaskItem[] | null = null
   try {
     list = await fetchTasks(projectId)
-  } catch {
+  } catch (e) {
+    if (isProjectGone(e)) markProjectGone() // 项目被删 → 停轮询，别每 10s 撞一次
     return // 后端未就绪时静默，保留已有数据
   }
   if (!list) return
@@ -406,28 +409,63 @@ interface ChatMsg {
 const chatMessages = ref<ChatMsg[]>([
   {
     role: 'assistant',
-    content: '我是项目经理 Hina。执行过程中有任何问题（进度、代码、下一步）都可以问我。',
+    // 开场白也得说实话：这框能答什么、答不了什么先讲清楚。
+    // 否则用户拿"这段代码为什么这么写"来问，得到一句编的话比得到"答不了"更糟。
+    content:
+      '我是项目经理 Hina。这个框读的是执行状态数据（任务、失败原因、确认门、产物树、执行日志），可以问我：进度、卡在哪、要我确认什么、产出了哪些文件、下一步、怎么停。\n\n「这段代码为什么这么写」这类要读代码本身的问题我答不了 —— 请到右下「执行日志」和任务详情里看原话凭据。',
   },
 ])
 const chatDraft = ref('')
 const chatThinking = ref(false)
 const chatUnread = ref(false)
 
+/* ===== 对话的答案从哪来 =====
+   9/18 接上：答案一律**来自页面正在轮询的真数据**，不再回预置文案。
+   数据源（全是本页已有的、每 10s 刷新的）：
+     tasks          sys_task 全量（状态/失败原因/返工次数）
+     currentPhase   收口进度算出来的阶段
+     pendingConfirms sys_confirm 里挂着的待答题（确认门）
+     fileTree       sys_project_file 的产物树
+     logs           引擎日志差分出来的真事件
+   为什么不做成"什么都能聊"：那需要一条 LLM 通道（后端新端点 + 引擎单轮调用），
+   现在没有。所以**读代码问为什么**这类问题它老实说答不了，并把人指到真凭据
+   （执行日志 / 任务详情弹窗），而不是编一段听起来合理的话。
+   编话比说"我不知道"更坏 —— 那正是这个框原来的毛病。 */
+
+/** 组装给纯函数回答器的快照（全部来自本页正在轮询的真数据） */
+function pmSnapshot(): PmSnapshot {
+  const dirs: string[] = []
+  for (const n of fileTree.value) {
+    if (n.type === 'dir' && !dirs.includes(n.name)) dirs.push(n.name)
+  }
+  return {
+    tasks: tasks.value.map((t) => ({
+      id: t.id,
+      taskIdExt: t.taskIdExt,
+      title: t.title,
+      status: t.status,
+      retryCount: t.retryCount,
+      layer: t.layer,
+      errorMsg: t.errorMsg,
+    })),
+    currentPhase: currentPhase.value,
+    overallProgress: overallProgress.value,
+    pending: pendingConfirms.value.map((c) => ({
+      question: c.question,
+      expireAt: c.expireAt,
+      countdown: confirmCountdown(c.expireAt),
+    })),
+    fileCount: countFiles(fileTree.value),
+    topDirs: dirs.slice(0, 8),
+  }
+}
+
+/* 关键词 mock 已删（9/18）：回答逻辑搬到 utils/pmChat.ts 的 pmAnswer —— 纯函数，
+   能拿真实 sys_task 行验它说的每句话是不是真的（前端没有测试框架，
+   这就是把判定抽出去的理由，同 utils/json.ts 里那几个 build*）。
+   本组件只负责递快照。 */
 function chatReply(text: string): string {
-  if (/进度|到哪|阶段|多久/.test(text)) {
-    return `当前处于${currentPhase.value || '初始阶段'}，整体进度 ${overallProgress.value}%。${taskCount('done')}/${tasks.value.length} 个任务已完成。`
-  }
-  if (/这个文件|为什么.*写|代码/.test(text)) {
-    return '后端按架构师输出的 JSON spec 生成标准 Spring Boot 分层：Controller（接口层）→ Service（业务层）→ Mapper（数据层），前端对应 views + api 封装。'
-  }
-  if (/暂停|停|继续|恢复/.test(text)) {
-    return '真执行没有暂停按钮——引擎按阶段自动推进；要中止请用顶栏返回后在项目详情停止运行（阶段 2 接入）。'
-  }
-  if (/下一步|接下来|后面/.test(text)) {
-    const next = currentPhase.value
-    return next ? `当前阶段完成后，会进入：${next} 之后的集成测试与部署交付。` : '即将进入执行阶段。'
-  }
-  return '收到。执行在正常推进中，有具体问题（进度、代码、调整）随时问我。'
+  return pmAnswer(pmSnapshot(), text)
 }
 
 function sendChat() {
@@ -464,7 +502,24 @@ function pushLog(e: { time: string; agentId: number; agent: string; text: string
   })
 }
 
-const { start: startPolling } = usePolling(() => {
+/* 项目没了（被删）→ 停轮询（9/18）
+   ------------------------------------------------------------
+   这页的轮询是 10 秒一档，项目被删后每轮都会撞出「项目不存在: N」
+   （ProjectGuard.requireOwned 抛的），连起来就是"错误提示一直弹、永远不停"。
+   toast 那层只是把它变稀（见 utils/toast.ts 的抑制窗），正解是**别再问**。
+   判定靠文案：ProjectGuard 的措辞是 '项目不存在: ' + id，来源唯一且稳定。 */
+const projectGone = ref(false)
+function isProjectGone(e: unknown): boolean {
+  return e instanceof Error && e.message.includes('项目不存在')
+}
+function markProjectGone() {
+  if (projectGone.value) return
+  projectGone.value = true
+  stopPolling()
+  console.warn('[exec] 项目已不存在，停止轮询（这不是网络问题）')
+}
+
+const { start: startPolling, stop: stopPolling } = usePolling(() => {
   pollFiles()
   pollTasks()
   pollConfirms()
@@ -529,7 +584,7 @@ function restoreOpenPaths(nodes: FileNode[], openPaths: Set<string>) {
 /** 轮询：刷新文件树 + 当前 Tab 内容（用户修改的不覆盖） */
 async function pollFiles() {
   const projectId = Number(route.params.id)
-  if (!projectId) return
+  if (!projectId || projectGone.value) return
   try {
     // 保存展开 → 重建树 → 恢复展开（避免目录折叠）
     const openPaths = saveOpenPaths(fileTree.value)
@@ -550,8 +605,9 @@ async function pollFiles() {
         if (tab) tab.content = vo.fileContent
       }
     }
-  } catch {
-    // 静默失败，下次轮询继续
+  } catch (e) {
+    if (isProjectGone(e)) markProjectGone()
+    // 其余静默失败，下次轮询继续
   }
 }
 </script>
@@ -1187,6 +1243,11 @@ async function pollFiles() {
   border-radius: 2px 10px 10px 10px;
   background: var(--paper-deep);
   border: 1px solid var(--line);
+  /* 9/18 用户要求：项目经理气泡的字改成白色。
+     原来靠继承 body 的 var(--ink) —— 在 .vsc-dark 作用域里它被重映射成
+     var(--vsc-fg)=#d4d4d4（VS Code 默认前景），落在这只 #2d2d2d 的深灰泡里是"浅灰"，
+     不是白。显式给 #fff：对比度 9.28:1 → 13.76:1，AAA 富余。 */
+  color: #ffffff;
   font-size: 13px;
   line-height: 1.65;
   white-space: pre-wrap;

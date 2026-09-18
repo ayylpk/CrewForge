@@ -15,6 +15,12 @@ export interface RuntimeSettings {
   roleModels?: string | null
   modelUrl?: string | null
   apiKey?: string | null   // 永远掩码（****末4位 / null）
+  /**
+   * 显式清除已保存的 key（9/18 加）。为什么需要它：`apiKey` 的语义是"空 = 保持"，
+   * 所以光把输入框清空**删不掉**已存的 key —— 想删必须带这个开关。
+   * 优先级（后端）：填了真值 → 覆盖；否则 clearApiKey=true → 清空；否则保持。
+   */
+  clearApiKey?: boolean
   modelKind?: string       // 'deepseek' | 'openai'
   javaBaseUrl?: string | null
   confirmTimeoutMin?: number

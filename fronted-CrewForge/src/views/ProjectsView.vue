@@ -23,6 +23,7 @@ import {
   IconWritingSign,
 } from '@tabler/icons-vue'
 import AppModal from '../components/ui/AppModal.vue'
+import CreateProjectSheet from '../components/ui/CreateProjectSheet.vue'
 import StampSeal from '../components/ui/StampSeal.vue'
 import TopBar from '../components/ui/TopBar.vue'
 import { fetchProjects, deleteProject } from '../api/project'
@@ -54,6 +55,16 @@ async function load() {
   }
 }
 
+/* ===== 新建项目（9/18 起改弹窗，不再是独立页面） =====
+   原 `/projects/new` 是一整页，但它的四个板块（名称/描述/确认模式/参考文件）
+   和「需求对话」页完全重复。创建只是登记一条记录 → 退化成只收名称+描述的弹窗。 */
+const showCreate = ref(false)
+
+function onProjectCreated() {
+  showCreate.value = false
+  load() // 回列表看到新记录（POST /api/project 不回 id，没法直接跳需求对话）
+}
+
 /* ===== API 设置（阶段 2 起接服务端 sys_settings；Key 存服务器，引擎直读） ===== */
 
 const showApiSettings = ref(false)
@@ -61,6 +72,18 @@ const cfg = ref<RuntimeSettings>({ modelKind: 'deepseek' })
 const maskedKey = ref('未配置') // 服务端当前 key 的掩码（引擎有 .env 兜底，空也能跑）
 const saving = ref(false)
 const testing = ref(false)
+/**
+ * 9/18：清除已保存 key 的**待提交标记**。
+ *   为什么需要单独一条通道：apiKey 的语义是"空 = 保持原值"，所以光清空输入框删不掉已存的 key
+ *   （用户实测反馈"填入了就不让修改"）。点「清除已保存的 Key」→ 置此标记 → 保存时带 clearApiKey。
+ */
+const clearKeyRequested = ref(false)
+
+function requestClearKey() {
+  clearKeyRequested.value = true
+  cfg.value.apiKey = ''   // 清除优先于"填新值"：两个动作别打架
+  toast.info('保存后生效：已保存的 Key 会被清空')
+}
 
 /** 顶栏小灯：服务端配了 key 就算已配置 */
 const llmConfigured = computed(() => maskedKey.value !== '未配置' && maskedKey.value !== '')
@@ -78,6 +101,7 @@ async function refreshSettingsDot() {
 /** 打开弹窗时才拉全量配置（掩码回显 + 表单初值） */
 async function openApiSettings() {
   showApiSettings.value = true
+  clearKeyRequested.value = false   // 每次打开都从"不改 key"的干净状态开始
   try {
     const s = await fetchSettings()
     maskedKey.value = s.apiKey || '未配置'
@@ -106,6 +130,8 @@ async function saveApiSettings() {
     await saveSettings({
       ...cfg.value,
       apiKey: cfg.value.apiKey?.trim() || undefined, // 空=不改（后端掩码语义）
+      // 9/18：显式清除通道（空值语义删不掉已存的 key，必须带这个开关）
+      ...(clearKeyRequested.value ? { clearApiKey: true } : {}),
     })
     // 9/18 删掉这里原来的 localStorage 镜像（cf_providers / cf_default_model）：
     // 它唯一的读者是已删除的 AgentFormView（经 loadProviders/globalDefaultModel），
@@ -114,6 +140,7 @@ async function saveApiSettings() {
     toast.success('已保存——引擎最多 30 秒热加载生效')
     maskedKey.value = (await fetchSettings().catch(() => ({} as RuntimeSettings))).apiKey || '未配置'
     cfg.value.apiKey = ''
+    clearKeyRequested.value = false
     showApiSettings.value = false
   } finally {
     saving.value = false
@@ -142,10 +169,15 @@ function projectIcon(p: Project) {
   return ICON_RULES.find(([re]) => re.test(p.name))?.[1] ?? IconDeviceLaptop
 }
 
-/* ===== 筛选（标签带计数：目录抽屉的语言） ===== */
+/* ===== 筛选（标签带计数 + **状态色点**：目录抽屉的语言）
+   9/18 用户要求：分栏旁边要能看出"这个颜色对应哪个状态"。
+   色点取 projectStatusMeta(status).tone，与列表行里的状态章**同一份口径**（constants/status.ts），
+   所以点是什么色、行里的章就是什么色——不用记两套。
+   「全部」不是状态，故意不给点（否则会被误读成某个状态）。 */
 const FILTERS: { label: string; value: string; status?: ProjectStatus }[] = [
   { label: '全部', value: 'all' },
   { label: '执行中', value: 'executing', status: 'executing' },
+  { label: '规划中', value: 'planning', status: 'planning' }, // 9/18 补：库里 8 个项目卡在这个状态，原先筛不到
   { label: '已完成', value: 'done', status: 'done' },
   { label: '澄清中', value: 'clarifying', status: 'clarifying' },
   { label: '草稿', value: 'draft', status: 'draft' },
@@ -201,7 +233,7 @@ async function removeProject(p: Project) {
 }
 
 function createNew() {
-  router.push({ name: 'project-new' })
+  showCreate.value = true
 }
 
 /* 9/18 删掉 goAgentRepo() + 顶栏那颗「Agent 仓库」按钮：
@@ -296,6 +328,13 @@ const userInitial = computed(() => (auth.userName || 'K').slice(0, 1).toUpperCas
             :class="{ on: activeFilter === f.value }"
             @click="activeFilter = f.value"
           >
+            <!-- 状态色点：与行里的状态章同色（同取 constants/status.ts 的 tone） -->
+            <span
+              v-if="f.status"
+              class="tab-dot"
+              :class="`stamp-${projectStatusMeta(f.status).tone}`"
+              aria-hidden="true"
+            ></span>
             {{ f.label }}<span class="tab-n mono">{{ countOf(f) }}</span>
           </button>
         </nav>
@@ -377,6 +416,9 @@ const userInitial = computed(() => (auth.userName || 'K').slice(0, 1).toUpperCas
       </div>
     </main>
 
+    <!-- ===== 新建项目弹窗（9/18：取代原 /projects/new 整页） ===== -->
+    <CreateProjectSheet v-if="showCreate" @close="showCreate = false" @created="onProjectCreated" />
+
     <!-- ===== API 设置弹窗（逻辑逐字保留，仅换皮） ===== -->
     <AppModal v-if="showApiSettings" title="API 设置" sheet="SET-01" width="640px" @close="showApiSettings = false">
       <p class="api-tip dim">
@@ -411,8 +453,26 @@ const userInitial = computed(() => (auth.userName || 'K').slice(0, 1).toUpperCas
         <label class="prow">
           <span class="prow-k">API Key</span>
           <input v-model="cfg.apiKey" class="input" type="password"
-                 :placeholder="maskedKey && maskedKey !== '未配置' ? '留空 = 保持不变（' + maskedKey + '）' : 'sk-...'" />
+                 placeholder="粘贴新的 sk-... 覆盖；留空不动" />
         </label>
+        <!-- 9/18：把"当前值"从 placeholder 里拿出来单独显示 + 给一条清除通道。
+             原先把 "留空 = 保持不变（****94d40）" 塞在 placeholder 里，看起来像输入框已经有值、
+             又没法删（实测反馈"填入了就不让修改"）。 -->
+        <div class="prow prow-current">
+          <span class="prow-k">当前</span>
+          <span class="prow-cur">
+            <span class="mono" :class="{ faint: !llmConfigured }">{{ maskedKey }}</span>
+            <button
+              v-if="llmConfigured"
+              type="button"
+              class="btn btn-sm btn-ghost"
+              :disabled="clearKeyRequested"
+              @click="requestClearKey()"
+            >
+              {{ clearKeyRequested ? '保存后清空' : '清除已保存的 Key' }}
+            </button>
+          </span>
+        </div>
         <!-- 模型名纯手动填写：不预设不校验，填什么原样透传给端点，对错由端点反馈 -->
         <label class="prow">
           <span class="prow-k">模型名</span>
@@ -570,6 +630,18 @@ const userInitial = computed(() => (auth.userName || 'K').slice(0, 1).toUpperCas
 .tab-n {
   font-size: 11px;
   opacity: 0.75;
+}
+/* 状态色点：颜色由 .stamp-{tone} 给（与行里的状态章同一份 token），这里只做形状。
+   选中态 .tab.on 是青底白字，色点会跟着变成白色 —— 加一圈浅描边保证还看得见。 */
+.tab-dot {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+  background: currentColor;
+}
+.tab.on .tab-dot {
+  box-shadow: 0 0 0 1.5px rgba(243, 246, 248, 0.55);
 }
 .quest {
   display: flex;
@@ -818,6 +890,22 @@ const userInitial = computed(() => (auth.userName || 'K').slice(0, 1).toUpperCas
 .prow-note {
   grid-column: 2;
   font-size: 11px;
+}
+/* 9/18：API Key 的"当前值 + 清除"行（值从 placeholder 里拿出来单独显示，并给一条清除通道） */
+.prow-current {
+  align-items: start;
+}
+.prow-cur {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+  font-size: 13px;
+}
+.prow-cur .btn {
+  padding: 2px 8px;
+  font-size: 12px;
 }
 .check {
   display: flex;

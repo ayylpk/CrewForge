@@ -7,7 +7,7 @@
    「确认方案」一次性 PUT：techStack/devPlan/dirTree + status=planning。
    devPlan 双形状容错口径与 ProjectDetailView 完全一致，不许漂移。
    ============================================================ */
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   IconCheck,
@@ -20,8 +20,9 @@ import {
 import AppModal from '../components/ui/AppModal.vue'
 import SheetTree from '../components/SheetTree.vue'
 import TopBar from '../components/ui/TopBar.vue'
+import { answerConfirm, fetchConfirmHistory, fetchPendingConfirms, parseOptions, type ConfirmQuestion } from '../api/confirm'
 import { fetchProjectById, updateProject } from '../api/project'
-import { ENVELOPE_KEYS, buildDevPlanJson, buildTechStackJson, parseEnvelopeArray, toDisplayList } from '../utils/json'
+import { ENVELOPE_KEYS, buildDevPlanJson, buildTechStackJson, parseArchPlan, parseEnvelopeArray, toStringList } from '../utils/json'
 import { cleanTree, restoreTree, type CleanNode, type TreeNode } from '../types/tree'
 
 const router = useRouter()
@@ -73,6 +74,21 @@ const devPlanOriginalPhases = ref<Record<string, unknown>[]>([])
 const devPlanEngineShape = ref(false)
 const techStackEnvelope = ref<Record<string, unknown> | null>(null)
 
+/* ===== 架构师方案（引擎 tech_stack 信封的结构化产物，只读） =====
+   为什么单开一块（9/18）：引擎写的这几块内容以前在页面上**完全看不见** ——
+     why          技术理由（整段话）
+     moduleTech   [{module, backend, frontend}]  分模块技术选型
+     tables       [{name, fields:[{name,type,remark,required}], purpose}]
+     techniques   {database:{type,why}, middleware:[{name,purpose}]}
+   它们在"技术选型"标签云里只会被 toDisplayList 兜底成 JSON.stringify 的一坨
+   （认不出 name/title/label/summary 就整体序列化）。
+   现网 10 个项目全是这个信封，等于架构师产出的方案一直在页面上是一堆乱码。
+   解析逻辑是 utils/json.ts 的纯函数 parseArchPlan（那边能用真实库数据跑测试，
+   这里只负责画）。只读展示：要改技术栈请在标签云里加减，
+   保存时 buildTechStackJson 会在底稿上保结构合并。 */
+const archPlan = computed(() => parseArchPlan(techStackEnvelope.value))
+const hasArchPlan = computed(() => archPlan.value.has)
+
 /** 把读回的条目归一成页面模型：PM 的 planItem 只有 features 没有 tasks，
  *  tasks 兜成 [] 同时防渲染 .length 崩（审计 F11 同型点） */
 function normalizePhases(rows: unknown[]): { name: string; progress: number; tasks: string[] }[] {
@@ -108,7 +124,12 @@ onMounted(async () => {
       rawStack && typeof rawStack === 'object' && !Array.isArray(rawStack)
         ? (rawStack as Record<string, unknown>)
         : null
-    techStack.value = toDisplayList(parseEnvelopeArray(p.techStack, ENVELOPE_KEYS.techStack))
+    // ⚠️ 9/18：标签云只吃**网页自己写的扁平清单**（technologies）。
+    //    原来用 ENVELOPE_KEYS.techStack（一路退到 moduleTech/tables），
+    //    那两个是对象数组，toDisplayList 认不出就 JSON.stringify —— 页面上把
+    //    {"module":"用户登录与退出","backend":"…","frontend":"…"} 当标签印出来。
+    //    引擎的结构化方案改由下面「架构师方案」面板渲染。
+    techStack.value = toStringList(parseEnvelopeArray(p.techStack, ENVELOPE_KEYS.techStackPageList))
 
     // ---- devPlan：同上，而且信封里的 phases 要留着做合并底稿 ----
     let rawPlan: unknown = null
@@ -134,10 +155,21 @@ onMounted(async () => {
     )
 
     dirTree.value = restoreTree(parseArr(p.dirTree) as CleanNode[])
-  } catch {
+  } catch (e) {
     projectName.value = '项目 #' + route.params.id
+    // 项目已经没了（在别处删掉）→ 不进对话轮询，否则每 4 秒撞一次「项目不存在」
+    if (isProjectGone(e)) {
+      markProjectGone()
+      return
+    }
   }
+  // 对话：先补历史（刷新后对话还在），再起 4s 轮询等新题（与需求对话页同频）
+  await loadArchHistory()
+  await pollArch()
+  if (!projectGone.value) pollTimer = setInterval(pollArch, 4000)
 })
+
+onUnmounted(stopPolling)
 
 /* ===== 技术选型（气泡式：AI 预设 + 增删） ===== */
 
@@ -316,50 +348,105 @@ interface ChatMessage {
   content: string
 }
 
-const archMessages = ref<ChatMessage[]>([
-  {
-    role: 'assistant',
-    content:
-      '你好，我是 AI 架构师。技术选型、开发阶段和项目目录都还是空的——你可以直接告诉我需求，或在左侧手动添加；之后点「确认方案」一次性提交。',
-  },
-])
+/* ============================================================
+   与架构师对谈 —— 真接引擎确认门（9/18）
+   ------------------------------------------------------------
+   架构师在出方案前会追问关键决策（architect.ts 的 consult 节点，LLM 生成），
+   问题经 HttpQuestioner 落 sys_confirm（node='architect'），本页轮询取来展示、
+   把人的回答 POST 回去 → 引擎取到答复继续同一张图。
+   跟需求对话页是同一条链，只是 node 过滤不同：
+     manager   = PM 澄清（需求对话页）
+     architect = 架构师澄清（本页）
+   为什么以前这里是假的：archReply() 是几个正则回预置文案（"为什么用 MySQL？"
+   会得到一段固定话术）。现在显示的每一句都是引擎里 LLM 真正问出来的。
+   ⚠️ 架构师澄清最多 3 问（引擎侧提示词约束 + runWithInteraction 轮次上限），
+      所以这框不是无限闲聊，是"他在开工前把关键决策问清楚"。
+   ============================================================ */
 
+const archMessages = ref<ChatMessage[]>([])
 const draft = ref('')
 const thinking = ref(false)
 const working = ref(false)
 const chatBody = ref<HTMLElement | null>(null)
 
-/** mock 架构师回复（技术方案咨询，五个分支逐字保留） */
-function archReply(text: string): string {
-  if (/为什么|理由|原因/.test(text)) {
-    return '选型基于需求规模和团队熟练度：Spring Boot 生态成熟、人才好招，Vue 3 组合式 API 适合快速迭代，MySQL + Redis 覆盖常规读写与缓存。如果换技术栈，直接在左侧技术选型里增删即可。'
-  }
-  if (/换|改成|不用|去掉|换掉/.test(text)) {
-    return '好的，调整技术选型会同步影响开发阶段和项目目录。直接在左侧气泡里增删技术，我会按最新选型评估影响。'
-  }
-  if (/阶段|计划|排期|多久/.test(text)) {
-    return `当前规划了 ${phases.value.length} 个阶段（${phases.value[0]?.name || ''} → 部署交付）。开发阶段可在左侧直接增删任务，确认方案时一并提交。`
-  }
-  if (/目录|结构|文件夹/.test(text)) {
-    return '项目目录是标准前后端分离结构：backend 用 Maven 分层（controller/service/mapper/entity），frontend 按 views/components/api 组织。你可以右键目录新建、重命名、复制粘贴，完全像 VSCode 资源管理器。'
-  }
-  return '收到。技术选型、开发阶段、项目目录都可以在左侧直接调整，点「确认方案」时一起提交保存。'
+/** 当前待答的那道架构师提问；null = 没有待答 */
+const archPending = ref<ConfirmQuestion | null>(null)
+const answering = ref(false)
+/** 已上屏的 questionId：4s 一轮，不去重会重复刷气泡 */
+const shownQuestions = new Set<string>()
+/** 项目被删（在别处删掉）→ 停轮询，别再每 4 秒撞一次「项目不存在」 */
+const projectGone = ref(false)
+let pollTimer: ReturnType<typeof setInterval> | null = null
+
+function isProjectGone(e: unknown): boolean {
+  return e instanceof Error && e.message.includes('项目不存在')
+}
+function stopPolling() {
+  if (pollTimer) clearInterval(pollTimer)
+  pollTimer = null
+}
+function markProjectGone() {
+  if (projectGone.value) return
+  projectGone.value = true
+  stopPolling()
+  thinking.value = false
+  working.value = false
+  archPending.value = null
+  console.warn('[architect] 项目已不存在，停止轮询（这不是网络问题）')
 }
 
-function send() {
-  const text = draft.value.trim()
-  if (!text || thinking.value) return
-
-  archMessages.value.push({ role: 'user', content: text })
-  draft.value = ''
-  working.value = true
-  scrollToBottom()
-
-  setTimeout(() => {
-    archMessages.value.push({ role: 'assistant', content: archReply(text) })
-    working.value = false
+/** 按库里记录重建对话：架构师问过的 + 人答过的（刷新后还在） */
+async function loadArchHistory() {
+  try {
+    const rows = (await fetchConfirmHistory(projectId.value)).filter((c) => c.node === 'architect')
+    for (const c of rows) {
+      if (shownQuestions.has(c.questionId)) continue
+      shownQuestions.add(c.questionId)
+      archMessages.value.push({ role: 'assistant', content: c.question })
+      if (c.status !== 'pending' && c.reply) {
+        archMessages.value.push({
+          role: 'user',
+          content: c.status === 'auto_passed' ? `${c.reply}（超时无人应答，自动放行）` : c.reply,
+        })
+      }
+    }
     scrollToBottom()
-  }, 800)
+  } catch (e) {
+    if (isProjectGone(e)) markProjectGone()
+  }
+}
+
+/** 轮询：有没有新的架构师提问 */
+async function pollArch() {
+  const id = projectId.value
+  if (!id || projectGone.value) return
+  try {
+    const pending = (await fetchPendingConfirms(id)).filter((c) => c.node === 'architect')
+    archPending.value = pending.length ? pending[pending.length - 1]! : null
+    if (pending.some((c) => !shownQuestions.has(c.questionId))) await loadArchHistory()
+  } catch (e) {
+    if (isProjectGone(e)) markProjectGone()
+  }
+}
+
+/** 答复当前这道题 → 引擎取到答复就继续出方案 */
+async function send() {
+  const q = archPending.value
+  const text = draft.value.trim()
+  if (!q || !text || answering.value) return
+  answering.value = true
+  try {
+    await answerConfirm(q.id, text)
+    archMessages.value.push({ role: 'user', content: text })
+    draft.value = ''
+    archPending.value = null
+    scrollToBottom()
+    await pollArch()
+  } catch (e) {
+    if (isProjectGone(e)) markProjectGone()
+  } finally {
+    answering.value = false
+  }
 }
 
 function scrollToBottom() {
@@ -455,14 +542,17 @@ async function confirmPlan() {
           </ul>
         </section>
 
-        <!-- 技术选型 -->
+        <!-- 技术选型（你自己确认的扁平清单；引擎的结构化方案在下面那块只读面板里） -->
         <section class="panel block">
           <header class="panel-head">
             <h3 class="panel-title">技术选型</h3>
-            <span class="hint faint">AI 预设 · 点击 ＋ 调整</span>
+            <span class="hint faint">点击 ＋ 调整 · 随方案提交</span>
           </header>
           <div class="block-body stack-cloud">
-            <span v-if="!techStack.length" class="stack-empty faint">暂无技术选型，点击 ＋ 添加</span>
+            <span v-if="!techStack.length" class="stack-empty faint">
+              <template v-if="hasArchPlan">还没确认自己的选型——架构师的建议见下方「架构师方案」</template>
+              <template v-else>暂无技术选型，点击 ＋ 添加</template>
+            </span>
             <span v-for="t in techStack" :key="t" class="chip">
               {{ t }}
               <button class="chip-x" :aria-label="`移除 ${t}`" @click="removeStack(t)">
@@ -472,6 +562,62 @@ async function confirmPlan() {
             <button class="chip chip-add" aria-label="添加技术" @click="openStackPicker">
               <IconPlus :size="13" :stroke-width="2" />
             </button>
+          </div>
+        </section>
+
+        <!-- 架构师方案（引擎 tech_stack 信封，只读） -->
+        <section v-if="hasArchPlan" class="panel block">
+          <header class="panel-head">
+            <h3 class="panel-title">架构师方案</h3>
+            <span class="hint faint">引擎产出 · 只读</span>
+          </header>
+          <div class="block-body arch-plan">
+            <p v-if="archPlan.why" class="arch-why">{{ archPlan.why }}</p>
+
+            <div v-if="archPlan.moduleTech.length" class="arch-sub">
+              <h4 class="arch-h">分模块技术选型</h4>
+              <ul class="rows">
+                <li v-for="m in archPlan.moduleTech" :key="m.module" class="row arch-mod">
+                  <span class="arch-mod-name">{{ m.module }}</span>
+                  <span class="arch-mod-tech">
+                    <span class="arch-tag">后端</span>{{ m.backend }}
+                  </span>
+                  <span class="arch-mod-tech">
+                    <span class="arch-tag">前端</span>{{ m.frontend }}
+                  </span>
+                </li>
+              </ul>
+            </div>
+
+            <div v-if="archPlan.dbType || archPlan.middleware.length" class="arch-sub">
+              <h4 class="arch-h">数据库与中间件</h4>
+              <p v-if="archPlan.dbType" class="arch-line">
+                <span class="arch-tag">数据库</span>{{ archPlan.dbType.type }}
+                <span v-if="archPlan.dbType.why" class="faint">—— {{ archPlan.dbType.why }}</span>
+              </p>
+              <p v-for="m in archPlan.middleware" :key="m.name" class="arch-line">
+                <span class="arch-tag">中间件</span>{{ m.name }}
+                <span v-if="m.purpose" class="faint">—— {{ m.purpose }}</span>
+              </p>
+            </div>
+
+            <div v-if="archPlan.tables.length" class="arch-sub">
+              <h4 class="arch-h">数据表</h4>
+              <div v-for="t in archPlan.tables" :key="t.name" class="arch-table">
+                <p class="arch-line">
+                  <span class="arch-tag arch-tag-strong mono">{{ t.name }}</span>
+                  <span v-if="t.purpose" class="faint">{{ t.purpose }}</span>
+                </p>
+                <ul class="rows arch-fields">
+                  <li v-for="f in t.fields" :key="f.name" class="row arch-field">
+                    <span class="arch-field-name mono">{{ f.name }}</span>
+                    <span class="arch-field-type mono faint">{{ f.type }}</span>
+                    <span v-if="f.required" class="arch-field-req">必填</span>
+                    <span v-if="f.remark" class="arch-field-remark dim">{{ f.remark }}</span>
+                  </li>
+                </ul>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -551,31 +697,76 @@ async function confirmPlan() {
         </section>
       </div>
 
-      <!-- ===== 右席：与架构师对谈 ===== -->
+      <!-- ===== 右席：与架构师对谈（真接引擎确认门） ===== -->
       <aside class="desk-right panel chat">
         <header class="panel-head">
           <span class="panel-title">与架构师沟通方案</span>
-          <span class="hint faint">询问理由 · 提出调整</span>
+          <span class="hint faint">他在开工前就关键决策提问</span>
         </header>
         <div ref="chatBody" class="chat-body">
+          <!-- 项目没了：说清真相，别再让轮询反复撞 -->
+          <div v-if="projectGone" class="chat-gone">
+            <p><strong>这个项目已经不在了</strong>（很可能在列表里删掉了）。</p>
+            <p class="faint">页面已停止轮询，不会再重复弹错。</p>
+            <button class="btn btn-sm btn-primary" @click="router.push('/projects')">回项目台账</button>
+          </div>
+
+          <!-- 空对话：按真实状态说实话，不摆假招呼 -->
+          <div v-else-if="!archMessages.length && !thinking" class="chat-empty faint">
+            <template v-if="archPending">
+              <p>架构师有问题等你回答，见下面那张卡。</p>
+            </template>
+            <template v-else>
+              <p>还没有对话。</p>
+              <p>架构师**在出方案前**会就关键决策提问（跑在哪、要不要登录、数据库怎么选这类），问题会出现在这里。</p>
+              <p>引擎没在跑、或技术方案已经定完，他就不会再问了。</p>
+            </template>
+          </div>
+
           <div v-for="(m, i) in archMessages" :key="i" class="msg" :class="m.role">
             <img v-if="m.role === 'assistant'" class="msg-avatar" :src="avatarArch" alt="架构师" />
             <div class="msg-bubble">{{ m.content }}</div>
           </div>
+
+          <!-- 待答题的选项按钮（架构师追问是自由文本，通常没有选项） -->
+          <div v-if="archPending && parseOptions(archPending).length" class="chat-opts">
+            <button
+              v-for="opt in parseOptions(archPending)"
+              :key="opt"
+              class="btn btn-sm"
+              :disabled="answering"
+              @click="draft = opt; send()"
+            >
+              {{ opt }}
+            </button>
+          </div>
+
           <div v-if="thinking" class="msg assistant">
             <img class="msg-avatar" :src="avatarArch" alt="架构师" />
             <div class="msg-bubble typing"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span></div>
           </div>
+        </div>
+        <div v-if="archPending" class="chat-foot">
+          <span class="hint faint">架构师在等你回答，答完他继续出方案</span>
+        </div>
+        <div v-else-if="!projectGone" class="chat-foot">
+          <span class="hint faint">当前没有待答问题（技术选型/阶段/目录可在左侧直接改，点「确认方案」提交）</span>
         </div>
         <div class="chat-input">
           <textarea
             v-model="draft"
             class="textarea ci-area"
             rows="2"
-            placeholder="如：为什么用 MySQL？/ 后端换 Node.js...（Enter 发送）"
+            :placeholder="archPending ? '回答架构师的问题…（Enter 发送）' : '现在没有待答问题'"
+            :disabled="!archPending || answering"
             @keydown.enter.exact.prevent="send"
           ></textarea>
-          <button class="btn btn-primary ci-send" :disabled="!draft.trim() || thinking" aria-label="发送" @click="send">
+          <button
+            class="btn btn-primary ci-send"
+            :disabled="!archPending || !draft.trim() || answering"
+            aria-label="发送"
+            @click="send"
+          >
             <IconSend :size="16" :stroke-width="1.75" />
           </button>
         </div>
@@ -744,6 +935,105 @@ async function confirmPlan() {
   color: var(--pass-ink);
 }
 
+/* ===== 架构师方案（只读展示，9/18） =====
+   一排"标签 + 正文"的读法：标签是字段名（后端/前端/数据库/表名），正文才是内容。
+   长段（why/remark/purpose）压一档颜色，避免整块都是同一种黑。 */
+.arch-plan {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.arch-why {
+  font-size: 13px;
+  line-height: 1.72;
+  color: var(--ink-2);
+  padding-left: 10px;
+  border-left: 3px solid var(--line-2);
+}
+.arch-sub {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.arch-h {
+  font-size: var(--fs-meta);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: var(--ink-3);
+}
+.arch-mod {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  padding: 10px 0;
+}
+.arch-mod-name {
+  font-weight: 600;
+  font-size: 13px;
+}
+.arch-mod-tech {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--ink-2);
+}
+.arch-tag {
+  display: inline-block;
+  min-width: 46px;
+  margin-right: 8px;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-xs);
+  background: var(--paper);
+  font-size: 11px;
+  color: var(--ink-3);
+  text-align: center;
+}
+/* 表名那枚标签是"标题"不是字段名，给它压重一档 */
+.arch-tag-strong {
+  min-width: 0;
+  font-weight: 600;
+  color: var(--ink);
+  background: var(--paper-deep);
+}
+.arch-line {
+  font-size: 12px;
+  line-height: 1.72;
+  color: var(--ink-2);
+}
+.arch-table {
+  padding: 8px 0;
+}
+.arch-fields {
+  margin-top: 4px;
+  padding-left: 8px;
+  border-left: 1px dashed var(--line);
+}
+.arch-field {
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 12px;
+  padding: 3px 0;
+}
+.arch-field-name {
+  font-weight: 600;
+  min-width: 88px;
+}
+.arch-field-type {
+  font-size: 11px;
+}
+.arch-field-req {
+  padding: 0 5px;
+  border-radius: var(--r-xs);
+  background: var(--paper-deep);
+  color: var(--rust);
+  font-size: 10px;
+}
+.arch-field-remark {
+  flex: 1 1 100%;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
 /* ===== 技术气泡 ===== */
 .stack-cloud {
   display: flex;
@@ -900,6 +1190,43 @@ async function confirmPlan() {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+/* 空对话说明 / 待答选项 / 状态条 / 项目没了：9/18 接真确认门后新增
+   （与需求对话页 CreateProjectView 同一套读法，两页长得一样才好认） */
+.chat-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: var(--fs-meta);
+  line-height: 1.7;
+}
+.chat-opts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-left: 39px; /* 与气泡对齐（头像 30 + 间隔 9） */
+}
+.chat-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px 0;
+  border-top: 1px solid var(--line);
+}
+.chat-gone {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--wait-ink);
+  border-radius: var(--r);
+  background: var(--paper);
+  font-size: var(--fs-meta);
+  line-height: 1.7;
+}
+.chat-gone strong {
+  color: var(--wait-ink);
 }
 .msg {
   display: flex;

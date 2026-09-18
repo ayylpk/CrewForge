@@ -48,6 +48,13 @@
   --void-wash: rgba(194, 58, 46, 0.1);
   --pencil: #5f7280; /* 铅笔灰：草稿/未盖章（虚线世界） */
   --rust: #a05a2c; /* 铁锈橙：已暂停（区别于红黄） */
+  /* 靛紫：规划中（9/18 加第 7 个章色）。
+     为什么必须加：状态有 7~8 个、章色只有 6 个，必然撞色；原先「草稿」和「规划中」都是铅笔灰
+     → 台账上两个状态**肉眼分不开**（用户实测反馈）。
+     ⚠️ 第一版取偏蓝的靛 #33408a，实测与晒图青 #155e93 亮度比只有 1.36:1、色相也都落在蓝区 ——
+     在 7px 色点上依旧难分，等于没修。所以改成**明确的紫**：紫 / 灰 / 钢蓝三者在色相上彻底分开。 */
+  --indigo: #7a4fb5; /* 紫：章面/灯（亮色只做填充） */
+  --indigo-ink: #54307f; /* 紫字（AA） */
 
   /* ===== 形状（一套圆角尺：4px 全局，弹窗 8px） ===== */
   --r-xs: 2px;
@@ -141,6 +148,9 @@
   --void-ink: var(--vsc-red-ink);
   --pencil: var(--vsc-muted);
   --rust: var(--vsc-rust);
+  /* 靛在暗底上要提亮，否则贴在 #1e1e1e 上是一团黑 */
+  --indigo: #7c8ce0;
+  --indigo-ink: #a3b1f0;
   --focus-cyan: var(--vsc-focus);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow: 0 6px 22px rgba(0, 0, 0, 0.5);
@@ -450,6 +460,7 @@ a {
 .stamp-info { color: var(--cyan); }
 .stamp-pencil { color: var(--pencil); }
 .stamp-rust { color: var(--rust); }
+.stamp-indigo { color: var(--indigo-ink); }
 
 /* 刚盖章：从上方压下来（全站唯一"盖章"动效的复用位） */
 @keyframes stamp-press {

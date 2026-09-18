@@ -1,40 +1,48 @@
 <script setup lang="ts">
 /* ============================================================
-   项目经理工作台（/projects/new 新建 ｜ /projects/:id/pm 澄清）
+   项目经理工作台 —— 需求对话页（/projects/:id/pm）
    ------------------------------------------------------------
    世界观：左 = 挂号栏（项目立项单逐项填写），右 = 会商席（与 Hina 对谈）。
    逻辑与旧版逐字对齐：form 字段 undefined 语义、独立保存三件套
-   （名称/描述/模式选中即存）、功能清单校验文案、创建前确认单。
+   （名称/描述/模式选中即存）、功能清单校验文案。
+   9/18：新建项目已改为台账页弹窗（components/ui/CreateProjectSheet.vue），
+   本页不再有"新建模式"分支 —— 顺带删掉了随之失效的创建确认单
+   （confirmItems/hasPending/showConfirm/tryCreate/confirmCreate）和单列布局 .desk-solo。
    聊天仍是本地 mock（用户消息只上屏不接 LLM——与旧版一致，不造假回复）。
    ============================================================ */
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   IconCheck,
   IconCircle,
-  IconFile,
   IconPlus,
   IconSend,
-  IconUpload,
   IconX,
 } from '@tabler/icons-vue'
-import AppModal from '../components/ui/AppModal.vue'
 import TopBar from '../components/ui/TopBar.vue'
-import { createProject as createProjectApi, fetchProjectById, updateProject } from '../api/project'
+import {
+  answerConfirm,
+  fetchConfirmHistory,
+  fetchPendingConfirms,
+  parseOptions,
+  type ConfirmQuestion,
+} from '../api/confirm'
+import { fetchProjectById, updateProject } from '../api/project'
+import { fetchRunStatus, startProjectRun } from '../api/projectRun'
 import { MODE_NUM_TO_STR as SHARED_MODE_NUM_TO_STR } from '../constants/status'
 import type { ConfirmMode, ProjectCreateDTO } from '../types/project'
-import { ENVELOPE_KEYS, parseEnvelopeArray, toDisplayList } from '../utils/json'
+import { ENVELOPE_KEYS, buildClarifiedReqJson, parseEnvelopeArray, toDisplayList } from '../utils/json'
 import { toast } from '../utils/toast'
 
 const router = useRouter()
 const route = useRoute()
 
 /**
- * 双模式工作台：
- * · /projects/new      新建模式 —— 定项目描述 → 创建项目
- * · /projects/:id/pm   澄清模式 —— 加载项目 → 确认具体功能 → 保存
+ * 9/18：本页**只剩澄清模式**。
+ *   原来是双模式（/projects/new 新建 + /projects/:id/pm 澄清），但两页配置区高度重复
+ *   （用户实测反馈）—— 新建已退化成台账页里的弹窗（components/ui/CreateProjectSheet.vue）。
+ *   所以这里不再有 isEdit 分支：:id 一定存在。
  */
-const isEdit = computed(() => !!route.params.id)
 const projectId = Number(route.params.id || 0)
 
 // ===== 表单 =====（类型 = 后端 ProjectDTO 白名单，全字段集中在这，保存统一走 updateProject）
@@ -58,13 +66,26 @@ const descSaving = ref(false) // 澄清模式：保存描述中
 const nameSaving = ref(false) // 澄清模式：保存名称中
 const modeSaving = ref(false) // 澄清模式：保存确认模式中
 
-// ===== 澄清模式：已确认功能清单（从项目 businessModules 加载） =====
+/* ===== 澄清阶段：已确认功能清单 =====
+   ⚠️ 读 clarified_req，不是 business_modules（9/18 修「功能不实时添加」）：
+     clarified_req    PM 澄清阶段**每轮确认后**累积写入（Node.ts saveClarifiedReq），
+                      信封是 {features:[{name,description,priority,acceptance}]}
+     business_modules 架构师拆分阶段才写（Node.ts saveArchitectOutput）
+   本页整页就是澄清阶段，读 business_modules 的话 —— 对话聊完、PM 都定稿了，
+   这列还是空的，页面永远显示"还没有确认功能"。数据其实一直在库里（实测 840 字/6 条）。
+   兜底读 business_modules：老项目 clarified_req 可能没写过，有就显示。 */
 const features = ref<string[]>([])
 const featureDraft = ref('')
 
 /** 后端 JSON 列解析：认裸数组，也认引擎写的信封对象（见 utils/json.ts） */
-function parseJsonArr(raw?: string | null): string[] {
-  return toDisplayList(parseEnvelopeArray(raw, ENVELOPE_KEYS.businessModules))
+function parseJsonArr(raw?: string | null, keys: readonly string[] = ENVELOPE_KEYS.clarifiedReq): string[] {
+  return toDisplayList(parseEnvelopeArray(raw, keys))
+}
+
+/** 本页的功能清单 = PM 的已确认功能；没有才退到架构师的业务模块 */
+function pmFeaturesOf(p: { clarifiedReq?: string | null; businessModules?: string | null }): string[] {
+  const pm = parseJsonArr(p.clarifiedReq)
+  return pm.length ? pm : parseJsonArr(p.businessModules, ENVELOPE_KEYS.businessModules)
 }
 
 /** 数字 → 前端串：用 constants/status 的那一份（索引即 0/1/2），不再本地复制一份映射 */
@@ -75,9 +96,21 @@ const MODE_LABELS: Record<ConfirmMode, string> = {
   manual: '手动模式',
 }
 
-/** 澄清模式：进入时加载项目，填充名称/描述/已确认功能 */
+/** 回读项目的已确认功能清单（PM 每轮都写 clarified_req，所以轮询里调它 = 实时长出来） */
+async function reloadFeatures() {
+  try {
+    const p = await fetchProjectById(projectId)
+    features.value = pmFeaturesOf(p)
+    form.value.clarifiedReq = p.clarifiedReq || undefined
+    form.value.businessModules = p.businessModules || undefined
+    form.value.status = p.status || undefined
+  } catch (e) {
+    if (isProjectGone(e)) markProjectGone()
+  }
+}
+
+/** 进入时加载项目，填充名称/描述/已确认功能，并开始轮询确认门 */
 onMounted(async () => {
-  if (!isEdit.value) return
   try {
     const p = await fetchProjectById(projectId)
     form.value.name = p.name
@@ -89,22 +122,33 @@ onMounted(async () => {
     form.value.techStack = p.techStack || undefined
     form.value.devPlan = p.devPlan || undefined
     form.value.status = p.status || undefined
-    features.value = parseJsonArr(p.businessModules)
-  } catch {
-    /* 拦截器已提示 */
+    features.value = pmFeaturesOf(p)
+  } catch (e) {
+    // 项目已经没了（比如在另一个标签页删掉了）→ 立刻停手，别起轮询去反复撞
+    if (isProjectGone(e)) {
+      markProjectGone()
+      return
+    }
+    /* 其余错误拦截器已提示，轮询照起（后端抖动还能自愈） */
   }
+  // 对话：先补历史（刷新后对话还在），再起 4s 轮询等新题（与执行面板 CONFIRM_POLL 同频）
+  await loadPmHistory()
+  await pollPm()
+  if (!projectGone.value) pollTimer = setInterval(pollPm, 4000)
+})
+
+onUnmounted(() => {
+  if (pollTimer) clearInterval(pollTimer)
+  pollTimer = null
 })
 
 const nameDone = computed(() => !!form.value.name.trim())
-const descDone = computed(() => !!form.value.description.trim())
 const modeDone = computed(() => !!form.value.confirmMode)
-/** 澄清模式：功能清单是否已确认；新建模式：描述是否已填 */
-const featureDone = computed(() => (isEdit.value ? features.value.length > 0 : descDone.value))
+/** 功能清单是否已确认 */
+const featureDone = computed(() => features.value.length > 0)
 const phaseLabel = computed(() => {
   if (working.value) return '正在解析你的描述'
-  if (isEdit.value) return features.value.length > 0 ? `已确认 ${features.value.length} 项功能` : '等待确认具体功能'
-  if (!descDone.value) return '等待描述项目需求'
-  return '项目描述已确认'
+  return features.value.length > 0 ? `已确认 ${features.value.length} 项功能` : '等待确认具体功能'
 })
 
 /** 手动添加功能点（澄清模式）
@@ -169,7 +213,12 @@ async function saveConfirmMode() {
   }
 }
 
-/** 澄清模式：保存功能清单（只提交 businessModules —— 这一列归本页所有） */
+/** 保存功能清单（写 clarified_req —— PM 澄清的那一列，本页的产物就住这里）
+ *  ⚠️ 9/18 改：原来写 businessModules，那是**架构师的列**（Node.ts saveArchitectOutput）。
+ *     写它会两头坏：① 本页读的是 clarified_req，保存完自己反而看不见刚存的东西；
+ *     ② 架构师阶段一跑就把人手工加的条目覆盖掉。
+ *  ⚠️ 形状走 buildClarifiedReqJson 保结构合并：页面手上只有名字，
+ *     一把重建会把每条 description/priority/acceptance 静默冲掉。 */
 async function saveFeatures() {
   if (!features.value.length) {
     toast.warning('还没有确认任何功能')
@@ -177,7 +226,8 @@ async function saveFeatures() {
   }
   saving.value = true
   try {
-    await updateProject(projectId, { businessModules: JSON.stringify(features.value) })
+    const envelope = form.value.clarifiedReq ? (JSON.parse(form.value.clarifiedReq) as Record<string, unknown>) : null
+    await updateProject(projectId, { clarifiedReq: buildClarifiedReqJson(envelope, features.value) })
     // 保存成功反馈 = 跳转到 overview 看到「已确认功能」清单本身，不再弹全局提示
     router.push({ name: 'project-detail', params: { id: String(projectId) }, hash: '#overview' })
   } finally {
@@ -185,70 +235,153 @@ async function saveFeatures() {
   }
 }
 
-/** 确认弹窗里的完成项列表 */
-const confirmItems = computed(() => [
-  { label: '项目名称', done: nameDone.value },
-  { label: '描述项目需求', done: descDone.value },
-  { label: '选择确认模式', done: modeDone.value },
-  { label: '收集参考文件（可选）', done: true },
-])
-const hasPending = computed(() => confirmItems.value.some((c) => !c.done))
+/* ===== 对话区：真接引擎确认门（9/18 起不再是本地 mock） =====
+   链路本来就在（执行面板早在用），本页只是把它接上：
+     引擎澄清阶段 projectRunner.ts → questioner.ask()
+       → HttpQuestioner POST /api/confirm/engine/ask  → sys_confirm 落一行 pending
+       → 本页轮询 GET /api/confirm/history           → PM 的题 + 我的答上屏
+       → 人答 POST /api/confirm/{id}/answer
+       → 引擎轮询 GET /api/confirm/engine/answer/{questionId} 取到答复 → 续跑
+   ⚠️ 题面是 PM 的原话：引擎侧原先写死一句过场话，PM 真问的问题只进了引擎日志，
+      确认门里躺着固定提示（9/18 同批修了 projectRunner.ts）。
+   ⚠️ 全绿灯模式(confirmMode=0) 引擎自动定稿、**根本不会提问** ——
+      所以下面有按当前模式说实话的空状态，而不是让人对着空聊天框干等。
+   ⚠️ 只有澄清阶段（node=manager）的题归本页；架构师等别的题在执行面板答。 */
 
-// ===== 文件上传（开发期只记录文件名） =====
-const files = ref<File[]>([])
-const fileInput = ref<HTMLInputElement | null>(null)
-const isDragging = ref(false)
-function onDrop(e: DragEvent) {
-  isDragging.value = false
-  files.value.push(...Array.from(e.dataTransfer?.files || []))
-}
-function pickFile() {
-  fileInput.value?.click()
-}
-function onPick(e: Event) {
-  files.value.push(...Array.from((e.target as HTMLInputElement).files || []))
-}
-
-// ===== 对话区（本地 mock：只上屏用户消息，不接 LLM——与旧版一致） =====
 interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
+  /** 该气泡对应的题（只有待答的那道才在下面接选项/输入框） */
+  questionId?: string
+  options?: string[]
 }
 
-const messages = ref<ChatMessage[]>(
-  isEdit.value
-    ? [
-        {
-          role: 'assistant',
-          content:
-            '你好，我是 AI 项目经理 Hina。项目描述已经确认了，现在来确认具体功能——描述一个功能点，或直接在左侧清单里增删，完成后点右上角「保存功能清单」。',
-        },
-      ]
-    : [
-        {
-          role: 'assistant',
-          content:
-            '你好，我是 AI 项目经理 Hina。请描述这个项目要做什么样子的项目：面向谁、解决什么问题、主要做哪些事。我会帮你把描述整理成项目描述，确认后创建项目。',
-        },
-      ],
-)
-
+const messages = ref<ChatMessage[]>([])
 const draft = ref('')
-const thinking = ref(false)
 const chatBody = ref<HTMLElement | null>(null)
 
-function send() {
-  const text = draft.value.trim()
-  if (!text || thinking.value) return
+/** 当前可答的那道题（后端行 id，答复用它）；null = 没有待答 */
+const openQuestion = ref<ConfirmQuestion | null>(null)
+const answering = ref(false)
+/** 引擎在跑吗——没跑就不会有新问题，这时得说实话 */
+const engineRunning = ref(false)
+/** 别的节点的题挂着几道：本页不答，但提醒一句，别让人干等 */
+const otherPending = ref(0)
+/** 已上屏的 questionId：每 4s 一轮，不去重会重复刷气泡 */
+const shownQuestions = new Set<string>()
 
-  // 用户消息
-  messages.value.push({ role: 'user', content: text })
-  draft.value = ''
-  working.value = true
-  scrollToBottom()
+let pollTimer: ReturnType<typeof setInterval> | null = null
 
+/**
+ * 项目没了（被删/换账号）—— 9/18 加。
+ * 为什么必须有：这页的轮询是 4 秒一档，项目被删后每轮都吃一个
+ * 「项目不存在: N」的业务错误（ProjectGuard.requireOwned 抛的），
+ * 连起来就是"提示一直弹、永远不停"。**光靠 toast 去重只是变稀，正解是别再问**：
+ * 一旦确认项目没了就停轮询、停对话，并在页面上把真相摆出来。
+ * 判定靠文案（后端 ProjectGuard 的措辞是 '项目不存在: ' + id，稳定且只有这一处来源）。
+ */
+const projectGone = ref(false)
+
+function isProjectGone(e: unknown): boolean {
+  return e instanceof Error && e.message.includes('项目不存在')
+}
+
+function stopPolling() {
+  if (pollTimer) clearInterval(pollTimer)
+  pollTimer = null
+}
+
+/** 确认项目已不存在：停轮询 + 停值班灯，页面转为"项目没了"的说明态 */
+function markProjectGone() {
+  if (projectGone.value) return
+  projectGone.value = true
+  stopPolling()
+  engineRunning.value = false
   working.value = false
-  scrollToBottom()
+  openQuestion.value = null
+  console.warn('[pm] 项目已不存在，停止轮询（这不是网络问题）')
+}
+
+/** 引擎在跑但还没出题 = PM 正在读需求（点亮值班牌 + 打字指示） */
+const thinking = computed(() => engineRunning.value && openQuestion.value === null)
+
+/** 按库里记录重建对话：PM 的题 + 人答过的答。刷新后对话还在 */
+async function loadPmHistory() {
+  try {
+    const rows = (await fetchConfirmHistory(projectId)).filter((c) => c.node === 'manager')
+    for (const c of rows) {
+      if (shownQuestions.has(c.questionId)) continue
+      shownQuestions.add(c.questionId)
+      messages.value.push({
+        role: 'assistant',
+        content: c.question,
+        questionId: c.questionId,
+        options: parseOptions(c),
+      })
+      // 已答/已放行的补一条"人说的话"（自动放行要标明，别让它看着像我答的）
+      if (c.status !== 'pending' && c.reply) {
+        messages.value.push({
+          role: 'user',
+          content: c.status === 'auto_passed' ? `${c.reply}（超时无人应答，自动放行）` : c.reply,
+        })
+      }
+    }
+    scrollToBottom()
+  } catch (e) {
+    // 后端抖动：本轮不上屏，下一轮再试；项目没了则是终局，停轮询
+    if (isProjectGone(e)) markProjectGone()
+  }
+}
+
+/** 轮询：有没有新题、引擎在不在跑，并保管"当前可答的那道" */
+async function pollPm() {
+  if (!projectId) return
+  try {
+    const [pending, status] = await Promise.all([
+      fetchPendingConfirms(projectId),
+      // 运行状态查询失败不算终局（后端重启期间也会失败）→ 单独吞掉，
+      // 但注意：拦截器在这之前已经弹过 toast 了，所以这条 .catch 只挡自己的处理
+      fetchRunStatus(projectId).catch(() => null),
+    ])
+    engineRunning.value = !!status?.running
+    working.value = engineRunning.value // 值班牌那盏灯跟着引擎走，不再是个安慰灯
+    const mine = pending.filter((c) => c.node === 'manager')
+    otherPending.value = pending.length - mine.length
+    openQuestion.value = mine.length ? mine[mine.length - 1]! : null
+    if (mine.some((c) => !shownQuestions.has(c.questionId))) await loadPmHistory()
+    // ⚠️ 清单每轮都回读：PM 是"确认一个写一次"（manager.ts 注释），
+    //    不回读的话左侧要等整段对话结束才长出来（9/18 用户实测反馈"功能没有实时添加"）
+    await reloadFeatures()
+  } catch (e) {
+    if (isProjectGone(e)) {
+      // 项目被删 → 停轮询。不停的话每 4 秒就是一次「项目不存在」，提示弹个没完
+      markProjectGone()
+      return
+    }
+    /* 后端抖动：本轮不动，下一轮再试（对话是增强，不拦页面） */
+  }
+}
+
+/** 答复当前这道题 → 引擎取到答复就续跑 */
+async function sendPm() {
+  const q = openQuestion.value
+  const text = draft.value.trim()
+  if (!q || !text || answering.value) return
+  answering.value = true
+  try {
+    await answerConfirm(q.id, text)
+    messages.value.push({ role: 'user', content: text })
+    draft.value = ''
+    openQuestion.value = null
+    scrollToBottom()
+    await pollPm()
+    // 定稿后引擎会写 clarified_req → 左侧「已确认功能」会变，回读一次
+    await reloadFeatures()
+  } catch (e) {
+    if (isProjectGone(e)) markProjectGone()
+  } finally {
+    answering.value = false
+  }
 }
 
 function scrollToBottom() {
@@ -259,6 +392,25 @@ function scrollToBottom() {
   })
 }
 
+/** 起引擎：澄清阶段跑起来 PM 才会提问 */
+const starting = ref(false)
+async function startClarify() {
+  if (starting.value || engineRunning.value) return
+  starting.value = true
+  try {
+    await startProjectRun(projectId)
+    toast.success('已开工，项目经理读完需求就会在这里提问')
+    await pollPm()
+  } catch (e) {
+    // 项目被删了：开工请求会被 ProjectGuard 拒（"项目不存在"）→ 页面转说明态。
+    // 原先这里没有 catch：点了开工只有右上角一个一闪而过的提示，
+    // 页面上什么都不变 —— 用户看到的就是"我执行了但没有任何产出"。
+    if (isProjectGone(e)) markProjectGone()
+  } finally {
+    starting.value = false
+  }
+}
+
 // ===== 确认模式 =====
 const modes: { value: ConfirmMode; label: string; desc: string }[] = [
   { value: 'green', label: '全绿灯模式', desc: 'AI 自动推进，只在交付时展示结果' },
@@ -266,39 +418,9 @@ const modes: { value: ConfirmMode; label: string; desc: string }[] = [
   { value: 'manual', label: '手动模式', desc: '每个阶段完成后由你确认通过' },
 ]
 
-// ===== 创建项目 =====
-const creating = ref(false)
-const showConfirm = ref(false)
-
-/** 检查未完成项 → 弹确认框 */
-function tryCreate() {
-  if (!form.value.name.trim()) {
-    toast.warning('请先填写项目名称')
-    return
-  }
-  showConfirm.value = true
-}
-
-/** 返回：澄清模式直接回项目概览（不调 update）；新建模式回项目列表 */
+/** 返回项目概览（本页只有澄清模式，不需要"回列表"分支） */
 function goOverview() {
   router.push({ name: 'project-detail', params: { id: String(projectId) }, hash: '#overview' })
-}
-
-/** 确认创建 */
-async function confirmCreate() {
-  showConfirm.value = false
-  creating.value = true
-  try {
-    const payload = {
-      ...form.value,
-      name: form.value.name.trim(),
-      description: form.value.description.trim(),
-    }
-    await createProjectApi(payload)
-    router.push('/projects')
-  } finally {
-    creating.value = false
-  }
 }
 </script>
 
@@ -306,18 +428,18 @@ async function confirmCreate() {
   <div class="view">
     <TopBar>
       <template #context>
-        <button class="tb-back btn btn-sm btn-ghost" @click="isEdit ? goOverview() : router.push('/projects')">
-          ← {{ isEdit ? '返回' : '项目列表' }}
+        <button class="tb-back btn btn-sm btn-ghost" @click="goOverview()">
+          ← 返回
         </button>
         <span class="tb-title">
-          <span class="dim">{{ isEdit ? '需求对话 ·' : '新建项目 ·' }}</span>
-          {{ isEdit ? form.name || '未命名项目' : '项目经理工作台' }}
+          <span class="dim">需求对话 ·</span>
+          {{ form.name || '未命名项目' }}
         </span>
-        <span class="sheet-no">{{ isEdit ? `PRJ-${String(projectId).padStart(4, '0')}-B` : 'FORM-A02' }}</span>
+        <span class="sheet-no">{{ `PRJ-${String(projectId).padStart(4, '0')}-B` }}</span>
       </template>
       <template #right>
-        <button class="btn btn-primary" :disabled="isEdit ? saving : creating" @click="isEdit ? saveFeatures() : tryCreate()">
-          {{ isEdit ? (saving ? '保存中…' : '保存功能清单') : creating ? '创建中…' : '创建项目' }}
+        <button class="btn btn-primary" :disabled="saving" @click="saveFeatures()">
+          {{ saving ? '保存中…' : '保存功能清单' }}
         </button>
       </template>
     </TopBar>
@@ -345,7 +467,7 @@ async function confirmCreate() {
             <li class="row" :class="{ done: featureDone }">
               <IconCheck v-if="featureDone" :size="15" :stroke-width="1.75" class="dico ok" />
               <IconCircle v-else :size="15" :stroke-width="1.75" class="dico" />
-              {{ isEdit ? '确认具体功能' : '描述项目需求' }}
+              确认具体功能
             </li>
             <li class="row" :class="{ done: nameDone }">
               <IconCheck v-if="nameDone" :size="15" :stroke-width="1.75" class="dico ok" />
@@ -357,11 +479,6 @@ async function confirmCreate() {
               <IconCircle v-else :size="15" :stroke-width="1.75" class="dico" />
               选择确认模式
             </li>
-            <li class="row" :class="{ done: files.length > 0 }">
-              <IconCheck v-if="files.length > 0" :size="15" :stroke-width="1.75" class="dico ok" />
-              <IconCircle v-else :size="15" :stroke-width="1.75" class="dico" />
-              收集参考文件
-            </li>
           </ul>
         </section>
 
@@ -369,8 +486,8 @@ async function confirmCreate() {
         <section class="panel block">
           <header class="panel-head">
             <h3 class="panel-title">项目名称</h3>
-            <!-- 澄清模式：名称可修改，独立保存（不依赖「保存功能清单」） -->
-            <button v-if="isEdit" class="btn btn-sm" :disabled="nameSaving" @click="saveName()">
+            <!-- 名称可修改，独立保存（不依赖「保存功能清单」） -->
+            <button class="btn btn-sm" :disabled="nameSaving" @click="saveName()">
               {{ nameSaving ? '保存中...' : '保存名称' }}
             </button>
           </header>
@@ -384,7 +501,7 @@ async function confirmCreate() {
           <header class="panel-head">
             <h3 class="panel-title">项目描述</h3>
             <span class="hint faint">这个项目要做什么</span>
-            <button v-if="isEdit" class="btn btn-sm" :disabled="descSaving" @click="saveDescription()">
+            <button class="btn btn-sm" :disabled="descSaving" @click="saveDescription()">
               {{ descSaving ? '保存中...' : '保存描述' }}
             </button>
           </header>
@@ -398,8 +515,8 @@ async function confirmCreate() {
           </div>
         </section>
 
-        <!-- 已确认功能（仅澄清模式） -->
-        <section v-if="isEdit" class="panel block">
+        <!-- 已确认功能 -->
+        <section class="panel block">
           <header class="panel-head">
             <h3 class="panel-title">已确认功能</h3>
             <span class="hint mono faint">{{ features.length }} 项</span>
@@ -439,22 +556,7 @@ async function confirmCreate() {
             <h3 class="panel-title">确认模式</h3>
           </header>
           <div class="block-body">
-            <div v-if="!isEdit" class="mode-list" role="radiogroup" aria-label="确认模式">
-              <button
-                v-for="m in modes"
-                :key="m.value"
-                class="mode-item"
-                :class="{ active: form.confirmMode === m.value }"
-                role="radio"
-                :aria-checked="form.confirmMode === m.value"
-                @click="form.confirmMode = m.value"
-              >
-                <span class="mode-label">{{ m.label }}</span>
-                <span class="mode-desc dim">{{ m.desc }}</span>
-              </button>
-            </div>
-            <!-- 澄清模式：下拉重新选择，选中即保存 -->
-            <div v-else class="field">
+            <div class="field">
               <select v-model="form.confirmMode" class="select" :disabled="modeSaving" @change="saveConfirmMode()">
                 <option v-for="m in modes" :key="m.value" :value="m.value">{{ m.label }}</option>
               </select>
@@ -463,89 +565,98 @@ async function confirmCreate() {
           </div>
         </section>
 
-        <!-- 参考文件 -->
-        <section class="panel block">
-          <header class="panel-head">
-            <h3 class="panel-title">参考文件</h3>
-            <span class="hint faint">可选</span>
-          </header>
-          <div class="block-body">
-            <div
-              class="upload-zone"
-              :class="{ dragging: isDragging }"
-              role="button"
-              tabindex="0"
-              @dragover.prevent="isDragging = true"
-              @dragleave.prevent="isDragging = false"
-              @drop.prevent="onDrop"
-              @click="pickFile"
-              @keydown.enter="pickFile"
-            >
-              <IconUpload :size="22" :stroke-width="1.75" />
-              <p>拖拽文件到这里，或点击选择</p>
-            </div>
-            <ul v-if="files.length" class="rows file-list">
-              <li v-for="(f, i) in files" :key="i" class="row file-item">
-                <IconFile :size="14" :stroke-width="1.75" class="dico" />
-                <span class="file-name mono">{{ f.name }}</span>
-                <button class="feat-x" aria-label="移除文件" @click.stop="files.splice(i, 1)">
-                  <IconX :size="13" :stroke-width="1.75" />
-                </button>
-              </li>
-            </ul>
-            <input ref="fileInput" type="file" multiple hidden @change="onPick" />
-          </div>
-        </section>
+        <!-- 参考文件面板已删（9/18）：整块是个空摆件——files 只进内存，创建/保存都不提交、
+             刷新就没了，拖个 PDF 进去会以为附上了。宁可不摆这个假控件。 -->
       </div>
 
       <!-- ===== 右：会商席 ===== -->
       <aside class="desk-right panel chat">
         <header class="panel-head chat-head">
           <span class="panel-title">与项目经理沟通需求</span>
-          <span class="hint faint">{{ isEdit ? '对话澄清 → 左侧确认功能清单' : '描述项目 → 确认项目描述' }}</span>
+          <span class="hint faint">对话澄清 → 左侧确认功能清单</span>
         </header>
         <div ref="chatBody" class="chat-body">
+          <!-- 项目没了：把真相摆在页面上，而不是让右上角每隔几秒闪一次错误 -->
+          <div v-if="projectGone" class="chat-gone">
+            <p><strong>这个项目已经不在了</strong>（很可能在另一个标签页或列表里删掉了）。</p>
+            <p class="faint">页面已停止轮询，所以你不会再看到重复的错误提示。</p>
+            <button class="btn btn-sm btn-primary" @click="router.push('/projects')">回项目台账</button>
+          </div>
+
+          <!-- 空对话：按当前真实状态说实话，而不是摆一段假招呼 -->
+          <div v-else-if="!messages.length && !thinking" class="chat-empty faint">
+            <template v-if="form.confirmMode === 'green'">
+              <p>当前是<strong>全绿灯模式</strong>：项目经理不会提问，引擎会自动定稿并直接推进。</p>
+              <p>想逐条确认功能，把左侧「确认模式」改成<strong>混合</strong>或<strong>手动</strong>，再点下面开工。</p>
+            </template>
+            <template v-else-if="engineRunning">
+              <p>项目经理正在读你的需求，提问会出现在这里。</p>
+            </template>
+            <template v-else>
+              <p>还没有对话——引擎没在跑，项目经理也就没机会提问。</p>
+            </template>
+          </div>
+
           <div v-for="(m, i) in messages" :key="i" class="msg" :class="m.role">
             <img v-if="m.role === 'assistant'" class="msg-avatar" src="../assets/agent-manager.png" alt="Hina" />
             <div class="msg-bubble">{{ m.content }}</div>
           </div>
+
+          <!-- 最后一题还没答 → 选项按钮（点一下即答） -->
+          <div v-if="openQuestion && parseOptions(openQuestion).length" class="chat-opts">
+            <button
+              v-for="opt in parseOptions(openQuestion)"
+              :key="opt"
+              class="btn btn-sm"
+              :disabled="answering"
+              @click="draft = opt; sendPm()"
+            >
+              {{ opt }}
+            </button>
+          </div>
+
           <div v-if="thinking" class="msg assistant">
             <img class="msg-avatar" src="../assets/agent-manager.png" alt="Hina" />
             <div class="msg-bubble typing"><span class="tdot"></span><span class="tdot"></span><span class="tdot"></span></div>
           </div>
         </div>
+        <!-- 没在跑 → 开工；没题可答 → 说明为什么发不出去 -->
+        <div v-if="projectGone" class="chat-foot">
+          <span class="hint faint">项目已不存在，无法开工</span>
+        </div>
+        <div v-else-if="!engineRunning" class="chat-foot">
+          <button class="btn btn-primary btn-sm" :disabled="starting" @click="startClarify">
+            {{ starting ? '开工中…' : '开工，让项目经理提问' }}
+          </button>
+          <span class="hint faint">引擎跑起来，澄清对话才会发生</span>
+        </div>
+        <div v-else-if="!openQuestion" class="chat-foot">
+          <span class="hint faint">
+            项目经理没有待答问题
+            <template v-if="otherPending">（有 {{ otherPending }} 道别的节点的题，去执行面板答）</template>
+          </span>
+        </div>
+
         <div class="chat-input">
           <textarea
             v-model="draft"
             class="textarea ci-area"
             rows="2"
-            placeholder="描述这个项目要做什么，如：做一个选课系统，让学生选课、教师管理课程...（Enter 发送）"
-            @keydown.enter.exact.prevent="send"
+            :placeholder="openQuestion ? '回答项目经理的问题…（Enter 发送）' : '现在没有待答问题，先把上面那道题答完'"
+            :disabled="!openQuestion || answering"
+            @keydown.enter.exact.prevent="sendPm"
           ></textarea>
-          <button class="btn btn-primary ci-send" :disabled="!draft.trim() || thinking" aria-label="发送" @click="send">
+          <button
+            class="btn btn-primary ci-send"
+            :disabled="!openQuestion || !draft.trim() || answering"
+            aria-label="发送"
+            @click="sendPm"
+          >
             <IconSend :size="16" :stroke-width="1.75" />
           </button>
         </div>
       </aside>
     </main>
-
-    <!-- 创建确认弹窗（出图前核对单） -->
-    <AppModal v-if="showConfirm" title="确认创建项目？" sheet="FORM-A02" width="460px" @close="showConfirm = false">
-      <p class="cm-name">「{{ form.name }}」</p>
-      <ul class="rows cm-list">
-        <li v-for="c in confirmItems" :key="c.label" class="row cm-item">
-          <IconCheck v-if="c.done" :size="15" :stroke-width="1.75" class="dico ok" />
-          <IconCircle v-else :size="15" :stroke-width="1.75" class="dico" />
-          <span class="cm-label" :class="{ pending: !c.done }">{{ c.label }}</span>
-          <span class="cm-state faint" :class="{ no: !c.done }">{{ c.done ? '已完成' : '未完成' }}</span>
-        </li>
-      </ul>
-      <p v-if="hasPending" class="cm-warn">以下内容未完成，创建后可在项目详情中继续补充</p>
-      <template #footer>
-        <button class="btn btn-sm" @click="showConfirm = false">再看看</button>
-        <button class="btn btn-sm btn-primary" @click="confirmCreate">确认创建</button>
-      </template>
-    </AppModal>
   </div>
 </template>
 
@@ -692,76 +803,10 @@ async function confirmCreate() {
   flex: 1;
 }
 
-/* 确认模式 */
-.mode-list {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.mode-item {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
-  text-align: left;
-  padding: 10px 14px;
-  border: 1px solid var(--line);
-  border-radius: var(--r);
-  background: var(--paper);
-  transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease);
-}
-.mode-item:hover {
-  border-color: var(--cyan);
-}
-.mode-item.active {
-  border-color: var(--cyan);
-  background: var(--cyan-wash);
-  box-shadow: inset 3px 0 0 var(--cyan); /* 左侧压青轨：选中即归档 */
-}
-.mode-label {
-  font-weight: 600;
-  font-size: 13px;
-}
-.mode-item.active .mode-label {
-  color: var(--cyan);
-}
-.mode-desc {
-  font-size: var(--fs-meta);
-}
+/* 确认模式（9/18 起这里只有下拉了；原 .mode-list/.mode-item/.mode-label/.mode-desc
+   那套单选卡样式随新建模式一起删掉） */
 
-/* 上传区 */
-.upload-zone {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 8px;
-  padding: 26px 16px;
-  border: 1.5px dashed var(--line-2);
-  border-radius: var(--r);
-  color: var(--ink-2);
-  cursor: pointer;
-  transition: border-color var(--dur) var(--ease), background var(--dur) var(--ease);
-}
-.upload-zone:hover,
-.upload-zone.dragging {
-  border-color: var(--cyan);
-  background: var(--cyan-wash);
-  color: var(--cyan);
-}
-.upload-zone p {
-  font-size: 13px;
-}
-.file-list {
-  margin-top: 8px;
-}
-.file-name {
-  flex: 1;
-  min-width: 0;
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+/* 上传区（.upload-zone/.file-list/.file-name）已随「参考文件」面板删除（9/18） */
 
 /* ===== 会商席 ===== */
 .chat {
@@ -783,6 +828,45 @@ async function confirmCreate() {
   display: flex;
   flex-direction: column;
   gap: 14px;
+}
+/* 空对话的说明 / 待答题的选项按钮 / 开工条：9/18 接真对话后新增 */
+.chat-gone {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--wait-ink);
+  border-radius: var(--r);
+  background: var(--paper);
+  font-size: var(--fs-meta);
+  line-height: 1.7;
+}
+.chat-gone strong {
+  color: var(--wait-ink);
+}
+.chat-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: var(--fs-meta);
+  line-height: 1.7;
+}
+.chat-empty strong {
+  color: var(--cyan);
+}
+.chat-opts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-left: 39px; /* 与气泡对齐（头像 30 + 间隔 9） */
+}
+.chat-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px 0;
+  border-top: 1px solid var(--line);
 }
 .msg {
   display: flex;
@@ -861,38 +945,7 @@ async function confirmCreate() {
   flex: none;
 }
 
-/* ===== 确认单弹窗 ===== */
-.cm-name {
-  font-size: 15px;
-  font-weight: 600;
-  margin-bottom: 10px;
-}
-.cm-list {
-  border: 1px solid var(--line);
-  border-radius: var(--r);
-  padding: 2px 12px;
-  background: var(--paper);
-}
-.cm-item {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  font-size: 13px;
-}
-.cm-label {
-  flex: 1;
-}
-.cm-label.pending {
-  color: var(--ink-3);
-}
-.cm-state.no {
-  color: var(--wait-ink);
-}
-.cm-warn {
-  margin-top: 12px;
-  font-size: var(--fs-meta);
-  color: var(--wait-ink);
-}
+/* ===== 确认单弹窗的 .cm-* 样式已随新建模式删除（弹窗本体在 CreateProjectSheet 里） ===== */
 
 @media (max-width: 980px) {
   .desk {

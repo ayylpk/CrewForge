@@ -39,12 +39,21 @@ const project = ref<Project | null>(null)
 const loading = ref(true)
 
 /** 后端 JSON 列解析成字符串清单：认裸数组，也认引擎写的信封对象（见 utils/json.ts） */
-function parseJsonArr(raw?: string | null): string[] {
-  return toDisplayList(parseEnvelopeArray(raw, ENVELOPE_KEYS.businessModules))
+function parseJsonArr(raw?: string | null, keys: readonly string[] = ENVELOPE_KEYS.businessModules): string[] {
+  return toDisplayList(parseEnvelopeArray(raw, keys))
 }
 
-// 已确认功能(businessModules)（字符串数组）
-const features = computed(() => parseJsonArr(project.value?.businessModules))
+/**
+ * 功能清单：优先架构师的业务模块（business_modules，最终交付物），
+ * 没有就退到 PM 澄清阶段的已确认功能（clarified_req）。
+ * ⚠️ 9/18：原来只读 business_modules —— 项目刚澄清完、架构师还没跑时，
+ * 这一页会显示"还没有确认功能"，可数据就在 clarified_req 里（需求对话页同批修）。
+ * 两列是两个阶段的产物，见 utils/json.ts 顶部说明。
+ */
+const features = computed(() => {
+  const modules = parseJsonArr(project.value?.businessModules)
+  return modules.length ? modules : parseJsonArr(project.value?.clarifiedReq, ENVELOPE_KEYS.clarifiedReq)
+})
 
 /** 开发阶段（devPlan 是对象数组：{ name, progress, tasks }） */
 interface PlanPhase {

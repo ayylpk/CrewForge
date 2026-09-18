@@ -17,8 +17,20 @@
 /** 信封里各字段的数组所在 key（顺序即优先级） */
 export const ENVELOPE_KEYS = {
   businessModules: ['modules', 'features', 'deliverables'],
-  // technologies 优先：架构师页把用户编辑的扁平清单写在这里（引擎原来的 techniques 是
-  // 分类对象 {database:{…}, middleware:[…]}，与页面模型不是一回事，不能被它顶替）
+  // PM 澄清产物：manager 写的形状就是 {features:[{name,description,priority,acceptance}]}。
+  // ⚠️ 与 businessModules 是**两个阶段的两种产物**，别混用（9/18 踩过）：
+  //   clarified_req    = PM 澄清阶段每轮累积的"已确认功能"（manager 写）
+  //   business_modules = 架构师拆分出来的业务模块（架构师写）
+  // 需求对话页该读前者；概览页优先后者（那是最终交付物）。
+  clarifiedReq: ['features'],
+  // 架构师页"技术选型"标签云：**只取网页自己写的扁平清单**。
+  // ⚠️ 9/18 修：原来这里是 ['technologies','techniques','moduleTech','middleware','tables']，
+  //    找不到 technologies 就一路退到 moduleTech/tables —— 那两个是**对象数组**
+  //    （{module,backend,frontend} / {name,fields,purpose}），toDisplayList 认不出
+  //    就 JSON.stringify，页面上把一坨原始 JSON 当标签印出来。
+  //    现网 10 个项目全部命中（引擎信封里没有 technologies 这个键）。
+  //    结构化数组现在交给 ArchitectView 的「架构师方案」只读面板渲染，不进标签云。
+  techStackPageList: ['technologies'],
   techStack: ['technologies', 'techniques', 'moduleTech', 'middleware', 'tables'],
   devPlan: ['phases'],
   dirTree: ['tree', 'children'],
@@ -146,5 +158,129 @@ export function buildDevPlanJson(
 export function buildTechStackJson(envelope: Record<string, unknown> | null, list: string[]): string {
   if (envelope) return JSON.stringify({ ...envelope, technologies: list })
   return JSON.stringify(list)
+}
+
+/**
+ * 只保留**字符串**的清单（给"标签/chip"这类扁平展示用）。
+ *
+ * 为什么需要它（9/18 架构师页实测）：引擎的 tech_stack 信封里
+ * `moduleTech: [{module, backend, frontend}]`、`tables: [{name, fields, purpose}]`
+ * 都是**对象数组**，而 toDisplayList() 认不出这些键 → 兜底 JSON.stringify
+ * → 页面上把 `{"module":"用户登录与退出","backend":"…","frontend":"…"}` 原样印出来。
+ * 现网 10 个项目**全部**是这种信封，等于技术选型那块一直在印原始 JSON。
+ *
+ * 所以：chips 只吃真字符串；结构化数组交给专门的只读面板渲染（见 ArchitectView）。
+ */
+export function toStringList(items: unknown[]): string[] {
+  return items
+    .filter((it): it is string => typeof it === 'string')
+    .map((s) => s.trim())
+    .filter(Boolean)
+}
+
+/* ============================================================
+   架构师方案（tech_stack 信封的结构化产物）
+   ------------------------------------------------------------
+   引擎写的信封长这样（现网 10/10 项目都是，见 9/18 实测）：
+     {why, tables:[{name,fields:[{name,type,remark,required}],purpose}],
+      moduleTech:[{module,backend,frontend}], techniques:{database:{type,why},middleware:[{name,purpose}]}}
+   这几块以前在页面上完全看不见（标签云只会把它们 JSON.stringify 成一坨）。
+   抽成纯函数放这里而不是写进 ArchitectView，理由同下面两个 build*：
+   **前端没有测试框架，而这类解析写错就是静默少显示**，得能拿真实库数据跑它。
+   ============================================================ */
+
+export interface ArchModuleTech {
+  module: string
+  backend: string
+  frontend: string
+}
+export interface ArchField {
+  name: string
+  type: string
+  remark: string
+  required: boolean
+}
+export interface ArchTable {
+  name: string
+  purpose: string
+  fields: ArchField[]
+}
+export interface ArchPlan {
+  why: string
+  moduleTech: ArchModuleTech[]
+  tables: ArchTable[]
+  dbType: { type: string; why: string } | null
+  middleware: { name: string; purpose: string }[]
+  /** 引擎到底给过方案没有——没有就别在页面上摆一块空面板 */
+  has: boolean
+}
+
+const asStr = (v: unknown): string => (typeof v === 'string' ? v : '')
+/** 只认"是对象"的数组元素：null/字符串混进来会让模板里的字段访问崩 */
+function objArray<T>(v: unknown): T[] {
+  return Array.isArray(v) ? (v.filter((x) => x != null && typeof x === 'object') as T[]) : []
+}
+
+export function parseArchPlan(envelope: Record<string, unknown> | null): ArchPlan {
+  const e = envelope ?? {}
+  const why = asStr(e.why)
+  const moduleTech = objArray<Record<string, unknown>>(e.moduleTech).map((m) => ({
+    module: asStr(m.module),
+    backend: asStr(m.backend),
+    frontend: asStr(m.frontend),
+  }))
+  const tables = objArray<Record<string, unknown>>(e.tables).map((t) => ({
+    name: asStr(t.name),
+    purpose: asStr(t.purpose),
+    fields: objArray<Record<string, unknown>>(t.fields).map((f) => ({
+      name: asStr(f.name),
+      type: asStr(f.type),
+      remark: asStr(f.remark),
+      required: f.required === true,
+    })),
+  }))
+  const tech = e.techniques && typeof e.techniques === 'object' ? (e.techniques as Record<string, unknown>) : {}
+  const db = tech.database && typeof tech.database === 'object' ? (tech.database as Record<string, unknown>) : null
+  const dbType = db ? { type: asStr(db.type), why: asStr(db.why) } : null
+  const middleware = objArray<Record<string, unknown>>(tech.middleware).map((m) => ({
+    name: asStr(m.name),
+    purpose: asStr(m.purpose),
+  }))
+  return {
+    why,
+    moduleTech,
+    tables,
+    dbType,
+    middleware,
+    has: Boolean(why || moduleTech.length || tables.length || middleware.length || dbType),
+  }
+}
+
+/**
+ * 生成新的 clarifiedReq JSON（需求对话页「保存功能清单」用）。
+ *
+ * 为什么必须**保结构合并**而不是 `{features: list}` 一把重建：
+ *   页面上的清单是 toDisplayList() 压出来的字符串数组（只有 name），
+ *   而库里每条是 {name, description, priority, acceptance} —— PM 一字一句写出来的。
+ *   直接重建 = 把 description/priority/acceptance 全冲掉，而且是**静默**的：
+ *   页面上名字还在，看不出内容已经没了。9/18 实测抓到（写 65 字 vs 原文 840 字）。
+ *
+ * 合并口径：按 name 对上就保留原对象、只覆盖 name；对不上的（新增/改过名）当新功能写 {name}。
+ * 改名与"删掉再加一条"在这一层无从区分，所以牺牲改名者的细节——比静默毁数据好。
+ */
+export function buildClarifiedReqJson(envelope: Record<string, unknown> | null, list: string[]): string {
+  const orig = Array.isArray(envelope?.features) ? (envelope!.features as unknown[]) : []
+  const byName = new Map<string, Record<string, unknown>>()
+  for (const it of orig) {
+    if (it && typeof it === 'object') {
+      const o = it as Record<string, unknown>
+      if (typeof o.name === 'string' && o.name) byName.set(o.name, o)
+    }
+  }
+  const features = list.map((name) => {
+    const hit = byName.get(name)
+    return hit ? { ...hit, name } : { name }
+  })
+  return JSON.stringify(envelope ? { ...envelope, features } : { features })
 }
 

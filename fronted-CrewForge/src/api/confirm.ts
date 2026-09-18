@@ -14,13 +14,23 @@ export interface ConfirmQuestion {
   node: string        // architect / manager（发问节点，角标展示）
   question: string    // 题面
   optionsJson: string | null   // '["y","n"]'；null/空=自由文本题
-  status: string      // pending（列表接口只回 pending）
+  status: string      // pending / answered / auto_passed（列表接口只回 pending，history 回全部）
+  reply: string | null // 人的答复；未答为 null（仅 history 有值）
   expireAt: string | null      // 超此时刻自动放行（默认答案=options 第一项）
   createTime: string
 }
 
 export function fetchPendingConfirms(projectId: number): Promise<ConfirmQuestion[]> {
   return request.get('/api/confirm/pending', { params: { projectId } }) as Promise<ConfirmQuestion[]>
+}
+
+/**
+ * 项目全部问答记录（含已答/已放行），按 id 升序。
+ * 需求对话页的对话记录靠它：pending 只回未答的，答完就消失，
+ * 只轮询 pending 的话刷新一下对话就空了——看着像没连上（9/18）。
+ */
+export function fetchConfirmHistory(projectId: number): Promise<ConfirmQuestion[]> {
+  return request.get('/api/confirm/history', { params: { projectId } }) as Promise<ConfirmQuestion[]>
 }
 
 export function answerConfirm(id: number, answer: string): Promise<void> {

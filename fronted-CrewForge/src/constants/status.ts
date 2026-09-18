@@ -7,16 +7,17 @@
    ============================================================ */
 
 /** 图章色名（= style.css .stamp-{tone}/.lamp-{tone} 的 tone，StampSeal.vue 同口径） */
-export type StampTone = 'pass' | 'void' | 'wait' | 'info' | 'pencil' | 'rust'
+export type StampTone = 'pass' | 'void' | 'wait' | 'info' | 'pencil' | 'rust' | 'indigo'
 
 /** 项目状态（后端 status 字段的 8 个取值） */
 export const PROJECT_STATUS: Record<string, { label: string; tone: StampTone }> = {
   draft: { label: '草稿', tone: 'pencil' }, // 铅笔灰：还没下墨
-  // ⚠️ 规划中改铅笔灰（9/17 方案 A）：原来它和「执行中」共用 info（晒图青），
-  //    而青同时还是主按钮/链接/选中/图号的色 —— 一个色五种含义，
-  //    操作员一眼分不出"机器在跑"和"还没开工"，也分不出"这能点"和"这是状态"。
-  //    青从此专属 executing（+ 交互态）；draft 与 planning 撞灰是可接受的代价（都是"还没开工"）。
-  planning: { label: '规划中', tone: 'pencil' },
+  // ⚠️ 规划中改「靛」（9/18 第 7 个章色，见 style.css 与 DESIGN.md §1）。
+  //    历史：原先 planning 与 executing 共用晒图青 —— 一个色五种含义（主按钮/链接/选中/图号/状态），
+  //    操作员分不出"机器在跑"和"还没开工"。9/17 改成跟草稿一样的铅笔灰，代价是
+  //    **草稿与规划中肉眼分不开**（用户实测反馈"草稿/规划中/执行中没颜色区分"）。
+  //    现在：草稿=灰 / 规划中=靛 / 执行中=青，三档彼此可分；青仍专属 executing 与交互态。
+  planning: { label: '规划中', tone: 'indigo' },
   clarifying: { label: '澄清中', tone: 'wait' }, // 待检黄：等人回答问题
   executing: { label: '执行中', tone: 'info' }, // 晒图青：机器在画（唯一用青的状态）
   paused: { label: '已暂停', tone: 'rust' }, // 铁锈橙：停车队列
