@@ -20,6 +20,13 @@ public interface ConfirmService {
     /** Web：项目当前待答问题（含题面/选项，前端弹卡数据源） */
     List<Confirm> listPending(Long projectId);
 
+    /**
+     * Web：项目**全部**问答记录（含已答/已放行），按 id 升序 —— 需求对话页的对话记录。
+     * 为什么要它：listPending 只回 pending，答完即消失，页面刷新后对话就空了，
+     * 看着像"根本没连上"。历史端点让 PM 的问与人的答都留得下来（9/18）。
+     */
+    List<Confirm> listByProject(Long projectId);
+
     /** Web：人提交答案（pending→answered；已答/已放行则报错） */
     void answer(Long id, String reply);
 

@@ -96,8 +96,12 @@ public class SettingsServiceImpl implements SettingsService {
         if (dto.getModelUrl() != null) s.setModelUrl(blankToNull(dto.getModelUrl()));
         if (dto.getModelKind() != null) s.setModelKind(dto.getModelKind());
         // apiKey：掩码占位符（前端原样回传）或空 = 不动库里已有的；带 * 或 "****" 开头视为未修改
+        // 9/18：另开一条**显式清除**通道 —— 旧的"空=保持"语义下，用户填错了 key 根本删不掉
+        //   （实测反馈"填入了就不让修改"）。优先级：填了真值 → 覆盖；否则 clearApiKey=true → 清空；否则保持。
         if (dto.getApiKey() != null && !isMasked(dto.getApiKey())) {
             s.setApiKey(blankToNull(dto.getApiKey()));
+        } else if (Boolean.TRUE.equals(dto.getClearApiKey())) {
+            s.setApiKey(null);
         }
         if (dto.getJavaBaseUrl() != null) {
             String base = blankToNull(dto.getJavaBaseUrl());

@@ -111,8 +111,17 @@ public class ConfirmServiceImpl implements ConfirmService {
     }
 
     @Override
-    public void answer(Long id, String reply) {
-        Confirm row = confirmMapper.selectById(id);
+    public List<Confirm> listByProject(Long projectId) {
+        projectGuard.requireOwned(projectId);
+        // 不过滤 status：已答/已放行都要留痕（这就是"对话记录"）。
+        // 不清 sweepExpired：历史是只读的，不该有副作用。
+        return confirmMapper.selectList(new LambdaQueryWrapper<Confirm>()
+                .eq(Confirm::getProjectId, projectId)
+                .orderByAsc(Confirm::getId));
+    }
+
+    @Override
+    public void answer(Long id, String reply) {        Confirm row = confirmMapper.selectById(id);
         if (row == null) {
             throw new BaseException("问题不存在: " + id);
         }

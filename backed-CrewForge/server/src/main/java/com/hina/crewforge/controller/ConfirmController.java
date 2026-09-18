@@ -52,6 +52,12 @@ public class ConfirmController {
         return Result.success(confirmService.listPending(projectId));
     }
 
+    @Operation(summary = "项目全部问答记录（Web 对话记录，含已答）")
+    @GetMapping("/history")
+    public Result<List<Confirm>> history(@RequestParam Long projectId) {
+        return Result.success(confirmService.listByProject(projectId));
+    }
+
     @Operation(summary = "提交答案（一次性，重复提交报错）")
     @PostMapping("/{id}/answer")
     public Result<Void> submit(@PathVariable Long id, @RequestBody ConfirmAnswerDTO dto) {

@@ -17,6 +17,14 @@ public class SettingsDTO {
     private String roleModels;
     private String modelUrl;
     private String apiKey;
+    /**
+     * 显式清除已保存的 apiKey（9/18 加）。
+     *
+     *   为什么必须单独开一个开关：`apiKey` 的既有语义是"空/掩码 = 保持原值"，
+     *   于是**没有办法把 key 清成空** —— 用户填错了想删掉都做不到（实测反馈）。
+     *   现在：填了真值 → 覆盖；没填真值但 clearApiKey=true → 清空；两者都没有 → 保持。
+     */
+    private Boolean clearApiKey;
     /** deepseek | openai */
     private String modelKind;
     private String javaBaseUrl;
