@@ -10,6 +10,7 @@ import {
   type RepairResult,
   formatContext,
 } from "./context";
+import { checkPermission, decideBash, decidePath, defaultGuard, scrubSecrets, type Guard } from "./permission";
 import { loadSkills, skillsPrompt } from "./skills";
 
 /**
@@ -80,6 +81,12 @@ export async function runAgent(
   maxIter = 999,
   requireSkillReads: string[] = [],
 ): Promise<AgentRunResult> {
+  // 权限闸门的作用域（9/18）：
+  //   被 CrewForge 驱动（专修模式）→ 用它给的三条根目录；
+  //   本地自己跑（--auto / 交互 / 单次问答）→ 之前**根本没有闸门**，现在默认 root=启动目录。
+  //   两者共用 permission.ts 的同一套裁决，不另写策略（政策一分叉就会漂移）。
+  const guard: Guard | null = activeRepairGuard ?? defaultGuard();
+
   // 技能只扫一次：L1 注入与开工闸门共用同一份清单
   const skills = await loadSkills();
 
@@ -115,7 +122,26 @@ export async function runAgent(
     .filter((s): s is NonNullable<typeof s> => !!s);
   const readSkills = new Set<string>();
 
+  /**
+   * 预算到顶自动放宽一次（9/18，用户拍板："预算会自己增加一点，例如增加到 1.5 倍才停下"）。
+   *
+   * 为什么要放宽而不是硬停：撞上限常见于"已经看到出口、再补一两轮就能收"的场面
+   * （典型是最后一次回归测试正在跑）。硬停在那一刻 = 把前面几十轮的进展白扔，
+   * 而且产物停在半截、报告还说不出所以然。
+   * 为什么只放宽**一次**：放宽两次就等于没有上限；模型一旦知道上限会自己长，试探行为会失控。
+   * 所以是"一次止损"：给 1.5 倍把话说完，仍不收就按 incomplete 诚实交代。
+   */
+  const BUDGET_EXTEND_FACTOR = 1.5;
+  let budgetExtended = false;
+
   for (let i = 0; i < maxIter; i++) {
+    // 撞到上限前放宽一次（只放宽一次；交互模式 999 已经等于不限，不参与）
+    if (!budgetExtended && maxIter <= 500 && i === maxIter - 1) {
+      const next = Math.round(maxIter * BUDGET_EXTEND_FACTOR);
+      console.error(`  [预算] 已达 ${maxIter} 轮，自动放宽到 ${next} 轮（只放宽一次，仍不收尾就按 incomplete 交代）`);
+      maxIter = next;
+      budgetExtended = true;
+    }
     compressOldToolMessages(messages);
     // 预算提醒（9/4 复盘问题5）：模型不知道还剩几轮，会在第 28 轮才啃硬骨头撞上限。
     // 只在有限预算(≤50)时提醒一次，交互模式(999)不适用。措辞对齐 SKILL.md 流程第 5 条。
@@ -156,35 +182,38 @@ export async function runAgent(
         }));
         continue;
       }
-      // —— 专修模式路径闸门（CrewForge engine2 第十二步）——
-      //   机械判定，不靠模型自觉：edit/write 只能落在 allowedRoots 内；
-      //   项目外（CrewForge 源码 / 本 agent 自身）、.git 一律拒绝。
-      if (activeRepairGuard && (tc.name === "edit" || tc.name === "write")) {
-        const target = String(tc.args?.file_path ?? tc.args?.path ?? "");
-        const d = isRepairPathAllowed(target, activeRepairGuard.allowedRoots, activeRepairGuard.projectDir);
-        if (!d.ok) {
-          console.error(`  [repair-guard] 拦截 ${tc.name}：${d.reason}`);
-          messages.push(new ToolMessage({
-            content: `⛔ ${d.reason}\n（专修模式：只能修改 allowedRoots 内的文件；改别处一律被拒绝，重试也不会生效）`,
-            tool_call_id: tc.id!,
-          }));
-          continue;
-        }
-        touched.add(d.abs);
-      }
-      if (activeRepairGuard && tc.name === "bash") {
-        const d = isRepairBashAllowed(String(tc.args?.command ?? ""), activeRepairGuard.allowedRoots, activeRepairGuard.projectDir);
-        if (!d.ok) {
-          console.error(`  [repair-guard] 拦截 bash：${d.reason}`);
-          messages.push(new ToolMessage({
-            content: `⛔ ${d.reason}\n（专修模式：写盘命令的目标必须在 allowedRoots 内）`,
-            tool_call_id: tc.id!,
-          }));
-          continue;
+      // —— 权限闸门（9/18）：五个工具**统一**走这里 ——
+      //   原来只盖了 edit/write/bash，而且只在专修模式下开；read/grep 从来没管过，
+      //   本地自己跑更是完全没闸门。现在：
+      //     路径类（read/grep/edit/write）→ decidePath：秘密文件直接拒、越出 root 直接拒
+      //     bash                            → decideBash：不可逆硬拒 / 白名单直放 / 其余弹窗问人
+      //   ask 在无人值守时降级为拒（绝不"卡着等输入"或"默默放行"）。
+      if (guard) {
+        const decision =
+          tc.name === "bash"
+            ? decideBash(String(tc.args?.command ?? ""), guard)
+            : tc.name === "read" || tc.name === "grep" || tc.name === "edit" || tc.name === "write"
+              ? decidePath(tc.name, String(tc.args?.file_path ?? tc.args?.address ?? tc.args?.path ?? "."), guard)
+              : null;
+        if (decision) {
+          const gate = await checkPermission(decision);
+          if (gate.ok) {
+            if (decision.effect !== "allow" || gate.note.includes("允许")) {
+              console.error(`  [perm] 放行 ${tc.name}${gate.note ? " " + gate.note : ""}`);
+            }
+            if (tc.name === "edit" || tc.name === "write") touched.add(decision.display);
+          } else {
+            console.error(`  [perm] 拦截 ${tc.name}：${decision.reason}`);
+            messages.push(new ToolMessage({
+              content: `⛔ ${gate.note}\n（被拒的不是"你做错了"，是这台机器上不允许这么动。换成范围内/白名单内的做法重试；别试着绕过。）`,
+              tool_call_id: tc.id!,
+            }));
+            continue;
+          }
         }
       }
       try {
-        const result = await (tool as any).invoke(tc.args) as string;
+        const result = scrubSecrets(await (tool as any).invoke(tc.args) as string);
         messages.push(new ToolMessage({ content: result, tool_call_id: tc.id! }));
         // read 成功命中 required SKILL.md → 登记解锁
         if (tc.name === "read" && !result.startsWith("❌")) {

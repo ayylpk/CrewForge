@@ -1,5 +1,6 @@
 import "dotenv/config";
 import readline from "readline";
+import { setConfirmer } from "./src/permission";
 // 9/13 结构定稿：main/context 改为动态 import——--verify 验收路径必须**结构性**
 // 不加载模型链（models.ts 在模块顶层就 new ChatOpenAI，静态 import 会让零 LLM
 // 承诺依赖"key 恰好配了"这种运气，而不是代码）。auto/chat 路径行为不变。
@@ -72,6 +73,10 @@ async function main() {
       jsonMode = true;
     } else if (args[i] === "--verify") {
       verifyMode = true;
+    } else if (args[i] === "--yes") {
+      // 无人值守时把"需要确认"的操作直接放行（opencode 的 permission:"allow" 同义）。
+      // 默认**不是**这个 —— 默认是拒，因为无人可问时默默放行等于没有闸门。
+      process.env.TESTAGENT_PERMISSION = "allow";
     } else if (args[i] === "--no-llm-review") {
       // 只跑机械段（不联网）。注意：关掉审查后 outcome 永远不是 pass——
       // "没有审查就不算通过"是刻意的，不能拿它当"放行开关"。
@@ -227,6 +232,34 @@ async function main() {
   });
 
   console.log("🤖 本地代码助手已启动（输入 exit 退出）\n");
+
+  // ============================================================
+  // 权限对话框（独立于对话输入，9/18）
+  //   照 opencode / claude code / dsh 三家的同一套：ask 时弹一张卡，
+  //   三个答案 —— 允许一次 / 始终允许 / 拒绝。
+  //   为什么由这里注册：readline 归本文件所有。在 guard 里另开一个 readline
+  //   会跟这个抢 stdin（输入会丢），所以把"怎么问人"注入进去，策略留在 permission.ts。
+  //   注意：只在 TTY 下注册。非 TTY（管道/CI）注册了也没人答，permission.ts 那边
+  //   本来就会把 ask 降级为拒。
+  // ============================================================
+  if (process.stdin.isTTY) {
+    setConfirmer(async (d) => {
+      const bar = "─".repeat(64);
+      process.stdout.write(
+        `\n${bar}\n` +
+        `⚠️  需要你确认（${d.effect === "ask" ? "不在白名单" : d.effect}）：${d.reason}\n\n` +
+        `    ${d.display}\n\n` +
+        `  1) 允许一次    2) 始终允许（本会话记住：${d.key}）    3) 拒绝  [默认 3]\n${bar}\n`,
+      );
+      const ans = await new Promise<string>((resolve) => rl.question("选择 [1/2/3]: ", resolve));
+      const t = ans.trim().toLowerCase();
+      if (t === "1" || t === "y" || t === "yes") return "once";
+      if (t === "2" || t === "a" || t === "always") return "always";
+      return "no";
+    });
+  } else {
+    console.error("ℹ️ 非 TTY：需要确认的操作一律按拒绝处理（无人可问）");
+  }
 
   rl.prompt();
 

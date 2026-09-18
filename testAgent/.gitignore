@@ -34,6 +34,11 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .DS_Store
 
 # runtime-generated project index (tool.ts auto-writes)
+# ⚠️ 9/18：这一行原来只剩注释、条目丢了（下面空行），于是 indexes.md 会以未跟踪文件冒出来
+indexes.md
+
+# 权限闸门的审计日志（permission.ts 自动写；事后可查它跑过什么、动过哪些文件）
+.audit/
 
 # eval 跑证留档（每次重跑覆盖，不入库）
 evals/results/
