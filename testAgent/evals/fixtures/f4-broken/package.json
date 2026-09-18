@@ -1,0 +1,9 @@
+{
+  "name": "f4-broken",
+  "module": "gate.test.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "bun test"
+  }
+}

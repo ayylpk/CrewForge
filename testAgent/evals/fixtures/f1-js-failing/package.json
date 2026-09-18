@@ -1,0 +1,9 @@
+{
+  "name": "f1-js-failing",
+  "module": "src/calc.ts",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "bun test"
+  }
+}

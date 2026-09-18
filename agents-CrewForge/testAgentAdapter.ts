@@ -374,7 +374,11 @@ export async function runTestAgentVerify(
         throw new Error(`testAgentAdapter：请求本身不完整（缺 ${[...miss, ...(req.acceptanceChecks.length ? [] : ["acceptanceChecks"])].join("、")}）——装配层问题，不派发`);
     }
 
-    const testAgentDir = opts.testAgentDir ?? process.env.TESTAGENT_DIR ?? "F:/code/agent/testAgent";
+    // ★ 9/18：testAgent 已从仓外（F:/code/agent/testAgent）**搬进本仓** `testAgent/`。
+    //   优先级：显式 opts > 环境变量 > 仓库内默认位置——默认值改成相对本仓解析，
+    //   这样 clone 下来就自带裁判（不再依赖某台机器上的绝对路径）。
+    const testAgentDir = opts.testAgentDir ?? process.env.TESTAGENT_DIR
+        ?? path.resolve(import.meta.dir, "..", "testAgent");
     const bunPath = opts.bunPath ?? "bun";
     const indexTs = path.join(testAgentDir, "index.ts");
     // 看门狗要盖住两段：机械命令的总时长 + 语义审查（默认最多 180s）

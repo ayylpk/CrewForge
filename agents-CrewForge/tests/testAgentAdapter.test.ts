@@ -21,7 +21,9 @@ import {
 // 但"静默吞错"的口子正是 %TEMP% 攒到 911 个目录却没人发现的原因，所以一并换掉。
 import { cleanupTempDirsAfterTests, tmpDir } from "../developerAgent/tests/_tmp";
 
-const TESTAGENT_DIR = process.env.TESTAGENT_DIR ?? "F:/code/agent/testAgent";
+// ★ 9/18：testAgent 已搬进本仓 `testAgent/`（原先在仓外 F:/code/agent/testAgent）。
+//   与适配器的默认值同一口径：显式 env 优先，否则按本仓相对路径解析。
+const TESTAGENT_DIR = process.env.TESTAGENT_DIR ?? path.resolve(import.meta.dir, "..", "..", "testAgent");
 
 /**
  * 最小环境：**故意不给任何审查模型的 key**。

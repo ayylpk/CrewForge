@@ -11,6 +11,13 @@
 | 前端 | `fronted-CrewForge/` | Vue 3 + Vite + TypeScript + Element Plus（藏青/午夜蓝赛博朋克风） |
 | 后端 | `backed-CrewForge/` | Spring Boot 3 + MyBatis-Plus + MySQL 8 + JWT（`pojo/common/server` 三模块） |
 | Agent 引擎 | `agents-CrewForge/` | Bun + TypeScript + LangChain.js / LangGraph.js |
+| 独立验收器 | `testAgent/` | Bun + TypeScript：只读独立验收（`--verify`，零 LLM / 不写目标项目），被引擎的 test-core 工位 spawn |
+
+> `testAgent/` 原先在仓外（`F:/code/agent/testAgent`）单独一个仓库，2026-09-18 搬进本仓——
+> 现在 clone 下来就自带裁判，不再依赖某台机器上的绝对路径。
+> 接线在 `agents-CrewForge/testAgentAdapter.ts`（默认 `path.resolve(import.meta.dir, "..", "testAgent")`，
+> 可用 `TESTAGENT_DIR` 覆盖）。它与引擎之间是**手工镜像的契约**（`testAgent/src/verify.ts` ↔ 适配器里的
+> 类型，跨仓不 import），改动一边时另一边要同步。
 
 ## 架构
 
