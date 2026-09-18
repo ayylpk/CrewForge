@@ -21,6 +21,7 @@ import {
   IconMessage,
   IconRefresh,
   IconSend,
+  IconShieldLock,
   IconTerminal,
   IconX,
 } from '@tabler/icons-vue'
@@ -30,7 +31,7 @@ import TopBar from '../components/ui/TopBar.vue'
 import AppModal from '../components/ui/AppModal.vue'
 import StampSeal from '../components/ui/StampSeal.vue'
 import { AGENT_NAMES } from '../constants/agents'
-import { MODE_META, MODE_NUM_TO_STR, TASK_STATUS, nodeLabel, type StampTone } from '../constants/status'
+import { MODE_META, MODE_NUM_TO_STR, TASK_STATUS, type StampTone } from '../constants/status'
 import { fetchProjectFiles, fetchProjectFileDetail } from '../api/projectFile'
 import type { FileNode, projectFileVO } from '../types/file'
 import { useExecutionStore } from '../stores/execution'
@@ -39,6 +40,14 @@ import type { TaskItem as ApiTaskItem, TaskStatus } from '../api/task'
 import { fetchProjectById, updateProject } from '../api/project'
 import { fetchPendingConfirms, parseOptions, type ConfirmQuestion } from '../api/confirm'
 import { answerConfirm as answerConfirmApi } from '../api/confirm'
+import { answerPermission, type PermissionDecision } from '../api/confirm'
+import {
+  disablePermissionRule,
+  fetchPermissionRules,
+  fetchRecentDenials,
+  type PermissionRule,
+} from '../api/permission'
+import PermissionRequestCard from '../components/ui/PermissionRequestCard.vue'
 import { usePolling } from '../composables/usePolling'
 import { pmAnswer, type PmSnapshot } from '../utils/pmChat'
 import { toast } from '../utils/toast'
@@ -85,6 +94,76 @@ const pendingConfirms = ref<ConfirmQuestion[]>([])
 const confirmText = ref('')
 const confirmBusy = ref(false)
 
+/**
+ * 权限规则（9/18）：点"始终允许"会把规则写进库，写完立刻回读 ——
+ * 否则"我刚写的规则在哪"要等下次进页面才看得到（人就会怀疑那一下点击没生效）。
+ */
+const permRules = ref<PermissionRule[]>([])
+const permDenials = ref<{ command?: string; question?: string }[]>([])
+
+async function loadRules() {
+  const id = routeProjectId.value
+  if (id == null) return
+  try {
+    permRules.value = await fetchPermissionRules(id)
+  } catch {
+    /* 后端未就绪：规则列表是增强，不拦看板 */
+  }
+}
+
+/** 最近被拒：detail_json 里只有字符串，取出来给"最近被拒"面板显示命令原文 */
+async function loadDenials() {
+  const id = routeProjectId.value
+  if (id == null) return
+  try {
+    const rows = await fetchRecentDenials(id, 20)
+    permDenials.value = (rows as Record<string, unknown>[]).map((r) => {
+      let command: string | undefined
+      const raw = r.detailJson
+      if (typeof raw === 'string' && raw) {
+        try {
+          const d = JSON.parse(raw) as { command?: string }
+          command = d.command
+        } catch {
+          /* 坏 JSON 就当没有，不炸面板 */
+        }
+      }
+      return { command, question: typeof r.question === 'string' ? r.question : undefined }
+    })
+  } catch {
+    /* 同上：增强项，失败不拦 */
+  }
+}
+
+/** 停用规则（不物理删：停用后仍能看见它曾经存在过） */
+async function disableRule(id: number) {
+  try {
+    await disablePermissionRule(id)
+    toast.success('规则已停用（保留在列表里，便于日后对照）')
+    await loadRules()
+  } catch {
+    /* 拦截器已提示 */
+  }
+}
+
+const permBehaviorLabel = (b: string): string =>
+  b === 'allow' ? '允许' : b === 'deny' ? '拒绝' : '询问'
+const permSourceLabel = (s: string): string =>
+  s === 'policy' ? '策略层' : s === 'project' ? '项目层' : s === 'session' ? '会话层' : '用户层'
+
+/**
+ * 当前模式对"命令权限"意味着什么 —— 这张表是要给人看的，不是内部实现细节：
+ *   全自动 —— 什么都不问（连破坏性命令也放），预算不设限
+ *   混合   —— 白名单直放；有后果的命令（装依赖/写盘/连网/删改）问一次；换阶段问 y/n
+ *   手动   —— 白名单以外一律问
+ * 写在这里而不是散在代码里：人看到规则列表为空时，得能自己判断"是没规则，还是模式没问"。
+ */
+const permModeHint = computed(() => {
+  if (confirmMode.value === 0) return '· 全时不询问，命令一律放行'
+  if (confirmMode.value === 2) return '· 白名单之外一律询问'
+  return '· 有后果的命令才询问'
+})
+
 async function pollConfirms() {
   const id = routeProjectId.value
   if (id == null || projectGone.value) return // 无效 id / 项目已删：都别发
@@ -116,8 +195,41 @@ function confirmCountdown(expireAt: string | null): string {
   return min > 0 ? `${min} 分钟无人应答将自动放行` : '即将自动放行'
 }
 
+/**
+ * 权限卡的倒计时 —— 文案与问答卡**故意不同**（9/18）：
+ *   问答卡超时=按默认答案放行；权限卡超时=**按拒绝处理**（fail-closed，见后端 passExpired）。
+ * 这里如果偷懒复用"将自动放行"，人就会以为"不管它也会过去"，
+ * 而实际结果是"不管它就不许跑" —— 两句话指向相反的后果，不能共用。
+ */
+function permCountdown(expireAt: string | null): string {
+  if (!expireAt) return ''
+  const min = Math.max(0, Math.round((new Date(expireAt).getTime() - Date.now()) / 60000))
+  return min > 0 ? `${min} 分钟无人应答将按「拒绝」处理` : '即将按「拒绝」处理'
+}
+
+/** 审批卡的裁定提交：走 decision（可判定枚举），不走 answer 文本 */
+async function submitPermission(decision: PermissionDecision) {
+  if (confirmBusy.value || !pendingConfirms.value.length) return
+  confirmBusy.value = true
+  try {
+    await answerPermission(pendingConfirms.value[0]!.id, decision)
+    toast.success(
+      decision === 'deny'
+        ? '已拒绝，引擎会换做法或如实交代'
+        : decision === 'allow_always'
+          ? '已始终允许（规则已写入，同类命令不再询问）'
+          : '已允许这一次',
+    )
+    await pollConfirms()
+    // 规则落库后立刻刷新规则列表 —— 否则"我刚写的规则在哪"要等下次进页面才看得到
+    await loadRules()
+  } finally {
+    confirmBusy.value = false
+  }
+}
+
 // ===== 布局状态（活动栏三席） =====
-const activeView = ref<'files' | 'chat'>('files') // 左侧边栏内容
+const activeView = ref<'files' | 'chat' | 'rules'>('files') // 左侧边栏内容：文件树 / 对话 / 命令权限规则
 // 窄屏（≤860px 侧栏变浮层，挡着看图台）默认收抽屉——车间图纸桌先给屏幕，点图夹脊可开
 const leftOpen = ref(!window.matchMedia('(max-width: 860px)').matches) // 左侧边栏
 const rightOpen = ref(false) // 右侧边栏（任务看板）
@@ -529,6 +641,8 @@ onMounted(async () => {
   // 看板唯一数据源=sys_task 轮询（假卡片/假时间线已随施工卡 1-4 撤除）
   await pollTasks()
   void pollConfirms() // 确认门首拉：进页面就答，不等 10s（阶段 3）
+  void loadRules()    // 规则与最近被拒：活动栏角标要显示条数，所以首拉一次
+  void loadDenials()
   // 回填真项目名 + 库中确认模式（阶段 3：模式以 sys_project.confirm_mode 为真相，本地只是即时态）
   const pid = routeProjectId.value
   if (pid != null) {
@@ -660,6 +774,15 @@ async function pollFiles() {
         </button>
         <button
           class="activity-item"
+          :class="{ active: leftOpen && activeView === 'rules' }"
+          title="命令权限规则"
+          @click="leftOpen && activeView === 'rules' ? (leftOpen = false) : ((activeView = 'rules'), (leftOpen = true), loadRules(), loadDenials())"
+        >
+          <IconShieldLock :size="21" :stroke-width="1.75" />
+          <span v-if="permRules.length" class="activity-count mono">{{ permRules.length }}</span>
+        </button>
+        <button
+          class="activity-item"
           :class="{ active: rightOpen }"
           title="任务看板"
           @click="rightOpen = !rightOpen"
@@ -688,6 +811,56 @@ async function pollFiles() {
           </div>
           <div class="side-scroll">
             <FileTree :nodes="fileTree" :active-path="activeFile?.path" @open="openFile" />
+          </div>
+        </template>
+
+        <!-- 规则视图（9/18）：命令权限的三态规则 + 最近被拒 -->
+        <template v-else-if="activeView === 'rules'">
+          <div class="side-head">
+            <span>命令权限规则</span>
+            <span class="side-count">{{ permRules.filter((r) => r.enabled === 1).length }} 条生效</span>
+          </div>
+          <div class="side-scroll rules-panel">
+            <!-- 当前模式 → 权限行为。把"这个模式下什么会被问"写清楚，
+                 否则人会以为规则坏了（其实是模式没问）。 -->
+            <div class="rules-mode">
+              <span class="lamp" :class="'lamp-' + MODES[confirmMode]?.tone"></span>
+              <b>{{ MODES[confirmMode]?.label }}</b>
+              <span class="faint">{{ permModeHint }}</span>
+            </div>
+
+            <p v-if="!permRules.length" class="rules-empty faint">
+              还没有任何规则。审批时选「始终允许」会在这里长出一条；
+              你点一次、它就不再问同类命令。
+            </p>
+
+            <div v-for="r in permRules" :key="r.id" class="rule-row" :class="{ off: r.enabled === 0 }">
+              <div class="rule-line">
+                <span class="rule-beh" :class="'beh-' + r.behavior">{{ permBehaviorLabel(r.behavior) }}</span>
+                <code class="rule-text mono">Bash({{ r.ruleContent || '*' }})</code>
+                <button
+                  v-if="r.enabled === 1"
+                  class="rule-x btn btn-sm btn-ghost"
+                  title="停用（不删除：复发时要靠它对照当初为什么加）"
+                  @click="disableRule(r.id)"
+                >
+                  <IconX :size="12" :stroke-width="1.75" />
+                </button>
+                <span v-else class="rule-off-tag faint">已停用</span>
+              </div>
+              <div class="rule-meta faint">
+                {{ permSourceLabel(r.source) }} · {{ r.projectId === 0 ? '全局（跨项目）' : '本项目' }}
+                <template v-if="r.note"> · {{ r.note }}</template>
+              </div>
+            </div>
+
+            <!-- 最近被拒：让人看见闸门实际拦下了什么（不然"拦住了"没有任何痕迹） -->
+            <div v-if="permDenials.length" class="rules-denials">
+              <div class="rules-sub">最近被拒 {{ permDenials.length }}</div>
+              <div v-for="(d, i) in permDenials" :key="i" class="denial-row">
+                <code class="mono faint">{{ d.command || d.question }}</code>
+              </div>
+            </div>
           </div>
         </template>
 
@@ -733,6 +906,51 @@ async function pollFiles() {
                 <span class="tdot"></span>
                 <span class="tdot"></span>
                 <span class="tdot"></span>
+              </div>
+            </div>
+            <!-- 审批小弹窗（9/18）：挂在对话流末尾，不占半屏、不挡日志与看板。
+                 问答卡（kind=question）走它自己的选项/自由文本形态。 -->
+            <PermissionRequestCard
+              v-if="pendingConfirms.length && pendingConfirms[0]!.kind === 'permission'"
+              :req="pendingConfirms[0]!"
+              :busy="confirmBusy"
+              :countdown="permCountdown(pendingConfirms[0]!.expireAt)"
+              @decide="submitPermission"
+            />
+            <div v-else-if="pendingConfirms.length" class="msg assistant">
+              <div class="msg-avatar">
+                <img src="../assets/agent-manager.png" alt="Hina" />
+              </div>
+              <div class="msg-bubble">
+                {{ pendingConfirms[0]!.question }}
+                <div v-if="parseOptions(pendingConfirms[0]!).length" class="chat-opts">
+                  <button
+                    v-for="opt in parseOptions(pendingConfirms[0]!)"
+                    :key="opt"
+                    class="btn btn-sm"
+                    :disabled="confirmBusy"
+                    @click="submitConfirm(opt)"
+                  >
+                    {{ opt }}
+                  </button>
+                </div>
+                <div v-else class="chat-free">
+                  <input
+                    v-model="confirmText"
+                    class="input"
+                    type="text"
+                    placeholder="输入回复…"
+                    :disabled="confirmBusy"
+                    @keyup.enter="confirmText.trim() && submitConfirm(confirmText.trim())"
+                  />
+                  <button
+                    class="btn btn-sm btn-primary"
+                    :disabled="confirmBusy || !confirmText.trim()"
+                    @click="submitConfirm(confirmText.trim())"
+                  >
+                    发送
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -947,43 +1165,9 @@ async function pollFiles() {
       </div>
     </div>
 
-    <!-- ===== 确认门就地问答卡（阶段 3：引擎挂起等人拍板，答复后自动续跑） ===== -->
-    <Teleport to="body">
-      <div v-if="pendingConfirms.length" class="confirm-mask">
-        <div class="confirm-card panel sheet-fall">
-          <div class="confirm-head">
-            <StampSeal :label="nodeLabel(pendingConfirms[0].node)" tone="wait" :just="true" />
-            <span class="confirm-expire mono faint">{{ confirmCountdown(pendingConfirms[0].expireAt) }}</span>
-          </div>
-          <p class="confirm-question">{{ pendingConfirms[0].question }}</p>
-          <!-- 有选项=选择题（点一下即答），无选项=自由文本题（PM 追问走这里） -->
-          <div v-if="parseOptions(pendingConfirms[0]).length" class="confirm-opts">
-            <button
-              v-for="opt in parseOptions(pendingConfirms[0])"
-              :key="opt"
-              class="btn confirm-opt"
-              :disabled="confirmBusy"
-              @click="submitConfirm(opt)"
-            >
-              {{ opt }}
-            </button>
-          </div>
-          <div v-else class="confirm-free">
-            <input
-              v-model="confirmText"
-              class="input"
-              type="text"
-              placeholder="输入回复…"
-              :disabled="confirmBusy"
-              @keyup.enter="confirmText.trim() && submitConfirm(confirmText.trim())"
-            />
-            <button class="btn btn-primary" :disabled="confirmBusy || !confirmText.trim()" @click="submitConfirm(confirmText.trim())">
-              发送
-            </button>
-          </div>
-        </div>
-      </div>
-    </Teleport>
+    <!-- 挂起请求的显示位置已改到对话流内（见上方 chat-body 里的审批小弹窗）：
+         9/18 原来这里是 Teleport 到 body 的独立大卡片，用户反馈"太大了"。
+         审批是干活途中被打断一次，挂在对话里最自然 —— 也不挡日志与看板。 -->
   </div>
 </template>
 
@@ -1155,6 +1339,112 @@ async function pollFiles() {
 .side-scroll {
   flex: 1;
   overflow: auto;
+}
+
+/* ===== 规则面板（9/18）：命令权限的三态规则 + 最近被拒 ===== */
+.rules-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+}
+.rules-mode {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 9px;
+  border: 1px dashed var(--line-2);
+  border-radius: var(--r-xs);
+  font-size: 11px;
+}
+.rules-mode .faint {
+  font-size: 10.5px;
+}
+.rules-empty {
+  font-size: 11px;
+  line-height: 1.7;
+}
+.rule-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line);
+}
+.rule-row.off {
+  opacity: 0.5;
+}
+.rule-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+/* 三态各有各的颜色：允许=青 / 拒绝=朱 / 询问=等 —— 扫一眼就知道闸门在哪一档 */
+.rule-beh {
+  flex: none;
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+}
+.beh-allow {
+  background: var(--cyan-wash, var(--paper-deep));
+  color: var(--cyan-ink, var(--cyan));
+}
+.beh-deny {
+  background: var(--paper-deep);
+  color: var(--rust);
+}
+.beh-ask {
+  background: var(--paper-deep);
+  color: var(--wait-ink);
+}
+.rule-text {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.rule-x {
+  flex: none;
+  padding: 1px 4px;
+}
+.rule-off-tag {
+  flex: none;
+  font-size: 10px;
+}
+.rule-meta {
+  font-size: 10px;
+  line-height: 1.5;
+  word-break: break-all;
+}
+.rules-denials {
+  margin-top: 6px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line-2);
+}
+.rules-sub {
+  font-size: 10.5px;
+  color: var(--ink-3);
+  margin-bottom: 5px;
+}
+.denial-row {
+  font-size: 10.5px;
+  line-height: 1.6;
+  word-break: break-all;
+}
+/* 活动栏角标：规则条数 */
+.activity-count {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  padding: 0 3px;
+  border-radius: 6px;
+  background: var(--vsc-editor);
+  font-size: 9px;
+  color: var(--ink-3);
 }
 
 /* ===== 确认模式 ===== */
@@ -1699,8 +1989,16 @@ async function pollFiles() {
 }
 
 /* ===== 确认门卡 ===== */
-.confirm-mask {
-  position: fixed;
+/**
+ * 挂起请求的停靠位（9/18 取代全屏遮罩）
+ * ------------------------------------------------------------
+ * 为什么从"全屏遮罩居中"改成"右下角停靠"：
+ *   审批是干活途中被打断一次，不是"必须处理完才能看别的"。全屏遮罩会挡住
+ *   执行日志与任务看板 —— 而那两样恰好是人判断"这条命令该不该批"的依据
+ *   （"它刚才是不是已经失败三次了"）。挡住依据再让人拍板，等于逼人瞎批。
+ * 右下角 + 限高限宽：不挡主区，又足够显眼（z-index 与遮罩同档）。
+ */
+.confirm-mask {  position: fixed;
   inset: 0;
   z-index: 1500;
   display: flex;

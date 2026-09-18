@@ -55,9 +55,16 @@ export function nodeLabel(node?: string | null) {
 export const MODE_NUM_TO_STR = ['green', 'mixed', 'manual'] as const
 export type ConfirmModeStr = (typeof MODE_NUM_TO_STR)[number]
 
-/** label/desc 逐字沿用旧执行面板 MODES（这是引擎行为描述，不许文学化改写） */
+/**
+ * label/desc 逐字沿用旧执行面板 MODES（这是引擎行为描述，不许文学化改写）。
+ *
+ * 9/18 扩写 desc：权限闸门接上后，三个模式**同时也决定"什么时候会问你"**
+ * （见 PermissionRuleServiceImpl.decide 的模式分流 + architect.ts 的 confirmNode）。
+ * 只写"自动执行/需人工确认"会让人以为这只管阶段确认，然后看到命令审批卡时一头雾水 ——
+ * 所以把"问什么"和"预算"一并写进来。
+ */
 export const MODE_META: Record<ConfirmModeStr, { label: string; desc: string; tone: StampTone }> = {
-  green: { label: '全绿灯', desc: 'Agent 自动执行，无需人工确认', tone: 'pass' },
-  mixed: { label: '混合', desc: '关键步骤（如换阶段）需人工确认', tone: 'wait' },
-  manual: { label: '手动', desc: '每阶段计划都需人工确认', tone: 'void' },
+  green: { label: '全绿灯', desc: 'Agent 自动执行，无需人工确认；命令一律放行、迭代不设限（跑到上限为止）', tone: 'pass' },
+  mixed: { label: '混合', desc: '关键步骤（如换阶段）需人工确认；命令只在"有后果"时（装依赖/写盘/连网/动库）才问你', tone: 'wait' },
+  manual: { label: '手动', desc: '每阶段计划都需人工确认；命令白名单之外一律问你', tone: 'void' },
 }
