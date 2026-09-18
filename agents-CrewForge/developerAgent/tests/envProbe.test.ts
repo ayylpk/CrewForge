@@ -8,7 +8,7 @@
 //      几秒内返回。版本号一律不断言（跨机器会变），只断言形态。
 //   ③ offline:true → registry 必须为 null（"不知道"和"不可达"是两种事实，不能混）。
 import { describe, expect, it } from "bun:test";
-import { probeEnvironment, renderEnvBrief } from "../envProbe";
+import { buildNotes, probeEnvironment, renderEnvBrief } from "../envProbe";
 import type { EnvProbe, ToolProbe } from "../envProbe";
 
 // ------------------------------------------------------------
@@ -77,6 +77,57 @@ describe("envProbe / renderEnvBrief 纯函数口径", () => {
         expect(brief).toContain("java");
         expect(brief).toContain("mvn");
         expect(brief).toContain("java、mvn");           // 不可用清单里逐个点名
+    });
+
+    // ★ 9/18 加：这一条是本机（java 有、mvn 没有）的实况，也是 s1 跑成"零产出"的现场。
+    //   旧口径在这里写"mvn 缺失 → JVM 栈不可选"，被 agent 读成"JVM 工程做不了"，
+    //   于是它去下 Maven、翻 .m2、找 wrapper dists，19 分钟一次文件写入都没有。
+    //   新口径必须**同时**说清两件事：本机不能新选 JVM 栈（选型）+ 指定了 JVM 就照做（能力）。
+    it("★ java 在、mvn 不在 → 既要拦住「新选 JVM 栈」，也要说清「指定了 JVM 就照做」", () => {
+        const brief = renderEnvBrief(
+            makeProbe({
+                tools: [
+                    tool("node", "24.8.0"),
+                    tool("npm", "11.6.0"),
+                    tool("java", "17.0.18"),                 // ★ java 在
+                    tool("mvn", null, false),                // ★ mvn 不在
+                    tool("gradle", null, false),
+                ],
+            }),
+        );
+        // ① 选型信号保留：本机不能新建/新选 JVM 栈
+        expect(brief).toContain("不能新选 JVM 栈");
+        // ② 能力信号必须写明：任务书指定了 JVM 就手写工程文件交付，不算阻塞
+        expect(brief).toContain("任务书已指定 JVM 时照做");
+        expect(brief).toContain("不阻塞");
+        // ③ 不能再出现"JVM 栈不可选"这种把"缺工具"说成"没能力"的句子
+        expect(brief).not.toContain("JVM 栈不可选");
+    });
+
+    // ★ 9/18 加：直接盯**结论句生成器**。根因那句话就长在这里（buildNotes），
+    //   而 renderEnvBrief 只渲染 p.notes——不直接测它，改错了也看不出来。
+    it("★ buildNotes：mvn 缺失≠JVM 没能力，且必须点名 Maven Wrapper 与非阻塞", () => {
+        const notes = buildNotes(
+            [tool("node", "24.8.0"), tool("npm", "11.6.0"), tool("java", "17.0.18"), tool("mvn", null, false)],
+            { npmRegistry: true, note: "可达" },
+            [],
+        );
+        const jvm = notes.find((n) => n.includes("JVM"));
+        expect(jvm).toBeDefined();
+        expect(jvm).toContain("不能新选 JVM 栈");        // 选型：本机不能新选
+        expect(jvm).toContain("任务书已指定 JVM 时照做");  // 能力：指定了就照做
+        expect(jvm).toContain("不阻塞");
+        expect(jvm).not.toContain("JVM 栈不可选");       // ★ 旧口径的错句，不许再出现
+
+        // java 真缺 → 这时才轮到"JVM 栈不可选"（但仍不是不干活的理由）
+        const noJava = buildNotes(
+            [tool("node", "24.8.0"), tool("npm", "11.6.0"), tool("java", null, false), tool("mvn", null, false)],
+            { npmRegistry: true, note: "可达" },
+            [],
+        );
+        const jvm2 = noJava.find((n) => n.includes("JVM"))!;
+        expect(jvm2).toContain("JVM 栈不可选");
+        expect(jvm2).toContain("手写");
     });
 
     it("端口占用 → 简报点名被占端口并提示别写进配置", () => {

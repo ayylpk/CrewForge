@@ -97,6 +97,11 @@ export const SPRING_VUE: StackProfile = {
             `- 业务请求只能 import ${b.frontend.requestPath}；不得另起 services/api.js、utils/request.js 或其他 axios/fetch 封装。`,
             "- 后端 API 前缀由引擎骨架的 `server.servlet.context-path: /api` 承担：Controller 只写**去掉前缀后**的路径（如 `@GetMapping(\"/notes\")`），**绝不要再写 /api**，否则真实 URL 会变成 /api/api/...。",
             "- 后端建表脚本由引擎直出到 `backend/src/main/resources/schema.sql`，并由 `spring.sql.init.mode=always` 在启动时真实执行：业务代码不许自己建库建表、不许硬编码数据库地址/账号/密码（只从 `SPRING_DATASOURCE_*` 环境变量取）。",
+            // ★ 9/18 补（实测事故）：s1-crud-min 那两轮，agent 为了"把应用连上库"反复磨
+            //   application.yml / 猜 MySQL 凭据（`mysql -u root --skip-password`、翻 `.my.cnf`、
+            //   `docker ps`），整整 20 分钟没写业务代码。凭据是**引擎在验证阶段注入**的，
+            //   本机连不上库只影响"你自己起服务"这一次尝试，不影响交付，更不该变成探测任务。
+            "- **不要探测或猜测数据库凭据**：`SPRING_DATASOURCE_*` 由引擎在验证阶段注入，你不需要知道它的值，也不要把任何值/默认值写进 `application.yml`（只留 `${...}` 占位）。本机起不来应用就如实记「未验证」继续走——**为连库耗掉的每一轮都是在偷业务代码的预算**。",
             "- 颜色/圆角/间距引用 frontend/src/style.css 的 --cf-* 变量；硬编码色值最多 5 处。",
         ].join("\n");
     },

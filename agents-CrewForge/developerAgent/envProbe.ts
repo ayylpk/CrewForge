@@ -546,8 +546,9 @@ function describeTool(t: ToolProbe): string {
     return t.version ? `${t.name} ${t.version}` : t.name;
 }
 
-/** 生成"结论"短句。刻意写成"事实 + 推论"的形态，模型可以直接引用进决策。 */
-function buildNotes(tools: ToolProbe[], network: EnvProbe["network"], ports: EnvProbe["ports"]): string[] {
+/** 生成"结论"短句。刻意写成"事实 + 推论"的形态，模型可以直接引用进决策。
+ *  （9/18 起导出：这条"结论句"是 s1 零产出事故的现场，必须有直接单测盯着，不能只经 renderEnvBrief 间接覆盖。） */
+export function buildNotes(tools: ToolProbe[], network: EnvProbe["network"], ports: EnvProbe["ports"]): string[] {
     const notes: string[] = [];
 
     const pkgMgr = (["npm", "pnpm", "yarn", "bun"] as const)
@@ -563,10 +564,29 @@ function buildNotes(tools: ToolProbe[], network: EnvProbe["network"], ports: Env
         notes.push("registry 未探测（offline 模式）→ 脚手架可用性未知，先按手写工程文件兜底");
     }
 
-    const missingJvm = ["java", "mvn"].filter((n) => !isAvailable(tools, n));
-    const jvmReady = isAvailable(tools, "java") && (isAvailable(tools, "mvn") || isAvailable(tools, "gradle"));
-    if (!jvmReady) {
-        notes.push(`${(missingJvm.length > 0 ? missingJvm : ["java", "mvn"]).join("/")} 缺失 → JVM 栈不可选`);
+    // ★ 9/18 修（这一条是 s1 那轮"跑 19 分钟零产出"的真根因）：
+    //   原写法把「mvn 不在 PATH」直接翻译成「JVM 栈不可选」——
+    //   于是 agent 拿着 w1 派下来的 Spring Boot 任务书，看到的却是"JVM 栈不可选"，
+    //   就去**想办法把它变成可选**：下 maven-wrapper、探 javac、翻 %USERPROFILE%\.m2、
+    //   找 wrapper dists、试 mysql 密码、docker ps…最后 55 次 LLM 调用 / 167k output token /
+    //   88 次工具调用里**一次文件写入都没有**，落盘的只有骨架和不含代码的 mw.zip。
+    //   澄清两件被混为一谈的事：**"别新选 JVM 栈"（选型建议）≠"JVM 工程做不了"（能力）**。
+    //   没有 mvn 从来不等于后者——Maven Wrapper（mvnw/mvnw.cmd + .mvn/wrapper）就是这个场景的
+    //   标准答案，退一步手写 pom.xml + 源码本身就是可交付物，"跑不了 mvn package" 只影响
+    //   **编译校验**（如实记「未验证」），不是不干活的理由。
+    const hasJava = isAvailable(tools, "java");
+    const hasBuildTool = isAvailable(tools, "mvn") || isAvailable(tools, "gradle");
+    if (!hasJava) {
+        notes.push(
+            "java 缺失 → JVM 栈不可选（本机也无法编译/运行 JVM 工程；工程文件照样手写，编译校验记「未验证」）",
+        );
+    } else if (!hasBuildTool) {
+        notes.push(
+            "java 在、mvn/gradle 不在 → **本机不能新选 JVM 栈**；"
+            + "但任务书已指定 JVM 时照做：按 skills/bootstrap-project.md 手写 pom.xml + 源码"
+            + "（构建脚本用 Maven Wrapper：mvnw/mvnw.cmd + .mvn/wrapper，官方发行包可直接下载），"
+            + "**不要**为了「装/找构建工具」耗轮次——跑不了 `mvn package` 只是把编译校验记成「未验证」，不阻塞交付。",
+        );
     }
 
     if (!isAvailable(tools, "mysql")) {
@@ -630,12 +650,20 @@ function buildVerdict(p: EnvProbe): string {
         parts.push("node 缺失 → JS 工具链不可选");
     }
 
-    const jvmReady = isAvailable(p.tools, "java") && (isAvailable(p.tools, "mvn") || isAvailable(p.tools, "gradle"));
-    if (jvmReady) {
+    // ★ 9/18 同源修正：java 在、只是没有构建工具时，原句直接写"JVM 栈不可选"，
+    //   和 buildNotes 里那处是同一个错误信念（实测把 agent 带到"想办法装 Maven"上）。
+    //   拆成三种情形：能构建 / 压根没 java / 有 java 缺构建工具（可交付，只是本机不能新选 JVM 栈）。
+    const hasJava = isAvailable(p.tools, "java");
+    const hasBuild = isAvailable(p.tools, "mvn") || isAvailable(p.tools, "gradle");
+    if (hasJava && hasBuild) {
         parts.push("JVM 构建可跑（java + mvn/gradle）");
+    } else if (!hasJava) {
+        parts.push("java 缺失 → JVM 栈不可选（本机也无法编译/运行 JVM 工程）");
     } else {
-        const missing = ["java", "mvn"].filter((n) => !isAvailable(p.tools, n));
-        parts.push(`${(missing.length > 0 ? missing : ["java", "mvn"]).join("/")} 缺失 → JVM 栈不可选`);
+        parts.push(
+            "java 在、mvn/gradle 不在 → **本机不能新选 JVM 栈**；"
+            + "任务书已指定 JVM 时照做：手写 pom.xml + 源码 + Maven Wrapper，编译校验记「未验证」，不阻塞",
+        );
     }
 
     if (isAvailable(p.tools, "msedge")) {
