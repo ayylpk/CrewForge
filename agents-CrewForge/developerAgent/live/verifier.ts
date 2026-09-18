@@ -21,11 +21,11 @@
 //   category ∈ COMPILE | BOOT | MIGRATION | CONTRACT | RENDER | ENV（protocol 的枚举）
 // ============================================================
 
-import fs from "node:fs";
 import path from "node:path";
 import { hashOf } from "../ledger";
 import type { AcceptanceCheck, TestFailureCategory, VerificationEvidence } from "../protocol";
 import { resolveProjectCommand as resolveGenericCommand } from "../tools/projectCommands";
+import { toSpawnArgv, withResolvablePathKey } from "../tools/winCmd";
 import { suggestServeCommand } from "../../contractProbeCore";
 import type { ServeSpec } from "../../contractProbeCore";
 
@@ -223,19 +223,15 @@ export function prepareCheck(projectDir: string, check: AcceptanceCheck & { id: 
     return { check, exec: null, skipKind, skipReason: `无法机械执行的验收项形状（kind=${skipKind}）` };
 }
 
-/** 单条验收：独立 spawn 执行，Windows 的 .cmd/.bat 经 cmd /c（与 workspace.exec 同逻辑） */
+/** 单条验收：独立 spawn 执行，Windows 的 .cmd/.bat / npm 系裸名经 cmd /c（与 workspace.exec 同一处实现） */
 async function runPrepared(projectDir: string, p: PreparedCheck): Promise<CheckExec> {
     const exec = p.exec!;
     const timeoutMs = Number((p.check as unknown as { timeoutMs?: unknown }).timeoutMs ?? 600_000);
     const cwdAbs = path.join(projectDir, exec.cwd);
-    // 与 workspace.exec 同一坑同一修法：cmd 不搜当前目录，cwd 下有同名 .cmd 就补 ".\"
-    const isWin = process.platform === "win32";
-    const bare = /\.(cmd|bat)$/i.test(exec.command) && !exec.command.includes("\\") && !exec.command.includes("/");
-    const resolved = isWin && bare && fs.existsSync(path.join(cwdAbs, exec.command))
-        ? `.\\${exec.command}` : exec.command;
-    const argv = isWin && /\.(cmd|bat)$/i.test(resolved)
-        ? ["cmd", "/c", resolved, ...exec.args]
-        : [exec.command, ...exec.args];
+    // 与 workspace.exec 同一坑同一修法（见 tools/winCmd.ts 的实测记录）：
+    // ① cmd 不搜当前目录，cwd 下有同名 .cmd 就补 ".\"；
+    // ② 裸 `npm` 在"传了 env 的 Bun.spawn"下必 ENOENT → 经 cmd.exe /d /c 转发。
+    const argv = toSpawnArgv(exec.command, exec.args, { cwdAbs });
 
     const startedAt = Date.now();
     let timedOut = false;
@@ -243,7 +239,7 @@ async function runPrepared(projectDir: string, p: PreparedCheck): Promise<CheckE
         cwd: cwdAbs,
         stdout: "pipe",
         stderr: "pipe",
-        env: { ...process.env },
+        env: withResolvablePathKey({ ...process.env } as Record<string, string>),
     });
     const timer = setTimeout(() => { timedOut = true; proc.kill(); }, timeoutMs);
 

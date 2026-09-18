@@ -25,6 +25,8 @@ Node.ts         DB 读取层（成员/节点/边/落库钩子）｜ models.ts �
 checkers.ts     ★ T1 编译闸门：esbuild/@vue/compiler-sfc/py_compile/JSON + import 存在性&导出名核验
 contracts.ts    ★ T2 全局契约：CONTRACTS.md 生成（代码拼骨架+LLM 登记页面/模块归属）+ 工位头部注入
 renderGate.ts   ★ T6 渲染审：vite dev 惰性起服 + headless Edge dump-dom/截图（_shots/）+ 白屏判定
+visibleText.ts  ★ 白屏判定的唯一口径（人眼能看见的字：排除 head/title/script/style/noscript/template/注释 +
+                空 SPA 挂载点=白屏）；renderGate.judgeDom 只是它的适配层，测试 developerAgent/tests/render-gate.test.ts
 concurrency.ts  ★ T7a 令牌闸：队列无上限、token 限在制（四阶段闸各 5 + 端点总闸 6，设置页热调，落盘/失败才归还）
 fileTools.ts    ★ T7b 工位文件工具：read/write/edit 工具循环（工具内过闸+落盘+文件锁；tool_mode 默认关，异常自动退老路）
 llm.ts / tools.ts / common.ts  模型调用封装（含端点总闸挂点）/ 工具声明 / 类型、写盘与 T4 sliceGuard

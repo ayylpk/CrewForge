@@ -61,8 +61,11 @@ export async function provisionProject(scenarioId: string, requirement: string):
 
     const conn = await mysql.createConnection(connOpts());
     try {
+        // 9/17：INSERT 列表里去掉了 project_type —— 该列是租户/团队时代的遗留，
+        // 已随 backed-CrewForge/sql/migration_drop_legacy_tenant.sql 从现网删除。
+        // 这里的 VALUES 也相应少了那个 1（原来首位是 project_type=1）。
         const [res] = await conn.query(
-            "INSERT INTO sys_project (project_type, name, description, status, confirm_mode, create_time, update_time, deleted) VALUES (1, ?, ?, 'planning', 0, NOW(), NOW(), 0)",
+            "INSERT INTO sys_project (name, description, status, confirm_mode, create_time, update_time, deleted) VALUES (?, ?, 'planning', 0, NOW(), NOW(), 0)",
             [projectName, requirement],
         );
         const id = Number((res as { insertId?: number }).insertId);

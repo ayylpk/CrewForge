@@ -15,6 +15,9 @@
 //   服务怎么起，全由调用方传 ServeSpec（命令 + 端口环境变量名 + 健康检查路径）。
 // ============================================================
 
+// Windows 上怎么把命令真的跑起来（.cmd/.bat 与 npm 系裸名经 cmd.exe）——单一实现
+import { toSpawnArgv, withResolvablePathKey } from "./developerAgent/tools/winCmd";
+
 /** 怎么把被测服务跑起来 */
 export interface ServeSpec {
     command: string;
@@ -194,13 +197,10 @@ async function killTree(proc: ReturnType<typeof Bun.spawn> | null): Promise<void
     if (proc.exitCode === null) { try { proc.kill(9); } catch { /* 已退 */ } }
 }
 
-/** 与 testAgent/verify 同一套 Windows 包装规则：npm 系与 .cmd/.bat 走 cmd /c */
+/** 与 testAgent/verify 同一套 Windows 包装规则：npm 系与 .cmd/.bat 走 cmd /c
+ *  （实现已合并到 developerAgent/tools/winCmd.ts —— 本函数只做转调，行为不变） */
 export function spawnArgv(command: string, args: string[]): string[] {
-    if (process.platform !== "win32") return [command, ...args];
-    if (/^(npm|npx|pnpm|yarn|tsc|vite)$/i.test(command) || /\.(cmd|bat)$/i.test(command)) {
-        return ["cmd", "/c", command, ...args];
-    }
-    return [command, ...args];
+    return toSpawnArgv(command, args);
 }
 
 /** 从登录响应里取 token（token / data.token / accessToken 三种常见形状） */
@@ -639,7 +639,10 @@ export async function runContractProbe(o: {
             proc = Bun.spawn(spawnArgv(o.serve.command, o.serve.args), {
                 cwd: cwdAbs,
                 stdout: "pipe", stderr: "pipe",
-                env: { ...process.env, [o.serve.portEnv ?? "PORT"]: String(port) },
+                // 显式传 env 时 Bun 只认大写 PATH 键（否则裸名 .cmd 检索失效）——见 winCmd.ts
+                env: withResolvablePathKey({
+                    ...process.env, [o.serve.portEnv ?? "PORT"]: String(port),
+                } as Record<string, string>),
             });
             const drain = (s: ReadableStream<Uint8Array> | null): void => {
                 if (!s) return;

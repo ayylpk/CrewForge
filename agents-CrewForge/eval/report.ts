@@ -212,6 +212,20 @@ async function main(): Promise<void> {
     }
 
     const results = loadResults();
+    // ⚠️ 9/17 加的闸：baseline/runs/ 是「每个场景的生成产物」（371MB，gitignored）。
+    //   它被清掉之后 loadResults() 会安静地返回 []（第 73 行有 existsSync 兜底），
+    //   然后本函数会把**零场景的汇总覆盖写进 before.json** —— 那份 9/11 的真实基线
+    //   就这么没了，而且没有任何报错。宁可在这里停住，也不要静默毁掉度量。
+    if (results.length === 0) {
+        console.error("[baseline] 一个场景结果都没读到，拒绝覆盖既有基线报告。");
+        console.error(`  期望数据源：${RUNS_DIR}/<场景>/result.json`);
+        console.error("  该目录是可再生产物（不入库），被清掉后需先重跑场景：");
+        console.error("    bun run eval/runner.ts          # 跑冻结场景，产出 baseline/runs/*/result.json");
+        console.error("    bun run eval/report.ts          # 再汇总成 before.json + before.md");
+        console.error(`  既有 ${path.join(OUT_DIR, "before.json")} 未被改动。`);
+        process.exit(2);
+    }
+
     const checkTotals: Record<string, number> = { pass: 0, fail: 0, blocked: 0, skipped: 0 };
     const byVerdict: Record<string, number> = { pass: 0, fail: 0, blocked: 0, partial: 0 };
 

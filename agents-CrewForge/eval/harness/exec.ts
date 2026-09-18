@@ -8,6 +8,7 @@
 // ============================================================
 
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 
@@ -52,19 +53,104 @@ export interface ExecOpts {
 
 /** 子进程环境清洗。
  *
- *  宿主若用 NODE_OPTIONS 注入 safe-delete shim（genie-safe-delete.cjs），
+ *  ① 宿主若用 NODE_OPTIONS 注入 safe-delete shim（genie-safe-delete.cjs），
  *  `vite build` 的 prepareOutDir → emptyDir → fs.rmSync 会被打断（exit=1），
  *  看起来像"前端构建失败"，其实是宿主环境问题——s4/s4c/s4d/s5b 四轮的 frontend.build
  *  全死在这上面。与 developerAgent/tools/processSandbox.ts 的处理保持一致：一律摘掉。
- *  实测确认：注入存在时 vite 报 `[safe-delete] 操作失败 … at Object.wrappedRmSync`。 */
-function childEnv(extra?: Record<string, string>): Record<string, string> {
+ *  实测确认：注入存在时 vite 报 `[safe-delete] 操作失败 … at Object.wrappedRmSync`。
+ *
+ *  ② npm 的缓存目录**必须钉在产物树之外**——见下面 pinNpmCacheOutOfProject 的一手证据。 */
+function childEnv(extra: Record<string, string> | undefined, cwdAbs: string): Record<string, string> {
     const env: Record<string, string> = { ...(process.env as Record<string, string>) };
     if (env.NODE_OPTIONS) {
         console.warn(`[exec] 摘掉宿主 NODE_OPTIONS（防 safe-delete shim 打断构建）：${env.NODE_OPTIONS}`);
         delete env.NODE_OPTIONS;
     }
-    return { ...env, ...(extra ?? {}) };
+    const merged = { ...env, ...(extra ?? {}) };
+    const pinned = pinNpmCacheOutOfProject(merged, cwdAbs);
+    if (pinned.changed) {
+        console.warn(`[exec] npm_config_cache=${pinned.changed.from}（相对路径或落在命令 cwd 内）`
+            + ` → 钉成 ${pinned.changed.to}：否则 npm 会把整棵缓存树写进被测产物。`);
+    }
+    return pinned.env;
 }
+
+// ============================================================
+// npm 缓存目录：钉在产物树之外（★ 产物污染缺陷的修复，2026-09-17）
+//
+//   ── 为什么必须钉（本机实测，不是推测）──
+//   `npm_config_cache=.npm-cache`（**相对路径**）会被 npm 按**命令 cwd** 解析：
+//   在 `<产物>/backend` 里跑一次 `npm install` 就长出 `<产物>/backend/.npm-cache/`
+//   （`_cacache/` + `_logs/*-debug-0.log` + `_update-notifier-last-checked`）。
+//   实证（只读既有产物与报告）：
+//     · `eval/baseline/runs/s4d-todo-lite/result.json` 的产物清单 417 条 `backend/.npm-cache/...`
+//     · `eval/baseline/runs/s5b-meeting-room/result.json` 932 条（含 `_prebuilds/*.tar.gz`）
+//   这些是缓存，不是 agent 写的代码，却混进"产物盘点/文件数/统计"。
+//   而相对路径的 `npm_config_cache` 在本仓库**没有任何代码设置过**（全量 grep + 全部 git 历史，
+//   只有 docs/superpowers/plans/2026-09-11-engine2-items-1-8-report.md:51 提过这个变量名），
+//   即它来自进程的**外部环境**（宿主/启动脚本）。宿主改不了，所以在**唯一执行出口**把它钉死。
+//
+//   ── 为什么钉到共享临时目录，而不是"全局 cache"或"项目内 cache"──
+//   同一份 09-11 文档记下了当年为什么改用项目本地 cache：本机全局 cache
+//   （`%LOCALAPPDATA%\npm-cache`）被宿主的安全删除钩子（genie-safe-delete）接管，
+//   `npm cache verify` 直接报 `[safe-delete] 操作失败`，需要 prune 的 install 可能炸。
+//   所以"躲开全局 cache"这个**意图保留**，只把**位置挪出产物树**：`%TEMP%\cf-npm-cache`
+//   （跨进程共享、可随时整目录删除、永远不在任何 artifact 下）。
+//
+//   规则：调用方/宿主给的是**产物树之外的绝对路径**就尊重它；相对路径、或落在命令 cwd 里的路径
+//   一律换成共享目录。npm 的配置优先级是「环境变量 > 项目 .npmrc > 用户 .npmrc > 默认」，
+//   所以钉这一个变量就足以盖住"项目内 .npmrc 写了 cache=.npm-cache"这种写法。
+// ============================================================
+
+/** npm 认的键名（Windows 上变量名不分大小写，Node 的 env 对象分，所以两种拼写都要处理） */
+const NPM_CACHE_KEY = "npm_config_cache";
+
+/** 共享 npm 缓存目录（产物树之外）。`CF_NPM_CACHE_DIR` 可覆盖，但只接受绝对路径。 */
+export function defaultNpmCacheDir(): string {
+    const override = process.env["CF_NPM_CACHE_DIR"];
+    if (override !== undefined && override !== "" && path.isAbsolute(override)) return override;
+    return path.join(os.tmpdir(), "cf-npm-cache");
+}
+
+/** childAbs 是否等于 parentAbs 或在其内部（大小写不敏感，Windows 语义） */
+function isInsideDir(parentAbs: string, childAbs: string): boolean {
+    const rel = path.relative(path.resolve(parentAbs), path.resolve(childAbs));
+    if (rel === "") return true;
+    const norm = rel.replace(/\\/g, "/").toLowerCase();
+    return norm !== ".." && !norm.startsWith("../") && !path.isAbsolute(rel);
+}
+
+export interface NpmCachePin {
+    env: Record<string, string>;
+    /** 非 null = 改动过（值来自哪里、改成了什么），调用方据此打日志 */
+    changed: { from: string; to: string } | null;
+}
+
+/**
+ * 把 npm 的 cache 钉到产物树之外的绝对路径（纯函数，便于单测）。
+ * `cwdAbs` = 该命令的工作目录：相对 cache 会被 npm 解析成它下面的 `.npm-cache`。
+ */
+export function pinNpmCacheOutOfProject(
+    env: Record<string, string>,
+    cwdAbs: string,
+    fallbackDir: string = defaultNpmCacheDir(),
+): NpmCachePin {
+    const next: Record<string, string> = { ...env };
+    const keys = Object.keys(next).filter(k => k.toLowerCase() === NPM_CACHE_KEY);
+    const current = keys.map(k => next[k] ?? "").find(v => v.trim() !== "") ?? "";
+
+    // 已经是产物树之外的绝对路径 → 尊重原值（宿主/调用方有权指定缓存位置）
+    if (current !== "" && path.isAbsolute(current) && !isInsideDir(cwdAbs, current)) {
+        for (const k of keys) if (k !== NPM_CACHE_KEY) delete next[k];
+        next[NPM_CACHE_KEY] = current;
+        return { env: next, changed: null };
+    }
+    // 重复拼写（npm_config_cache / NPM_CONFIG_CACHE）只留一个，避免互相打架
+    for (const k of keys) delete next[k];
+    next[NPM_CACHE_KEY] = fallbackDir;
+    return { env: next, changed: current === "" ? null : { from: current, to: fallbackDir } };
+}
+
 
 /** 跑一条命令，stdout/stderr 分流留档；超时按进程树杀并如实标注 */
 export function execCapture(o: ExecOpts): Promise<ExecResult> {
@@ -100,7 +186,7 @@ export function execCapture(o: ExecOpts): Promise<ExecResult> {
         try {
             child = spawn(o.cmd, o.args, {
                 cwd: o.cwd,
-                env: childEnv(o.env),
+                env: childEnv(o.env, o.cwd),
                 windowsHide: true,
                 windowsVerbatimArguments: o.verbatimArgs === true,
                 detached: process.platform !== "win32",

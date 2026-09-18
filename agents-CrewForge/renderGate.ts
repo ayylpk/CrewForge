@@ -8,17 +8,30 @@
 //     ensureServer   runs/pN/frontend 起 vite dev（惰性/复用/每进程一次），缺 node_modules 先 bun install
 //     dumpDom        msedge --headless --virtual-time-budget=8000 --dump-dom → 渲染后 HTML
 //     screenshot     同引擎 --screenshot 存 runs/pN/_shots/（看板回显素材，阶段 6 消费）
-//     judgeDom       纯函数判白屏（DOM 元素数/可见文本量/标题）——可单测，狗考题就在 smoke 里
+//     judgeDom       纯函数判白屏——**规则搬去了 visibleText.ts**（9/18 修正，见下），
+//                    这里只做适配：老调用方（render-smoke.ts）继续用同一个出口，签名不变。
 //   旁路原则：装不上依赖/起不了服/找不到 Edge/任何异常 → {status:"skip", reason}——
 //   渲染审是证据层不是控制层；skip 也要出现在测试报告里（不静默降级）。
 //   清理：closeRenderGates() 挂 runner 出口（同 closeTdesignMcp/closeTaskBridge 姿势），
 //   Windows 下 vite→esbuild 孙进程链用 taskkill /T 整树杀，防孤儿占端口。
+//
+//   ★ 9/18 修正的缺陷（"眼睛"刻度错了）：老 judgeDom 的可见文本是"去掉标签剩下的字"，
+//     于是 **<head> 里的 <title> 也被算成了可见文本**——白屏页只要标题够长就能蒙混过关。
+//     实测（真 headless Edge 跑出来的白屏页：壳 + <title> 32 字 + 空 <div id="app"></div> + bundle 已执行）：
+//         旧口径 textLen=54 / elCount=15 / blank=false（判成"有内容"）
+//         新口径 textLen=0  / elCount=13 / blank=true
+//     eval 侧早就在这份文件上留了路标（eval/harness/checks.ts:477 明说"不重复那个错"），
+//     所以判定规则收敛到 visibleText.ts 一处实现：body 优先取文本、排除 head/title/script/
+//     style/noscript/template/注释、认「SPA 挂载点为空」，并保留老的最小文本/元素数阈值。
+//     证据形状（elCount/textLen/title/url/shot/reason）保持原样，下游与冒烟脚本不受影响。
 // ============================================================
 
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { projectDir } from "./runEnv";
+import { extractTitle, judgeVisibleDom } from "./visibleText";
 
 export interface RenderOutcome {
     status: "pass" | "fail" | "skip";
@@ -26,6 +39,9 @@ export interface RenderOutcome {
     elCount?: number;
     textLen?: number;
     title?: string | null;
+    /** 空挂载点（#app/#root/#main 里什么都没有）——诊断用，附加字段，下游可忽略 */
+    mountEmpty?: boolean;
+    mountId?: string | null;
     url?: string;
     shot?: string | null;
     reason?: string;
@@ -45,19 +61,32 @@ function findMsEdge(): string | null {
     return edgeExe;
 }
 
-// ---------- DOM 判定（纯函数，狗考入口） ----------
+// ---------- DOM 判定（纯函数，狗考入口；规则本体在 visibleText.ts） ----------
 
-export interface DomVerdict { blank: boolean; elCount: number; textLen: number; title: string | null }
+export interface DomVerdict {
+    blank: boolean;
+    elCount: number;
+    textLen: number;
+    title: string | null;
+    /** 附加诊断（老调用方不读也无妨）：命中/未命中的 SPA 挂载点 */
+    mountId?: string | null;
+    mountEmpty?: boolean;
+    /** 判白屏的理由（blank=true 时点名踩了哪条） */
+    blankReason?: string | null;
+}
 
-/** 判渲染后 DOM：元素数<12 或可见文本<24 字符=白屏当场毙；标题缺失记 null（报告可见，不单独毙——有的 app 无 title） */
+/**
+ * 判渲染后 DOM 是否白屏。**textLen 只数人眼能看见的字**：head/title/script/style/noscript/
+ * template/注释一律不算（老实现把 <title> 算进去了，白屏页只要标题够长就能过关——9/18 修）。
+ * 白屏 = 可见文本 < 24 字 **或** SPA 挂载点（#app/#root/#main）是空的 **或** 元素数 < 12。
+ * title 仍作为证据返回（报告里看得见），但**不参与**判定：标题不是渲染出来的内容。
+ */
 export function judgeDom(html: string): DomVerdict {
-    const stripped = html
-        .replace(/<script[\s\S]*?<\/script>/gi, " ")
-        .replace(/<style[\s\S]*?<\/style>/gi, " ");
-    const elCount = (stripped.match(/<[a-zA-Z][^>]*>/g) ?? []).length;
-    const textLen = stripped.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim().length;
-    const title = stripped.match(/<title[^>]*>([\s\S]*?)<\/title>/i)?.[1]?.trim() || null;
-    return { blank: elCount < 12 || textLen < 24, elCount, textLen, title };
+    const v = judgeVisibleDom(html);
+    return {
+        blank: v.blank, elCount: v.elCount, textLen: v.textLen, title: extractTitle(html),
+        mountId: v.mount?.id ?? null, mountEmpty: v.mount?.empty ?? false, blankReason: v.reason,
+    };
 }
 
 // ---------- vite dev server 生命周期（每项目一实例，进程内复用） ----------
@@ -122,16 +151,34 @@ export async function closeRenderGates(): Promise<void> {
 }
 
 // ---------- edge 调用 ----------
+//
+// ⚠️ 两条硬要求（9/18 与 eval/harness/checks.ts:462-465 对齐）：
+//   ① --headless=new + --no-sandbox 必须原样带上；**任何情况下都不许去掉 headless**——
+//      非 headless 的 msedge 会在用户桌面上真的弹出浏览器窗口（今晚已被咬过一次）。
+//   ② --user-data-dir 必须指到本次调用专属的临时目录：不给的话，机器上已经开着一个 Edge 时
+//      headless 调用会**移交给那个实例**（拿到空 dump / 配置文件被占），于是"眼睛"静默变成 skip。
+//      收尾把 profile 删掉，绝不留垃圾（删不掉也只是 %TEMP% 里一个目录，不抛）。
+
+let edgeProfileSeq = 0;
+
+/** 组装一次 headless Edge 调用的参数（纯函数，可单测）：headless 是第一颗钉子 */
+export function buildEdgeArgs(profileDir: string, args: readonly string[]): string[] {
+    return ["--headless=new", "--disable-gpu", "--no-sandbox", "--no-first-run", `--user-data-dir=${profileDir}`, ...args];
+}
 
 function runEdge(args: string[], timeoutMs = 60_000): { ok: boolean; out: string } {
     const exe = findMsEdge();
     if (!exe) return { ok: false, out: "msedge 未找到" };
+    const profileDir = path.join(os.tmpdir(), `cf-rendergate-edge-${process.pid}-${edgeProfileSeq++}`);
     try {
-        const out = execFileSync(exe, ["--headless=new", "--disable-gpu", "--no-first-run", ...args],
+        const out = execFileSync(exe, buildEdgeArgs(profileDir, args),
             { timeout: timeoutMs, maxBuffer: 32 * 1024 * 1024, windowsHide: true, encoding: "utf-8" });
         return { ok: true, out: out ?? "" };
     } catch (e) {
         return { ok: false, out: (e as Error).message.slice(0, 200) };
+    } finally {
+        try { fs.rmSync(profileDir, { recursive: true, force: true, maxRetries: 2, retryDelay: 150 }); }
+        catch { /* Edge 还在收尾（profile 文件被占）：留给系统清理，不因为垃圾目录把渲染审搞挂 */ }
     }
 }
 
@@ -159,7 +206,11 @@ export async function renderCheckFrontend(pid: number, label: string): Promise<R
         return {
             status: v.blank ? "fail" : "pass", blank: v.blank,
             elCount: v.elCount, textLen: v.textLen, title: v.title, url, shot,
-            reason: v.blank ? `渲染白屏：DOM 元素 ${v.elCount} 个/可见文本 ${v.textLen} 字` : `渲染非空：${v.elCount} 元素/${v.textLen} 字/标题=${v.title ?? "无"}`,
+            mountId: v.mountId ?? null, mountEmpty: v.mountEmpty ?? false,
+            // 白屏理由点名踩了哪条（可见文本少 / 挂载点为空 / 元素太少）：REPAIR 提示要指对方向
+            reason: v.blank
+                ? `渲染白屏：${v.blankReason ?? `可见文本 ${v.textLen} 字`}（DOM 元素 ${v.elCount} 个；标题「${v.title ?? "无"}」不算文本）`
+                : `渲染非空：${v.elCount} 元素/${v.textLen} 字/标题=${v.title ?? "无"}`,
         };
     } catch (e) {
         return { status: "skip", reason: `渲染审异常：${(e as Error).message.slice(0, 160)}` };

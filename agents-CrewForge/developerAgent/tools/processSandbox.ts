@@ -30,6 +30,7 @@ import path from "node:path";
 import { hashOf } from "../ledger";
 import { ProcessManager, ProcessLimitError } from "./processManager";
 import type { KillReason, ManagedProcess } from "./processManager";
+import { resolveLocalCmdShim } from "./winCmd";
 
 export const SANDBOX_UNAVAILABLE = "SANDBOX_UNAVAILABLE";
 
@@ -856,21 +857,16 @@ function realpathOrNull(p: string): string | null {
 }
 
 /**
- * Windows 下命令解析。
+ * Windows 下命令解析（`.\` 前缀规则）。
  * 9/12 mysite T1 实弹坑：本环境 cmd 不搜当前目录（裸 mvnw.cmd → "不是内部或外部命令"），
  * runBuild 因此永远假失败。修法：命令本身没带路径分隔符、且 cwd 下确有同名文件时，
  * 自动补 ".\\" 前缀（npm.cmd 等走 PATH 的不受影响）。
+ *
+ * 实现已搬到 tools/winCmd.ts（与「经 cmd.exe 转发」同住一处，规则只有一份）。
+ * 这里保留同名导出，历史调用方与测试零感知。
  */
 export function resolveCommand(command: string, cwdAbs: string): string {
-    if (process.platform !== "win32") return command;
-    if (!/\.(cmd|bat|exe)$/i.test(command)) return command;
-    if (command.includes("\\") || command.includes("/")) return command;
-    try {
-        if (fs.existsSync(path.join(cwdAbs, command))) return `.\\${command}`;
-    } catch {
-        // cwd 不存在 → 原样返回，让 spawn 报出真实的启动错误
-    }
-    return command;
+    return resolveLocalCmdShim(command, cwdAbs);
 }
 
 export { ProcessLimitError };

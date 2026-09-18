@@ -2,13 +2,15 @@
 // render-smoke.ts —— T6 测试强化冒烟（9/8，确定性层零 LLM 零起服）
 //
 //   卡面狗考金标准的机器层兑现：F5 四坑各造一个可机检形态 → 全被拦：
-//     ①白屏 → judgeDom 判空（渲染审的纯函数半边）
+//     ①白屏 → judgeDom 判空（渲染审的纯函数半边；口径在 visibleText.ts，"只有标题"也判白屏）
 //     ②坏引用（不存在导出名）→ 机械编译复核（T1 引擎复用）
 //     ③路由指空 → 同上
 //     ④风格分裂 → scanHardcodedHex 超限
 //   另覆盖：enforceChecklistConsistency（假通过机器改判/缺项补记）、renderTestReport、
 //           renderCheckFrontend 无前端目录=skip 旁路（不起真服务）。
 //   跑法：bun run render-smoke.ts
+//   注（9/18）：判白屏的规则本体已收敛到 visibleText.ts（renderGate.judgeDom 只是适配层），
+//           用例更多的那份在 developerAgent/tests/render-gate.test.ts（含一次真 headless Edge 跑）。
 // ============================================================
 
 import { judgeDom, renderCheckFrontend, closeRenderGates } from "./renderGate";
@@ -33,6 +35,20 @@ async function main() {
     ok(judgeDom("<html><body><p>" + "短".repeat(300) + "</p></body></html>").blank === true,
         "元素稀疏即使文本长也判空（阈值取或——真 vue 页面不可能只有 3 个元素）");
     ok(judgeDom("<html><body></body></html>").blank === true, "空 body=白屏");
+
+    // 9/18 修正：老 judgeDom 的"可见文本"是「去标签剩下的字」，于是 <head> 里的 <title> 也算字——
+    // 白屏页只要标题够长就能把 textLen 顶过 24 字阈值、被判"有内容"（实测旧口径 textLen=54 / blank=false）。
+    // 规则本体搬去了 visibleText.ts（harness 早就在 eval/harness/checks.ts:477 点名过这个坑）。
+    const titleOnly = judgeDom(`<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">`
+        + `<meta name="theme-color" content="#0052d9"><title>${"待办清单管理系统".repeat(3)}</title>`
+        + `<link rel="icon" href="/favicon.ico"><link rel="stylesheet" href="/a.css"><link rel="modulepreload" href="/a.js"></head>`
+        + `<body><noscript><p>请启用 JavaScript 后使用</p></noscript><div id="app"></div></body></html>`);
+    ok(titleOnly.blank === true && titleOnly.textLen === 0,
+        "★ 只有标题的白屏页=白屏（标题/noscript 都不算可见文本）", JSON.stringify(titleOnly));
+    ok(titleOnly.title === "待办清单管理系统".repeat(3), "标题仍作证据抓出来（判定与证据分离）");
+    const rendered = judgeDom(`<html><head><title>x</title></head><body><div id="app"><h1>今日打卡</h1><ul>${rows}</ul></div></body></html>`);
+    ok(rendered.blank === false && rendered.mountEmpty === false && rendered.textLen > 24,
+        "渲染出文字的页面放行（挂载点非空，别把有内容的判成白屏）", JSON.stringify(rendered));
 
     console.log("=== ② 坑②③：机械编译复核（T1 引擎复用，纸审糊弄不过） ===");
     const known = buildKnown(null, new Map<string, string>([

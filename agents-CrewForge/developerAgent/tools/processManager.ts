@@ -19,6 +19,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { toSpawnArgv, withResolvablePathKey } from "./winCmd";
 
 /** 进程被终止的原因（机器可读，进 Ledger） */
 export type KillReason = "none" | "timeout" | "violation" | "stop" | "cleanup";
@@ -185,11 +186,16 @@ export class ProcessManager {
         if (active >= this.maxProcessCount) throw new ProcessLimitError(this.maxProcessCount, active);
 
         const isWin = process.platform === "win32";
-        const proc = Bun.spawn([spec.command, ...spec.args], {
+        // Windows：.cmd/.bat 与 npm 系裸名必须经 cmd.exe（CreateProcess 不认 .cmd，
+        // 且"给了 env 的 Bun.spawn"看不见 PATH → 裸名不做 PATHEXT 展开）。
+        // 唯一出口就在这里，任何工具（runCommand/runBuild/runAcceptance/shell/
+        // startProcess）都绕不过去；见 winCmd.ts 文件头的实测记录。
+        const argv = toSpawnArgv(spec.command, spec.args, { cwdAbs: spec.cwdAbs, isWin });
+        const proc = Bun.spawn(argv, {
             cwd: spec.cwdAbs,
             stdout: "pipe",
             stderr: "pipe",
-            env: spec.env,
+            env: withResolvablePathKey(spec.env, isWin),
             // POSIX 下自成进程组，超时才能整组杀掉；Windows 不认这个信号语义
             detached: !isWin,
         });

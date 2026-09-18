@@ -7,6 +7,12 @@
 //     · http  → 真发请求，比对状态码与逐字段谓词
 //     · render→ 真起 headless 浏览器，读 DOM
 //   判定不出来 → blocked（缺产物/缺浏览器/缺数据库），并在 detail 里写清楚缺什么。
+//
+//   ★ 渲染检查的"可见文本"口径 = agents-CrewForge/visibleText.ts 的 extractVisibleText()：
+//     <head>/<title>/<script>/<style>/<noscript>/<template>/HTML 注释/零宽字符都不算"人眼能看见的字"。
+//     本文件原先自己算（只剥 script/style 再删标签），会放行"body 里只有 <noscript> 提示语"的白屏页
+//     （实测 textLength=21 ≥ 10 → 假通过）；现在复用它，不再有第二份口径。
+//     html.contains(...) 同样只在 body 的可见标记里找（脚本源码/注释里的 "<input" 不算数）。
 // ============================================================
 
 import fs from "node:fs";
@@ -14,6 +20,8 @@ import path from "node:path";
 import os from "node:os";
 import { execCapture, killTree, tail } from "./exec";
 import { evaluateJsonPath, jsonPathGet, type Predicate } from "../../engine/ir/predicates";
+// ★ "人眼能看见的字"的唯一口径（renderGate 用的是同一份实现）：本文件不再自己算一遍
+import { extractVisibleText, stripElementsWithContent, visibleScope } from "../../visibleText";
 import type {
     ArtifactInventory, CheckResult, JsonAssertionResult,
     ScenarioBuildExpectation, ScenarioHttpAssertion, ScenarioRenderAssertion, ScenarioStartExpectation,
@@ -439,6 +447,61 @@ function startStaticServer(root: string): { port: number; stop: () => void } {
     return { port: server.port ?? 0, stop: () => void server.stop(true) };
 }
 
+// ---------- 渲染断言的纯判定：喂一份 dump-dom 出来的 DOM ----------
+//
+//   ★ 为什么单独抽出来（9/18「假通过」修复）：
+//     这一层原先自己算"可见文本"——只剥 <script>/<style> 再删标签，于是
+//     **<noscript>/<template>/HTML 注释/<head> 里的字全被当成"人眼能看见的字"**。
+//     实测（真实夹具 DOM）：一页 body 里只有 `<noscript>请启用 JavaScript 后使用本应用</noscript>`
+//     （SPA 从未挂载、用户看到的是白屏）旧口径 textLength=21 ≥ 10 → 渲染检查 PASS。
+//     口径现在只有一处实现：agents-CrewForge/visibleText.ts 的 extractVisibleText()
+//     （renderGate 用的是同一份）。抽成纯函数的第二个好处：测试能直接喂**真实 dump**
+//     （harness 自己留的 eval/baseline/runs/*/logs/page.*-edge.stdout.log）与夹具 DOM，
+//     不必为了验证判定而再拉一次浏览器。
+
+/** 「可见文本」口径的一句话说明（失败时写进 detail，点名踩了哪条规则） */
+const VISIBLE_TEXT_RULE =
+    "人眼看不到的字一律不算：<head>/<title>/<script>/<style>/<noscript>/<template>/HTML 注释/零宽字符"
+    + "（口径 = visibleText.ts extractVisibleText）";
+
+/** `html.contains(...)` 的搜索范围里要整段丢掉的标签（内容不是"人眼能看见的标记"）。
+ *  与 visibleText.ts 的 CONTENT_INVISIBLE_TAGS 同一张表：那边没导出这张表（本文件按同一口径重复一遍清单），
+ *  规则实现仍是调用那边的 stripComments/stripElementsWithContent/visibleScope，没有第二份实现。 */
+const MARKUP_INVISIBLE_TAGS = ["script", "style", "noscript", "template", "title"] as const;
+
+/** html.contains 的搜索范围：body 之内（head/title 天然出局）+ 丢掉脚本/样式/注释。
+ *  否则 `<script>` 源码或注释里的字符串 "<input" 会假装页面渲染出了输入框。 */
+function visibleMarkupScope(dom: string): string {
+    return stripElementsWithContent(visibleScope(dom), MARKUP_INVISIBLE_TAGS);
+}
+
+export interface RenderDomEvaluation {
+    /** 人眼能看见的文本（口径 = visibleText.extractVisibleText） */
+    text: string;
+    /** html.contains 的搜索范围（body 内、脚本样式注释都不算） */
+    markup: string;
+    checks: JsonAssertionResult[];
+}
+
+/** 逐条判定渲染断言（path/op/detail 的**形状与历史一致**，报告消费者按 path 取值） */
+export function evaluateRenderDom(a: ScenarioRenderAssertion, dom: string): RenderDomEvaluation {
+    const text = extractVisibleText(dom);
+    const markup = visibleMarkupScope(dom);
+    const checks: JsonAssertionResult[] = [];
+    const textOk = text.length >= a.minTextLength;
+    const textDetail = `body 可见文本 ${text.length} 字（阈值 ${a.minTextLength}）`;
+    checks.push({ path: "body.textLength", op: "gte", ok: textOk, detail: textOk ? textDetail : `${textDetail}：${VISIBLE_TEXT_RULE}` });
+    for (const t of a.mustContainText) {
+        const hit = text.includes(t);
+        checks.push({ path: `text.contains(${t})`, op: "contains", ok: hit, detail: hit ? "命中" : `未命中（文本前 200 字：${text.slice(0, 200)}）` });
+    }
+    for (const h of a.mustContainHtml) {
+        const hit = markup.includes(h);
+        checks.push({ path: `html.contains(${h})`, op: "contains", ok: hit, detail: hit ? "命中" : `未命中（搜索范围=body 可见标记：head/script/style/noscript/template/注释都不算）` });
+    }
+    return { text, markup, checks };
+}
+
 export async function checkRender(
     a: ScenarioRenderAssertion, frontendDist: string, logDir: string, edgePath: string | null,
 ): Promise<CheckResult> {
@@ -474,19 +537,11 @@ export async function checkRender(
         c.finishedAt = nowIso();
         c.logFile = r.stdoutFile;
         const dom = r.stdout;
-        // ★ 只取 <body>：<title>便签应用</title> 这类 head 文本不是"渲染出来的内容"，
-        //   旧系统的 renderGate 把标题算进可见文本，会把白屏判成"有 4 个字"——这里不重复那个错。
-        const bodyMatch = /<body[^>]*>([\s\S]*)<\/body>/i.exec(dom);
-        const body = bodyMatch ? bodyMatch[1]! : dom;
-        const text = body.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-        const checks: JsonAssertionResult[] = [];
-        checks.push({ path: "body.textLength", op: "gte", ok: text.length >= a.minTextLength, detail: `body 可见文本 ${text.length} 字（阈值 ${a.minTextLength}）` });
-        for (const t of a.mustContainText) {
-            checks.push({ path: `text.contains(${t})`, op: "contains", ok: text.includes(t), detail: text.includes(t) ? "命中" : `未命中（文本前 200 字：${text.slice(0, 200)}）` });
-        }
-        for (const h of a.mustContainHtml) {
-            checks.push({ path: `html.contains(${h})`, op: "contains", ok: dom.includes(h), detail: dom.includes(h) ? "命中" : "未命中" });
-        }
+        // ★ 可见文本口径：只算"人眼能看见的字"（见 evaluateRenderDom 的注释）。
+        //   历史（修掉的坑）：这里原先是「只剥 <script>/<style> 再删标签」，
+        //   于是 <noscript>/<template>/注释/<head> 里的字都算数——一页 body 只有
+        //   `<noscript>请启用 JavaScript 后使用本应用</noscript>` 的白屏页 textLength=21 ≥ 10 就被放行了。
+        const { text, checks } = evaluateRenderDom(a, dom);
         c.jsonAssertions = checks;
         c.evidence = `edge exit=${r.exitCode}\nurl=${url}\nDOM(head 800)=${dom.slice(0, 800)}\n文本(head 400)=${text.slice(0, 400)}\n--- edge stderr tail ---\n${tail(r.stderr, 8)}`;
         const edgeFailed = r.exitCode !== 0 && dom.trim().length === 0;
@@ -498,7 +553,8 @@ export async function checkRender(
             c.detail = `页面渲染通过：文本 ${text.length} 字，命中 ${a.mustContainText.length} 个文案断言`;
         } else {
             c.status = "fail";
-            c.detail = `页面渲染未达标：${checks.filter(x => !x.ok).map(x => x.path).join("；")}`;
+            // 失败时把每条断言自己的理由带上（路径名照旧在最前，报告消费者按 path 取值）
+            c.detail = `页面渲染未达标：${checks.filter(x => !x.ok).map(x => `${x.path}（${x.detail}）`).join("；")}`;
         }
         return c;
     } finally {
