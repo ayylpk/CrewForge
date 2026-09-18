@@ -58,11 +58,11 @@ public class ConfirmController {
         return Result.success(confirmService.listByProject(projectId));
     }
 
-    @Operation(summary = "提交答案（一次性，重复提交报错）")
+    @Operation(summary = "提交答案（一次性，重复提交报错；审批卡走 decision）")
     @PostMapping("/{id}/answer")
     public Result<Void> submit(@PathVariable Long id, @RequestBody ConfirmAnswerDTO dto) {
-        log.info("确认门答复 id={} → {}", id, dto.getAnswer());
-        confirmService.answer(id, dto.getAnswer());
+        log.info("确认门答复 id={} → decision={} answer={}", id, dto.getDecision(), dto.getAnswer());
+        confirmService.answer(id, dto.getAnswer(), dto.getDecision());
         return Result.success();
     }
 }

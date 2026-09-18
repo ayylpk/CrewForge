@@ -823,14 +823,23 @@ const consultGateNode: StateNodeFn = async (state) => {
 const consultPending: CondFn = (state) => state?.human != null;
 
 /** 确认门：human 交互（y/n），把答案保留进 confirmAnswer 供条件边判断（humanGate 会清掉 humanAnswer）
- *  确认模式控制：0-全绿灯(自动) / 1-混合(自动) / 2-手动(弹出确认) */
+ *
+ *  确认模式（9/18 按用户拍板的语义重定）：
+ *    0 全自动 —— 全部放开：不问，直接 y（连命令权限也整体旁路，见 PermissionRuleServiceImpl）
+ *    1 混合   —— **换阶段要 yes**：这里正是"技术栈/开工"这个节点，所以必须问
+ *    2 手动   —— 每阶段都要人过：同样问
+ *
+ *  ⚠️ 9/18 改：原来是 `mode === 0 || mode === 1` 都自动放行 —— 那等于"混合模式"在架构节点
+ *     根本没有人拍板的余地，网页上"混合模式 = 在技术栈节点确认"是一句空话。
+ *     现在只有全自动不问，混合与手动都问。
+ */
 const confirmNode: StateNodeFn = async (state, node) => {
     if (state.humanAnswer != null) {
         return { human: null, confirmAnswer: state.humanAnswer, humanAnswer: null };
     }
     const mode = state.confirmMode ?? 0;
-    // 全绿灯(0) 或 混合(1)：架构师确认门自动跳过
-    if (mode === 0 || mode === 1) {
+    // 全自动(0)：不打扰
+    if (mode === 0) {
         return { human: null, confirmAnswer: "y", humanAnswer: null };
     }
     return { human: { questionId: randomUUID(), prompt: node?.systemPrompt?.trim() || "技术方案如上，确认开工？(y / n)", options: ["y", "n"] } };

@@ -26,16 +26,31 @@ public class Confirm {
     private Long projectId;
     /** 引擎生成的 questionId（uuid），幂等键 */
     private String questionId;
-    /** 发问节点：architect / manager 等 */
+    /** 发问节点：architect / manager / bash 等 */
     private String node;
+    /**
+     * 卡的类型（9/18 权限通道）：
+     *   question   —— 问答卡（LLM 主动提问，人用选项/自由文本回答）
+     *   permission —— 审批卡（本地命令执行审批，三按钮：允许一次 / 始终允许 / 拒绝）
+     * 两种卡共用这一条通道，因为它们要的都是"引擎挂起 → 人拍板 → 引擎续跑"这同一件事。
+     */
+    private String kind;
     /** 问题文案 */
     private String question;
     /** 选项 JSON 数组字符串（如 ["y","n"]）；null/空 = 自由文本题；第一项=超时默认答案 */
     private String optionsJson;
+    /**
+     * "要执行什么"（9/18）：JSON 对象字符串。
+     * 审批卡装 {tool, command, cwd, why, matchRule, preview} —— 人必须看得见自己批的是什么
+     * （命令原文、命中哪条规则、为什么要问、会动到什么）。问答卡可留空。
+     */
+    private String detailJson;
     /** pending / answered / auto_passed */
     private String status;
-    /** 用户答案（auto_passed 时=默认选项） */
+    /** 用户答案（auto_passed 时=默认选项）；审批卡的裁决也写一份到这里便于人直接读 */
     private String reply;
+    /** 权限卡的裁定：allow_once / allow_always / deny（问答卡留空，看 reply） */
+    private String decision;
     /** 超时自动放行时刻（建单时按 sys_settings.confirm_timeout_min 算好；null=永不超时） */
     private LocalDateTime expireAt;
     private LocalDateTime createTime;
@@ -45,4 +60,11 @@ public class Confirm {
     public static final String STATUS_PENDING = "pending";
     public static final String STATUS_ANSWERED = "answered";
     public static final String STATUS_AUTO_PASSED = "auto_passed";
+
+    public static final String KIND_QUESTION = "question";
+    public static final String KIND_PERMISSION = "permission";
+
+    public static final String DECISION_ALLOW_ONCE = "allow_once";
+    public static final String DECISION_ALLOW_ALWAYS = "allow_always";
+    public static final String DECISION_DENY = "deny";
 }

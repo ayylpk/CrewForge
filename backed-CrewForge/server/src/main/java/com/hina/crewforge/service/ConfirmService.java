@@ -27,8 +27,9 @@ public interface ConfirmService {
      */
     List<Confirm> listByProject(Long projectId);
 
-    /** Web：人提交答案（pending→answered；已答/已放行则报错） */
-    void answer(Long id, String reply);
+    /** Web：人提交答案（pending→answered；已答/已放行则报错）
+     *  9/18：审批卡走 decision（allow_once/allow_always/deny），问答卡走 reply；两者互斥校验在实现里。 */
+    void answer(Long id, String reply, String decision);
 
     /** 项目是否有"未过期 pending 题"——有人在等/等人在答，对账器与看门狗据此免死（阶段 3） */
     boolean hasPendingQuestion(Long projectId);
