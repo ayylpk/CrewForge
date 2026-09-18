@@ -1,19 +1,24 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import { confirmDialog } from '../utils/confirm'
 import LoginView from '../views/LoginView.vue'
 import ProjectsView from '../views/ProjectsView.vue'
 
+/* ============================================================
+   路由表
+   ------------------------------------------------------------
+   9/18 清理：删掉 4 条路由 + 整个 SEALED_PATHS 闸门。
+
+   删的 4 条是「Agent 仓库」与「团队配置」两组功能（/agents、/agents/new、
+   /agents/:id、/projects/:id/team）。它们自 9/15 起就被下面的守卫拦成
+   "功能未开放"弹窗 —— 界面进不去、又占着 1700 行死代码 + element-plus 依赖。
+   入口卡片删除后，这四页连"点得到"都不成立，于是页面源码、配套 api/types、
+   CardShell/EmptyState 组件与 element-plus 依赖一并清掉。
+   ⚠️ 要恢复：从 git 历史取回（删除时 HEAD 记为 4264873 之后那一次提交）。
+   ============================================================ */
 const router = createRouter({
   history: createWebHistory(),
   routes: [
     { path: '/login', name: 'login', component: LoginView },
     { path: '/projects', name: 'projects', component: ProjectsView },
-    // Agent 仓库（自定义 Agent 池管理）—— 9/15 封存：被底部守卫拦成弹窗
-    { path: '/agents', name: 'agent-repo', component: () => import('../views/AgentRepositoryView.vue') },
-    // Agent 表单（新建仓库 Agent）
-    { path: '/agents/new', name: 'agent-new', component: () => import('../views/AgentFormView.vue') },
-    // Agent 表单（编辑仓库 Agent，:id 即编辑回显模式）
-    { path: '/agents/:id', name: 'agent-edit', component: () => import('../views/AgentFormView.vue') },
     // 新建项目页（配置区 + AI 对话区）
     { path: '/projects/new', name: 'project-new', component: () => import('../views/CreateProjectView.vue') },
     // 需求对话（复用项目经理工作台：确认具体功能，带 :id 即澄清模式）
@@ -28,17 +33,23 @@ const router = createRouter({
       name: 'architect',
       component: () => import('../views/ArchitectView.vue'),
     },
-    // 团队配置页（AI Agent 团队 — 成员/模型/提示词）—— 9/15 封存：被底部守卫拦成弹窗
-    {
-      path: '/projects/:id/team',
-      name: 'team',
-      component: () => import('../views/TeamView.vue'),
-    },
     // 执行面板（Agent 状态 + 文件树 + Monaco）
     {
       path: '/projects/:id/execution',
       name: 'execution',
       component: () => import('../views/ExecutionView.vue'),
+    },
+    // 工单板（sys_task 四列全宽：重跑 / 手动改状态 / 补一条任务）
+    {
+      path: '/projects/:id/tasks',
+      name: 'task-board',
+      component: () => import('../views/TaskBoardView.vue'),
+    },
+    // 验收与证据（交付关实测报告 + 验收判据 + 任务证据 + 引擎日志；只读）
+    {
+      path: '/projects/:id/verification',
+      name: 'verification',
+      component: () => import('../views/VerificationView.vue'),
     },
     // 项目概览页
     {
@@ -57,27 +68,14 @@ const router = createRouter({
   },
 })
 
-// 封存的入口（团队配置 + Agent 仓库）：功能未开发，点击只弹窗不放行
-// 页面源码保留（TeamView / AgentRepositoryView / AgentFormView），恢复时删掉本闸门即可
-const SEALED_PATHS: RegExp[] = [
-  /^\/agents(\/|$)/, // Agent 仓库 + 仓库表单（/agents、/agents/new、/agents/:id）
-  /^\/projects\/\d+\/team$/, // 团队配置页
-]
-
 // 路由守卫：未登录跳转登录页（开发阶段检查假 token）
-router.beforeEach((to, from) => {
+router.beforeEach((to) => {
   const token = localStorage.getItem('cf_token')
   if (to.path !== '/login' && !token) {
     return '/login'
   }
   if (to.path === '/login' && token) {
     return '/projects'
-  }
-  if (SEALED_PATHS.some((re) => re.test(to.path))) {
-    // 会签单 alert 模式（无取消键）：resolve 与否都不影响导航，fire-and-forget
-    void confirmDialog({ title: '功能未开放', body: '该功能还未开发，现已暂时关闭。', ok: '知道了' })
-    // 地址栏直敲/刷新封存页 → 弹完落回项目列表；站内点击 → 原地不动只弹窗
-    return from.name ? false : '/projects'
   }
 })
 

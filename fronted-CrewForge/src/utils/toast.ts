@@ -19,6 +19,9 @@ const state = reactive<{ items: ToastItem[] }>({ items: [] })
 let seq = 0
 
 function push(kind: ToastKind, text: string) {
+  // 同文案不叠加：轮询类页面（执行面板/项目详情都是 10s 一档）同一个错误会反复复现，
+  // 不去重就不是"一次错误一个提示"，而是"一直弹窗"——9/17 用户实测反馈的正是这个。
+  if (state.items.some((t) => t.kind === kind && t.text === text)) return
   const id = ++seq
   state.items.push({ id, kind, text })
   // 同屏最多 4 条，最老的先被顶掉（防止错误风暴糊满屏幕）

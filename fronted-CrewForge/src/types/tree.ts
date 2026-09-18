@@ -27,10 +27,6 @@ export function seedSeq(max: number) {
   if (max > seq) seq = max
 }
 
-export function currentSeq() {
-  return seq
-}
-
 export function newNode(name: string, type: 'dir' | 'file'): TreeNode {
   const n: TreeNode = { id: ++seq, name, type }
   if (type === 'dir') {
@@ -64,7 +60,6 @@ export function maxId(nodes: TreeNode[]): number {
 /** 干净结构 → 内存态（dirTree JSON.parse 之后 restore；open 默认展开目录） */
 export function restoreTree(nodes: CleanNode[] | null | undefined): TreeNode[] {
   const out: TreeNode[] = []
-  seedSeq(maxId(out))
   for (const n of nodes || []) {
     const t = newNode(String(n.name || '未命名'), n.type === 'dir' ? 'dir' : 'file')
     if (t.type === 'dir') {
@@ -73,6 +68,11 @@ export function restoreTree(nodes: CleanNode[] | null | undefined): TreeNode[] {
     }
     out.push(t)
   }
+  // ★ 建完再播种。原实现把 seedSeq(maxId(out)) 写在循环**之前**，那一刻 out 恒为
+  //   空数组 → maxId 恒 0 → 序号从未真正播种，"避免撞号"这句注释是假的：
+  //   第二次 restore 时 newNode 会从旧值继续自增之外还被 seedSeq(0) 重置掉，
+  //   复制/粘贴出来的新节点 id 可能与已存在节点撞号 → SheetTree 的重命名/删除会打错目标。
+  seedSeq(maxId(out))
   return out
 }
 

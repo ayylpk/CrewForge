@@ -107,32 +107,10 @@ async function saveApiSettings() {
       ...cfg.value,
       apiKey: cfg.value.apiKey?.trim() || undefined, // 空=不改（后端掩码语义）
     })
-    // localStorage 镜像：AgentFormView/TeamView 等本地 AI 辅助仍读这份，格式兼容旧值
-    try {
-      const prev = JSON.parse(localStorage.getItem('cf_providers') || '[]') as { apiKey?: string }[]
-      localStorage.setItem(
-        'cf_providers',
-        JSON.stringify([
-          {
-            id: cfg.value.modelKind === 'openai' ? 'openai-compatible' : 'deepseek',
-            name: cfg.value.modelKind === 'openai' ? 'OpenAI 兼容' : 'DeepSeek',
-            baseUrl: cfg.value.modelUrl?.trim() || 'https://api.deepseek.com/v1',
-            // 真 key 只在用户本次输入的瞬间可得；没输入则保留本地旧值
-            apiKey: cfg.value.apiKey?.trim() || prev.find((p) => p?.apiKey)?.apiKey || '',
-            enabled: true,
-            builtin: true,
-            // 模型列表只镜像用户实际填过的名字，系统不再塞预设
-            models: [cfg.value.modelName?.trim(), cfg.value.modelPro?.trim()].filter(Boolean),
-          },
-        ]),
-      )
-      // 默认模型只在用户填了模型名时更新，避免用假名字覆盖旧值
-      if (cfg.value.modelName?.trim()) {
-        localStorage.setItem('cf_default_model', `${cfg.value.modelKind}/${cfg.value.modelName.trim()}`)
-      }
-    } catch {
-      /* 镜像坏了不影响服务端为准 */
-    }
+    // 9/18 删掉这里原来的 localStorage 镜像（cf_providers / cf_default_model）：
+    // 它唯一的读者是已删除的 AgentFormView（经 loadProviders/globalDefaultModel），
+    // 再没有第二个人读 —— 留着就是往用户浏览器里写两份没人看、还含 API Key 的副本。
+    // 模型配置的真相现在只有一处：服务端 sys_settings（引擎直读，30s 热加载）。
     toast.success('已保存——引擎最多 30 秒热加载生效')
     maskedKey.value = (await fetchSettings().catch(() => ({} as RuntimeSettings))).apiKey || '未配置'
     cfg.value.apiKey = ''
@@ -226,9 +204,9 @@ function createNew() {
   router.push({ name: 'project-new' })
 }
 
-function goAgentRepo() {
-  router.push({ name: 'agent-repo' })
-}
+/* 9/18 删掉 goAgentRepo() + 顶栏那颗「Agent 仓库」按钮：
+   它 push 的 agent-repo 路由已随封存功能一起删除（点了只会命中 no-match）。
+   保留一个指向不存在页面的按钮，比没有按钮更糟。 */
 
 /** 点击卡片 → 项目概览页，定位到「功能清单 + 开发计划」区块 */
 function goProject(p: Project) {
@@ -260,10 +238,6 @@ const userInitial = computed(() => (auth.userName || 'K').slice(0, 1).toUpperCas
           <IconShieldLock :size="15" :stroke-width="1.75" />
           API 设置
           <span class="lamp" :class="llmConfigured ? 'lamp-on' : ''" aria-hidden="true"></span>
-        </button>
-        <!-- Agent 仓库（已封存，守卫会弹「功能未开放」） -->
-        <button class="btn btn-sm btn-ghost" title="管理 Agent 仓库" @click="goAgentRepo">
-          Agent 仓库
         </button>
         <span class="tb-user">
           <span class="tb-avatar mono">{{ userInitial }}</span>

@@ -13,8 +13,16 @@ const props = withDefaults(
     sheet?: string
     width?: string
     closeOnScrim?: boolean
+    /**
+     * 配色作用域。
+     * 本组件用 <Teleport to="body"> 把内容腾到 body 下 —— 腾出去之后它
+     * **不再是调用页面的 DOM 后代**，CSS 变量的继承链就断了。
+     * 所以暗色页面（执行面板）里的弹窗必须显式带 tone="dark"，
+     * 由这里补挂 .vsc-dark 作用域；否则暗色页面会弹出一个浅色对话框。
+     */
+    tone?: 'paper' | 'dark'
   }>(),
-  { title: '', sheet: '', width: '560px', closeOnScrim: true },
+  { title: '', sheet: '', width: '560px', closeOnScrim: true, tone: 'paper' },
 )
 
 const emit = defineEmits<{ close: [] }>()
@@ -28,7 +36,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 
 <template>
   <Teleport to="body">
-    <div class="scrim" @click.self="props.closeOnScrim && emit('close')">
+    <div
+      class="scrim"
+      :class="{ 'vsc-dark': props.tone === 'dark' }"
+      @click.self="props.closeOnScrim && emit('close')"
+    >
       <div class="modal sheet-fall" :style="{ maxWidth: width }" role="dialog" aria-modal="true" :aria-label="title">
         <header class="modal-head">
           <div class="modal-titles">
@@ -51,6 +63,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKey))
 </template>
 
 <style scoped>
+/* 暗色工作台上的遮罩用纯黑压暗，而不是纸面世界那层藏青薄雾。
+   （不用 CSS 嵌套写法：本仓库其他地方也没有，保持一致更好读） */
+.scrim.vsc-dark {
+  background: rgba(0, 0, 0, 0.5);
+}
 .modal {
   display: flex;
   flex-direction: column;

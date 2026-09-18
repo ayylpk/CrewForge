@@ -21,6 +21,7 @@ import AppModal from '../components/ui/AppModal.vue'
 import SheetTree from '../components/SheetTree.vue'
 import TopBar from '../components/ui/TopBar.vue'
 import { fetchProjectById, updateProject } from '../api/project'
+import { ENVELOPE_KEYS, buildDevPlanJson, buildTechStackJson, parseEnvelopeArray, toDisplayList } from '../utils/json'
 import { cleanTree, restoreTree, type CleanNode, type TreeNode } from '../types/tree'
 
 const router = useRouter()
@@ -52,6 +53,26 @@ function parsePlanArr(raw?: string | null): unknown[] {
   }
 }
 
+/**
+ * 库里原始形状的"底稿"（9/17 加）。
+ *
+ * 为什么必须留着：这一页只编辑阶段名/任务清单，但库里这些列是**引擎写的富信封**：
+ *   dev_plan  = {risks, phases:[{goal,name,risk,phase,uiStyle,features,dependencies,relative_effort}],
+ *                project, features, mvp_scope, uiProfile}
+ *   tech_stack= {why, tables, moduleTech, techniques:{database:{…}, middleware:[{name,purpose}]}}
+ * 而页面模型只有 {name, progress, tasks}。原来「确认方案」直接
+ * `JSON.stringify(phases.value)` 整体替换 → 一次性丢掉信封的全部其他键，
+ * 连每个阶段的 `phase` 数字都丢了 —— 而 `projectRunner.usablePhases()` 硬要求
+ * `phase` 是整数、`name` 非空，丢了它引擎读回 dev_plan 会判定"计划不可用"，
+ * 退回去重跑 PM 对话（引擎侧真故障，不只是少显示几个字段）。
+ * 所以保存时必须"在底稿上改"，而不是"用页面模型重建"。
+ */
+const devPlanEnvelope = ref<Record<string, unknown> | null>(null)
+const devPlanOriginalPhases = ref<Record<string, unknown>[]>([])
+/** 原计划是不是引擎形状（阶段带数字 phase）——决定新增阶段要不要补 phase */
+const devPlanEngineShape = ref(false)
+const techStackEnvelope = ref<Record<string, unknown> | null>(null)
+
 /** 把读回的条目归一成页面模型：PM 的 planItem 只有 features 没有 tasks，
  *  tasks 兜成 [] 同时防渲染 .length 崩（审计 F11 同型点） */
 function normalizePhases(rows: unknown[]): { name: string; progress: number; tasks: string[] }[] {
@@ -64,6 +85,8 @@ function normalizePhases(rows: unknown[]): { name: string; progress: number; tas
     }))
 }
 
+/** 阶段对象里"任务清单"所在的键：引擎写 features，网页写 tasks —— 谁原来有就写回谁 */
+
 const projectId = computed(() => Number(route.params.id))
 
 onMounted(async () => {
@@ -73,10 +96,43 @@ onMounted(async () => {
     const p = await fetchProjectById(id)
     projectName.value = p.name
     // 回显已保存的方案（确认方案提交过才有数据）
-    techStack.value = (parseArr(p.techStack) as unknown[]).filter((x): x is string => typeof x === 'string')
-    // devPlan 有两种存储形状（9/15 审计坑 F3）：网页自存=纯数组；引擎 PM 直写库={project, phases:[…]} 对象。
+
+    // ---- techStack：双形状（网页裸数组 / 引擎信封），并留底稿供保存时合并 ----
+    let rawStack: unknown = null
+    try {
+      rawStack = p.techStack ? JSON.parse(p.techStack) : null
+    } catch {
+      rawStack = null // 坏 JSON：当没有
+    }
+    techStackEnvelope.value =
+      rawStack && typeof rawStack === 'object' && !Array.isArray(rawStack)
+        ? (rawStack as Record<string, unknown>)
+        : null
+    techStack.value = toDisplayList(parseEnvelopeArray(p.techStack, ENVELOPE_KEYS.techStack))
+
+    // ---- devPlan：同上，而且信封里的 phases 要留着做合并底稿 ----
+    let rawPlan: unknown = null
+    try {
+      rawPlan = p.devPlan ? JSON.parse(p.devPlan) : null
+    } catch {
+      rawPlan = null
+    }
+    if (rawPlan && typeof rawPlan === 'object' && !Array.isArray(rawPlan)) {
+      const env = rawPlan as Record<string, unknown>
+      devPlanEnvelope.value = env
+      devPlanOriginalPhases.value = Array.isArray(env.phases)
+        ? (env.phases as Record<string, unknown>[])
+        : []
+    } else {
+      devPlanEnvelope.value = null
+      devPlanOriginalPhases.value = Array.isArray(rawPlan) ? (rawPlan as Record<string, unknown>[]) : []
+    }
+    devPlanEngineShape.value = devPlanOriginalPhases.value.some((x) => typeof x?.phase === 'number')
     // 旧 parseArr 把对象当 → [] → 页面显示"暂无开发计划"，一点「确认方案」把 "[]" PUT 回去清空引擎计划。
-    phases.value = normalizePhases(parsePlanArr(p.devPlan))
+    phases.value = normalizePhases(
+      devPlanOriginalPhases.value.length ? devPlanOriginalPhases.value : parsePlanArr(p.devPlan),
+    )
+
     dirTree.value = restoreTree(parseArr(p.dirTree) as CleanNode[])
   } catch {
     projectName.value = '项目 #' + route.params.id
@@ -323,12 +379,23 @@ function goBack() {
 
 /**
  * 保存方案到后端：技术选型 + 开发计划 + 项目目录 + 状态置 planning
- * techStack / devPlan / dirTree 均为 JSON 数组字符串（后端校验格式）
+ *
+ * ⚠️ 9/17 修：原来这里是 `devPlan: JSON.stringify(phases.value)` —— 用页面模型
+ *   （只有 name/progress/tasks）**整体替换**库里的引擎信封，一次性丢掉
+ *   risks/project/features/mvp_scope/uiProfile 和每个阶段的 phase 数字，
+ *   而 usablePhases() 硬要求数字 phase → 引擎读回后判定计划不可用、退回重跑 PM 对话。
+ *   现在改为"在底稿上合并"（见 buildDevPlanJson / buildTechStackJson）。
+ *   这两个 JSON 仍是**数组或对象**都是合法形状（后端 validateJsonShape 两种都收）。
  */
 async function savePlan() {
   await updateProject(projectId.value, {
-    techStack: JSON.stringify(techStack.value),
-    devPlan: JSON.stringify(phases.value),
+    techStack: buildTechStackJson(techStackEnvelope.value, techStack.value),
+    devPlan: buildDevPlanJson(
+      devPlanEnvelope.value,
+      devPlanOriginalPhases.value,
+      phases.value,
+      devPlanEngineShape.value,
+    ),
     dirTree: JSON.stringify(cleanTree(dirTree.value)),
     status: 'planning',
   })

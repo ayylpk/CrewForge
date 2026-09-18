@@ -11,6 +11,7 @@ export type ProjectStatus =
   | 'paused'       // 已暂停
   | 'done'         // 已完成
   | 'failed'       // 失败
+  | 'blocked'      // 跑完但交付关未验证（引擎 decideProjectStatus 的第三终态）
 
 /** 确认模式（创建提交时用字符串；后端返回数字 0/1/2） */
 export type ConfirmMode = 'green' | 'mixed' | 'manual'

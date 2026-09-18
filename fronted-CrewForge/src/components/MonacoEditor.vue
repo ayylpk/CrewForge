@@ -46,6 +46,13 @@ const props = defineProps<{
   language: string
   value: string
   readOnly?: boolean
+  /**
+   * Monaco 主题：
+   *   'cf-paper' —— 晒图室浅色（自托管 JetBrains Mono 配纸底墨字），默认；
+   *   'vs-dark'  —— Monaco 自带的 VS Code 默认暗色，执行面板这个"工作台"用。
+   * 用内置主题而不是自造暗色：要的就是"和 VS Code 一模一样"，重画一遍只会不像。
+   */
+  theme?: 'cf-paper' | 'vs-dark'
 }>()
 
 const emit = defineEmits<{
@@ -63,7 +70,7 @@ onMounted(() => {
   editor = monaco.editor.create(container.value, {
     value: props.value,
     language: props.language,
-    theme: 'cf-paper',
+    theme: props.theme ?? 'cf-paper',
     automaticLayout: true,
     minimap: { enabled: false },
     fontSize: 13,
@@ -106,6 +113,14 @@ watch(
     if (model) {
       monaco.editor.setModelLanguage(model, lang)
     }
+  },
+)
+
+// 切换主题（monaco 的主题是全局的，所以用 setTheme 而不是重建编辑器）
+watch(
+  () => props.theme,
+  (t) => {
+    monaco.editor.setTheme(t ?? 'cf-paper')
   },
 )
 

@@ -21,7 +21,9 @@ import {
 import AppModal from '../components/ui/AppModal.vue'
 import TopBar from '../components/ui/TopBar.vue'
 import { createProject as createProjectApi, fetchProjectById, updateProject } from '../api/project'
+import { MODE_NUM_TO_STR as SHARED_MODE_NUM_TO_STR } from '../constants/status'
 import type { ConfirmMode, ProjectCreateDTO } from '../types/project'
+import { ENVELOPE_KEYS, parseEnvelopeArray, toDisplayList } from '../utils/json'
 import { toast } from '../utils/toast'
 
 const router = useRouter()
@@ -60,18 +62,13 @@ const modeSaving = ref(false) // 澄清模式：保存确认模式中
 const features = ref<string[]>([])
 const featureDraft = ref('')
 
-/** 后端 JSON 字符串字段解析成数组 */
+/** 后端 JSON 列解析：认裸数组，也认引擎写的信封对象（见 utils/json.ts） */
 function parseJsonArr(raw?: string | null): string[] {
-  if (!raw) return []
-  try {
-    const arr = JSON.parse(raw)
-    return Array.isArray(arr) ? arr.map(String) : []
-  } catch {
-    return []
-  }
+  return toDisplayList(parseEnvelopeArray(raw, ENVELOPE_KEYS.businessModules))
 }
 
-const MODE_NUM_TO_STR: Record<number, ConfirmMode> = { 0: 'green', 1: 'mixed', 2: 'manual' }
+/** 数字 → 前端串：用 constants/status 的那一份（索引即 0/1/2），不再本地复制一份映射 */
+const modeNumToStr = (n: number): ConfirmMode => SHARED_MODE_NUM_TO_STR[n] ?? 'mixed'
 const MODE_LABELS: Record<ConfirmMode, string> = {
   green: '全绿灯模式',
   mixed: '混合模式',
@@ -85,7 +82,7 @@ onMounted(async () => {
     const p = await fetchProjectById(projectId)
     form.value.name = p.name
     form.value.description = p.description || ''
-    form.value.confirmMode = MODE_NUM_TO_STR[p.confirmMode] || 'mixed'
+    form.value.confirmMode = modeNumToStr(p.confirmMode)
     // 全字段填充：有值才填，undefined 的字段保存时不发送（不会覆盖后端）
     form.value.clarifiedReq = p.clarifiedReq || undefined
     form.value.businessModules = p.businessModules || undefined
@@ -110,21 +107,38 @@ const phaseLabel = computed(() => {
   return '项目描述已确认'
 })
 
-/** 手动添加功能点（澄清模式） */
+/** 手动添加功能点（澄清模式）
+ * ⚠️ 9/17 修"点了添加没反应"：原来空输入和"已存在"都是**静默 return/清空**，用户完全
+ * 不知道发生了什么（同文件的 saveFeatures 却会给 warning，口径不一致）。
+ * 现在两种失败都给出可读提示，成功也回一句——点了没有任何反馈本身就是 bug。 */
 function addFeature() {
   const text = featureDraft.value.trim()
-  if (!text) return
-  if (!features.value.includes(text)) {
-    features.value.push(text)
+  if (!text) {
+    toast.warning('请先输入功能点再点「添加」')
+    return
   }
+  if (features.value.includes(text)) {
+    toast.warning(`「${text}」已经在清单里了`)
+    featureDraft.value = ''
+    return
+  }
+  features.value.push(text)
   featureDraft.value = ''
+  toast.success(`已加入：${text}（记得点右上角「保存功能清单」落库）`)
 }
 
-/** 澄清模式：保存项目描述（复用统一 updateProject；undefined 字段不发送不覆盖） */
+/** 澄清模式：保存项目描述（只提交 description）
+ * ⚠️ 9/17 修「devPlan 必须是 JSON 数组」：
+ *   原来这里是 `updateProject(projectId, { ...form.value })` —— 把进页面时读到的**整行**
+ *   原样写回去。而库里 dev_plan/tech_stack/business_modules 有 19/12/13 行是引擎写的
+ *   **对象信封**（{risks, phases, ...}），后端 validateJsonArray 只认数组 → 400 直接被拦。
+ *   更糟的是：就算校验放过，这个往返也会用页面加载那一刻的旧值覆盖掉引擎后来写的内容。
+ *   所以这里改成"只发我编辑的字段"—— 不碰我不拥有的数据。
+ */
 async function saveDescription() {
   descSaving.value = true
   try {
-    await updateProject(projectId, { ...form.value })
+    await updateProject(projectId, { description: form.value.description })
   } finally {
     descSaving.value = false
   }
@@ -145,17 +159,17 @@ async function saveName() {
   }
 }
 
-/** 澄清模式：确认模式下拉选中即保存（confirmMode 转数字在 api 层） */
+/** 澄清模式：确认模式下拉选中即保存（只提交 confirmMode；confirmMode 转数字在 api 层） */
 async function saveConfirmMode() {
   modeSaving.value = true
   try {
-    await updateProject(projectId, { ...form.value })
+    await updateProject(projectId, { confirmMode: form.value.confirmMode })
   } finally {
     modeSaving.value = false
   }
 }
 
-/** 澄清模式：保存功能清单（校验 → features 组装 JSON 写进 form → 统一 updateProject） */
+/** 澄清模式：保存功能清单（只提交 businessModules —— 这一列归本页所有） */
 async function saveFeatures() {
   if (!features.value.length) {
     toast.warning('还没有确认任何功能')
@@ -163,8 +177,7 @@ async function saveFeatures() {
   }
   saving.value = true
   try {
-    form.value.businessModules = JSON.stringify(features.value)
-    await updateProject(projectId, { ...form.value })
+    await updateProject(projectId, { businessModules: JSON.stringify(features.value) })
     // 保存成功反馈 = 跳转到 overview 看到「已确认功能」清单本身，不再弹全局提示
     router.push({ name: 'project-detail', params: { id: String(projectId) }, hash: '#overview' })
   } finally {

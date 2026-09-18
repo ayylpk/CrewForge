@@ -25,15 +25,3 @@ export interface projectFileVO {
   createTime: string
   updateTime: string
 }
-
-/** 按路径查找节点 */
-export function findNode(nodes: FileNode[], path: string): FileNode | null {
-  for (const n of nodes) {
-    if (n.path === path) return n
-    if (n.children) {
-      const found = findNode(n.children, path)
-      if (found) return found
-    }
-  }
-  return null
-}

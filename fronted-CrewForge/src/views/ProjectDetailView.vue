@@ -14,10 +14,10 @@ import {
   IconCheck,
   IconCompass,
   IconDownload,
-  IconFileText,
   IconFlame,
+  IconLayoutKanban,
   IconPlayerPlay,
-  IconStar,
+  IconShieldCheck,
   IconUsers,
 } from '@tabler/icons-vue'
 import TopBar from '../components/ui/TopBar.vue'
@@ -26,6 +26,7 @@ import { downloadProjectZip, fetchProjectById } from '../api/project'
 import { fetchRunStatus, startProjectRun, stopProjectRun, type RunStatus } from '../api/projectRun'
 import { usePolling } from '../composables/usePolling'
 import { projectStatusMeta } from '../constants/status'
+import { ENVELOPE_KEYS, parseEnvelopeArray, toDisplayList } from '../utils/json'
 import { confirmDialog } from '../utils/confirm'
 import { toast } from '../utils/toast'
 import type { Project, ProjectStatus } from '../types/project'
@@ -37,15 +38,9 @@ const route = useRoute()
 const project = ref<Project | null>(null)
 const loading = ref(true)
 
-/** 后端 JSON 字符串字段解析成数组（解析失败返回空数组 —— 没有就没有） */
+/** 后端 JSON 列解析成字符串清单：认裸数组，也认引擎写的信封对象（见 utils/json.ts） */
 function parseJsonArr(raw?: string | null): string[] {
-  if (!raw) return []
-  try {
-    const arr = JSON.parse(raw)
-    return Array.isArray(arr) ? arr.map(String) : []
-  } catch {
-    return []
-  }
+  return toDisplayList(parseEnvelopeArray(raw, ENVELOPE_KEYS.businessModules))
 }
 
 // 已确认功能(businessModules)（字符串数组）
@@ -73,6 +68,16 @@ const plan = computed<PlanPhase[]>(() => {
 const statusMeta = computed(() => projectStatusMeta(project.value?.status || ('draft' as ProjectStatus)))
 const projectName = computed(() => project.value?.name || '项目 #' + route.params.id)
 
+/**
+ * 项目描述折叠（9/17）：需求原文动辄几百字，原来只限了 width 没限高度，
+ * 直接把标题栏撑满一屏，把下面六个入口挤下去。
+ * 现在默认折 3 行；超过这个字数才出现「展开全文」——短描述不该配一个没用的按钮。
+ */
+const DESC_CLAMP_CHARS = 90
+const descExpanded = ref(false)
+const descText = computed(() => project.value?.description || '暂无描述')
+const descCollapsible = computed(() => descText.value.length > DESC_CLAMP_CHARS)
+
 /** 返回项目列表 */
 const backLabel = '项目列表'
 
@@ -85,13 +90,32 @@ const runStatus = ref<RunStatus | null>(null)
 const starting = ref(false)
 const stopping = ref(false)
 
+/**
+ * 路由 id → 有效数字；拿不到就 null。
+ * ⚠️ 9/17 修「一直弹系统繁忙」：原来两个轮询直接 `Number(route.params.id)`，
+ * 地址里没有有效项目号时得 NaN → 请求打成 /api/project/NaN 与 /api/project-run/NaN，
+ * 后端报「参数 id 需要是 Long，收到 "NaN"」，10s 一轮 = 无限弹窗。
+ * 所有按 id 发请求的地方都必须先过这道闸。
+ */
+const routeProjectId = computed(() => {
+  const n = Number(route.params.id)
+  return Number.isFinite(n) && n > 0 ? n : null
+})
+
 async function refreshProject() {
-  project.value = await fetchProjectById(Number(route.params.id))
+  const id = routeProjectId.value
+  if (id == null) return // 地址里没有有效项目号：不发请求（发出去只会换来一个注定失败的 400）
+  project.value = await fetchProjectById(id)
 }
 
 async function refreshRunStatus() {
+  const id = routeProjectId.value
+  if (id == null) {
+    runStatus.value = null
+    return
+  }
   try {
-    runStatus.value = await fetchRunStatus(Number(route.params.id))
+    runStatus.value = await fetchRunStatus(id)
   } catch {
     runStatus.value = null // 无账/后端未就绪：按钮组按未运行处理（start 接口自有真错提示）
   }
@@ -103,19 +127,31 @@ const isRunning = computed(() => runStatus.value?.running === true)
 const canStart = computed(() => {
   if (isRunning.value || !project.value) return false
   const s = project.value.status
-  // 开工窗口：方案已确认(planning) / 暂停·失败续跑 / 执行中但对账账本 stopped（手动停过）
-  return s === 'planning' || s === 'paused' || s === 'failed' || (s === 'executing' && runStatus.value?.runState === 'stopped')
+  // 开工窗口：方案已确认(planning) / 暂停·失败·未验证续跑 /
+  //          执行中但对账账本 stopped（手动停过）
+  // blocked=引擎"跑完但交付关未验证"的终态，不放进来的话这类项目在界面上
+  // 既没有开工也没有停止按钮，卡死无法捞回来。
+  return s === 'planning' || s === 'paused' || s === 'failed' || s === 'blocked'
+    || (s === 'executing' && runStatus.value?.runState === 'stopped')
 })
 const canStop = computed(() => isRunning.value || project.value?.status === 'executing')
 const startLabel = computed(() => {
   const s = project.value?.status
-  return s === 'paused' || s === 'failed' || (s === 'executing' && runStatus.value?.runState === 'stopped') ? '继续开工' : '开工'
+  return s === 'paused' || s === 'failed' || s === 'blocked'
+    || (s === 'executing' && runStatus.value?.runState === 'stopped')
+    ? '继续开工'
+    : '开工'
 })
 
 async function startWork() {
+  const id = routeProjectId.value
+  if (id == null) {
+    toast.error('地址里没有有效的项目号')
+    return
+  }
   starting.value = true
   try {
-    await startProjectRun(Number(route.params.id))
+    await startProjectRun(id)
     toast.success('引擎已拉起，流水线开跑——去执行面板看任务流转')
     await Promise.all([refreshProject(), refreshRunStatus()])
     router.push({ name: 'execution', params: { id: route.params.id } })
@@ -125,6 +161,11 @@ async function startWork() {
 }
 
 async function stopWork() {
+  const id = routeProjectId.value
+  if (id == null) {
+    toast.error('地址里没有有效的项目号')
+    return
+  }
   const ok = await confirmDialog({
     title: '停止运行',
     body: '将终止引擎进程并暂停续拉（在途任务停在当前粒度，续开工从断点接上）。确定停止？',
@@ -135,7 +176,7 @@ async function stopWork() {
   if (!ok) return
   stopping.value = true
   try {
-    await stopProjectRun(Number(route.params.id))
+    await stopProjectRun(id)
     toast.success('已停止（对账器不会再自动续拉，点「继续开工」可恢复）')
     await Promise.all([refreshProject(), refreshRunStatus()])
   } finally {
@@ -158,16 +199,19 @@ void refreshProject()
   })
 void refreshRunStatus()
 
-/** 概览锚点滚动 */
-function scrollTo(id: string) {
-  document.getElementById(id)?.scrollIntoView({ behavior: 'smooth' })
-}
+/* 9/17：删掉 scrollTo() —— 它只服务于原来那张「项目概览」入口卡，而那张卡本身是个
+   假模块（点它只是滚到同页下方的 #overview 区块）。入口卡已换成「验收与证据」。
+   下方那个 id="overview" 的容器保留：路由 push 时带的 #overview 锚点仍要靠它。 */
 
 /** 下载 zip（audit F1：原实现 <a href> 直导航——不带 Authorization、dev 下无 /api 代理，必坏包。
  *  改走 axios 实例 blob 下载，request.ts 拦截器已放行 Blob 不拆 Result 信封） */
 async function downloadZip() {
+  const id = routeProjectId.value
+  if (id == null) {
+    toast.error('地址里没有有效的项目号')
+    return
+  }
   try {
-    const id = Number(route.params.id)
     const blob = await downloadProjectZip(id)
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
@@ -190,7 +234,7 @@ async function downloadZip() {
           <span class="dim">项目 ·</span>
           <span>{{ projectName }}</span>
         </span>
-        <span class="sheet-no">PRJ-{{ String(route.params.id).padStart(4, '0') }}-O</span>
+        <span class="sheet-no">PRJ-{{ routeProjectId ? String(routeProjectId).padStart(4, '0') : '----' }}-O</span>
       </template>
       <template #right>
         <!-- 阶段 2 点火：开工/停止（对账器状态来自 /api/project-run/{id}） -->
@@ -232,7 +276,16 @@ async function downloadZip() {
               {{ projectName }}
               <StampSeal :label="statusMeta.label" :tone="statusMeta.tone" />
             </h1>
-            <p class="desc">{{ project?.description || '暂无描述' }}</p>
+            <p class="desc" :class="{ 'desc-open': descExpanded || !descCollapsible }">{{ descText }}</p>
+            <button
+              v-if="descCollapsible"
+              type="button"
+              class="desc-toggle"
+              :aria-expanded="descExpanded"
+              @click="descExpanded = !descExpanded"
+            >
+              {{ descExpanded ? '收起' : '展开全文' }}
+            </button>
           </div>
         </section>
 
@@ -256,22 +309,22 @@ async function downloadZip() {
             <span class="entry-desc">架构师 · 技术选型</span>
           </button>
 
-          <button class="entry-card" @click="router.push({ name: 'team', params: { id: route.params.id } })">
-            <span class="entry-ico"><IconStar :size="19" :stroke-width="1.75" /></span>
-            <span class="entry-name">Agent 团队</span>
-            <span class="entry-desc">成员 · 模型 · 提示词</span>
+          <button class="entry-card" @click="router.push({ name: 'task-board', params: { id: route.params.id } })">
+            <span class="entry-ico"><IconLayoutKanban :size="19" :stroke-width="1.75" /></span>
+            <span class="entry-name">工单板</span>
+            <span class="entry-desc">任务四列 · 重跑 · 补单</span>
+          </button>
+
+          <button class="entry-card" @click="router.push({ name: 'verification', params: { id: route.params.id } })">
+            <span class="entry-ico"><IconShieldCheck :size="19" :stroke-width="1.75" /></span>
+            <span class="entry-name">验收与证据</span>
+            <span class="entry-desc">交付关 · 判据 · 日志</span>
           </button>
 
           <button class="entry-card" @click="downloadZip">
             <span class="entry-ico"><IconDownload :size="19" :stroke-width="1.75" /></span>
             <span class="entry-name">下载项目</span>
             <span class="entry-desc">zip 打包</span>
-          </button>
-
-          <button class="entry-card" @click="scrollTo('overview')">
-            <span class="entry-ico"><IconFileText :size="19" :stroke-width="1.75" /></span>
-            <span class="entry-name">项目概览</span>
-            <span class="entry-desc">功能 · 开发计划</span>
           </button>
         </nav>
 
@@ -383,12 +436,52 @@ async function downloadZip() {
   color: var(--ink-2);
   line-height: 1.7;
   max-width: 72ch;
+  /* 需求原文常带换行，保留；折叠时靠 line-clamp 截断 */
+  white-space: pre-wrap;
+  /* 默认折到 3 行（9/17：原来只限了 max-width 不限高度，
+     一段几百字的需求会把标题栏撑成一整屏） */
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+}
+/* 展开态：解除截断 */
+.desc-open {
+  display: block;
+  -webkit-line-clamp: unset;
+  line-clamp: unset;
+  overflow: visible;
+}
+.desc-toggle {
+  margin-top: 6px;
+  padding: 0;
+  border: none;
+  background: none;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--cyan);
+  cursor: pointer;
+}
+.desc-toggle:hover {
+  color: var(--cyan-deep);
+  text-decoration: underline;
+}
+.desc-toggle:focus-visible {
+  outline: 2px solid var(--focus-cyan);
+  outline-offset: 2px;
+  border-radius: var(--r-xs);
 }
 
 /* ===== 入口格 ===== */
 .entry-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(158px, 1fr));
+  /* ⚠️ 必须是 auto-fit，不能是 auto-fill（9/17 修"六张卡宽度和上下不对齐"）：
+     .page 内容宽 = min(视口,1320) - 80，在 1240 下本规则算出 floor((1240+12)/170) = 7 条轨道。
+     auto-fill 会保留未被占用的第 7 条空轨道 → 6 张卡只占到
+     6×166.86 + 5×12 = 1061px，右边空出 179px，和上下的面板对不齐。
+     auto-fit 会把空轨道塌掉 → 6 条轨道，每张 (1240-60)/6 = 196.7px，正好 1240 满宽。 */
+  grid-template-columns: repeat(auto-fit, minmax(158px, 1fr));
   gap: 12px;
   margin-bottom: 14px;
 }

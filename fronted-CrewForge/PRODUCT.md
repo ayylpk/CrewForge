@@ -28,13 +28,19 @@ fronted-CrewForge 是 CrewForge（AI 多 Agent 软件工厂）的 Web 控制台�
 
 ## Capabilities and Constraints
 
-- 6 活跃页重写；3 个封存页（TeamView / AgentRepositoryView / AgentFormView）源码不动，路由守卫继续以弹窗拦截（2026-09-17 用户拍板）。
+- 8 活跃页：登录 / 项目台账 / 新建 / 项目详情 / 技术方案（绘图桌）/ 执行面板 / 工单板 / 验收与证据。
+  9/18 收尾：3 个封存页（TeamView / AgentRepositoryView / AgentFormView）**已删除**——它们自 9/17 起
+  就被路由守卫拦成"功能未开放"，界面永远进不去，留着的只有死代码和一个死依赖。
+- 依赖记账口径：**以 git 追踪的 `package-lock.json` 为准**（npm）。磁盘上的 `node_modules` 是 pnpm
+  装的形态（`.pnpm` 虚拟仓库 + junction），历史遗留，不影响运行；9/18 已删掉未被追踪、且仍列着
+  element-plus 的 `pnpm-lock.yaml`，免得下次 `pnpm install` 把它装回来。
 - 硬约束：路由路径与 API 契约不变（后端不动）。后端 JSON 字符串字段：businessModules / techStack / devPlan / dirTree / optionsJson；devPlan 存在两种历史形态（数组 或 {phases}），解析必须保持宽容。
 - confirmMode：前端字符串 green/mixed/manual ↔ 线上 0/1/2，映射在 api/project.ts。
 - 轮询生命周期：execution 页 10s 轮询 tasks+files+confirms；detail 页 10s 轮询 project+runStatus；均 onMounted 起、onBeforeUnmount 清。
-- Element Plus 整体移除（2026-09-17 用户拍板）：toast/确认框/树全部自制；Monaco 编辑器保留（重键 :key 只能是 path，见旧代码 bug F4 教训）。
+- Element Plus 整体移除（2026-09-17 用户拍板；9/18 连 `package.json` 依赖一起拔）：toast/确认框/树全部自制；Monaco 编辑器保留（重键 :key 只能是 path，见旧代码 bug F4 教训）。
+- 执行面板是唯一的**暗色受控例外**（VS Code Dark+，`style.css` 的 `.vsc-dark` 作用域）。进该作用域的组件必须全靠 CSS 变量取色，`Teleport` 出去的弹窗要自己带 `vsc-dark`（详见 DESIGN.md §1.1）。
 - PM/架构师对话与执行面板内聊天目前是本地 mock（无后端调用），重写保持该行为不夸大。
-- 未决：聊天是否接真 LLM（本次不做）；7 个 Agent 头像里 backend/frontend/tester/maintainer 四张当前只存在于 constants 未渲染。
+- 未决：聊天是否接真 LLM（本次不做）。角色仍是 6 个（constants 里齐全），但其中 backend/frontend/tester/maintainer 四张头像**已随封存页删除**，界面上只有 manager/architect 两张脸。
 
 ## Brand Commitments
 
@@ -44,7 +50,8 @@ fronted-CrewForge 是 CrewForge（AI 多 Agent 软件工厂）的 Web 控制台�
 
 ## Evidence on Hand
 
-- 现有图片资产：bg-login.png、logo-crewforge.png、agent-{manager,architect,backend,frontend,tester,maintainer}.png；hero.png / banner-agents.png 为闲置/仅封存页引用。
+- 现有图片资产（9/18 清点，与 `src/assets/` 逐一对得上）：`sheet-login-flow.png`（登录页左版）、`sheet-empty-draft.png`（台账空态）、`agent-manager.png`、`agent-architect.png`、`logo-crewforge.png`、`logo-crewforge-cyan.png`。
+  死资产已删：`bg-login.png` / `hero.png`（只被已删的 Vite 脚手架引用）/ `banner-agents.png`（只被已删封存页引用）/ 4 张只被封存页用的 `agent-*`。生图清单见 `ASSETS-PROMPTS.md`。
 - 真实数据全部来自后端 DB（项目、任务、文件、设置）；UI 内不得出现虚构的测试数据、客户、评分或性能声明。
 - docs/superpowers/plans/2026-09-10-frontend-control-room-redesign.md：其中仍成立的产品级原则——颜色只服务状态（运行/通过/失败/等待确认）、图标必须有标签与键盘焦点、破坏性操作与主操作分离。
 

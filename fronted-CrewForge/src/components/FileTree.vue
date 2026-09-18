@@ -116,7 +116,10 @@ function extOf(name: string): string {
   color: var(--ink-2);
 }
 .dir-ico {
-  color: var(--cyan);
+  /* 双重取值的写法：本组件同时用在浅色纸面页和执行面板（暗色工作台）。
+     纸面世界里 --cyan-ink 没定义 → 回落到 --cyan(#155e93)，行为与原来完全一致；
+     暗色作用域里 --cyan-ink 有定义 → 用 #4fc1ff，否则目录图标在 #1e1e1e 上会糊。 */
+  color: var(--cyan-ink, var(--cyan));
 }
 .fname {
   flex: 1;

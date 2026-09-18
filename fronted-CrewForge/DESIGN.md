@@ -2,8 +2,8 @@
 
 > 9/17 整间重塑（impeccable 方向种子 89b0257e）。一句话世界：**AI 软件团队是一屋子绘图员——
 > 经理接单登记、架构师铺图板、开发画图、测试盖红圈、老板翻台账。** 界面不是"仪表盘"，是一间晒图室。
-> 范围：六个活跃页（登录 / 台账 / 新建 / 详情 / 绘图桌 / 执行面板）；
-> TeamView、AgentRepository、AgentForm 三张图纸**封存未改**，等旧皮恢复。
+> 范围：八个活跃页（登录 / 台账 / 新建 / 详情 / 绘图桌 / 执行面板 / 工单板 / 验收与证据）。
+> 9/18：TeamView、AgentRepository、AgentForm 三张封存图纸已删（连 element-plus 一起）。
 
 ## 1. 纸面（色彩）
 
@@ -15,8 +15,18 @@
 | 晒图青 | `--cyan` #155e93 一家：`--cyan-deep` / `--cyan-wash(-2)` / `--cyan-plate` #0e3a5c（执行面板活动栏深板） | — |
 | 图章 | pass #2e8f5b · void #c23a2e · wait #d98f1b · pencil #5f7280 · rust #a05a2c（各配 -ink 深字版） | — |
 
-⚠️ **血案纪律**：`style.css` 尾部"旧名喂新值"别名块只许 `--旧名: var(--新值)`；
-`--cyan: var(--cyan)` 自引用会让整间屋子的青色当场失效（9/17 截图实锤，全站主按钮变隐形）。
+### 1.1 受控例外：`.vsc-dark`（9/18）
+
+执行面板是**工作台**不是图纸：它要装 VS Code 默认暗色（Dark+）的编辑器、文件树、日志。
+做法是在 `style.css` 里开一个 `.vsc-dark` 作用域重绑 `--paper* / --ink* / --line* / --cyan*`
+到 Dark+ 原值，而不是逐组件写死色。规矩：
+
+- **只准执行面板用**。进这个作用域的组件（Monaco / FileTree / 日志窗 / AppModal `tone="dark"`）
+  必须完全靠 `var()` 取色；任何硬编码 `#fff` / `#1e1e1e` 都是越界。
+- 一进一出要成对：外层 `.exec.vsc-dark`，`Teleport` 出去的弹窗要自己带 `scrim vsc-dark`
+  （Teleport 会切断 CSS 变量继承，9/18 踩过）。
+- **不要用 `:where()`** 降特异性：`.vsc-dark` 里的重绑会被后面的浅色规则反杀。
+- `--cyan` 在这套暗底上对比度不够，需要的地方取 `--cyan-ink`。
 
 ## 2. 字面（Type）
 
@@ -56,13 +66,32 @@
 
 ## 6. 真图（占位符就位中）
 
-生图提示词（文件名+英文 prompt）：**桌面 `CrewForge-晒图室-生图提示词-20260917.md`**。
-当前 `src/assets/` 里同名文件为 `.impeccable/gen-placeholders.ps1` 生成的蓝图线稿占位：
-agent-architect / agent-manager / agent-backend / agent-frontend / agent-tester / agent-maintainer、
-logo-crewforge(-cyan)、banner-agents、bg-login、hero、sheet-login-flow、sheet-empty-draft。
-**按同名替换即可点亮，代码零改动。**
+生图清单在 **`ASSETS-PROMPTS.md`**（v2，尺寸按 CSS 真实渲染盒子反推）。**只剩 6 张**：
 
-## 7. 恢复 element-plus（如果哪天要）
+| 文件 | 渲染尺寸 | 用在哪 |
+|---|---|---|
+| `sheet-login-flow.png` | 60% × 100dvh（`cover`） | 登录页左版 |
+| `sheet-empty-draft.png` | 220px 宽 | 台账空态 |
+| `agent-manager.png` | 28 / 48px 圆 | 对话头像 · 确认卡 |
+| `agent-architect.png` | 30px 圆 | 绘图桌 |
+| `logo-crewforge.png` | 26×26 | 顶栏 |
+| `logo-crewforge-cyan.png` | 34×34 | 登录页蓝版上 |
 
-`main.ts` 已无 EP import；三张封存页各自引样式仍活。恢复路径：SheetTree/FileTree 换回
-`el-tree` → `package.json` 删 element-plus → `style.css` 删旧名别名块。
+**按同名替换即可点亮，代码零改动。** 9/18 已把代码零引用的死图全删了
+（`bg-login` / `hero` / `banner-agents` / 只被已删封存页用的 4 张 `agent-*`），
+`src/assets/` 与上表一一对应。
+
+## 7. element-plus：已彻底拔除（9/18）
+
+`package.json` 无依赖、`main.ts` 无 import、`src/` 里零引用（只剩注释里提到它）。
+那三张"封存页"（TeamView / AgentRepository / AgentForm）也一并删了 —— 它们自 9/15 起
+就被路由守卫拦成"功能未开放"，界面永远进不去，留着只是 1700 行死代码 + 一个死依赖。
+
+**真要恢复某天的话**：`npm i element-plus` → 组件里 `import { ElMessage } from 'element-plus'`
+→ 别忘了同时 `import 'element-plus/dist/index.css'`（EP 样式不带副作用引入）。
+`utils/toast.ts` / `utils/confirm.ts` 是自研总线，跟 EP 不冲突，可以共存。
+
+⚠️ **这台机器没外网**（`registry.npmmirror.com` 连不上，`npm i` 会 ENOTCACHED 失败），
+`pnpm store path` 指向的 `CrewForge/.pnpm-store/v11` 是**空的**。唯一可能离线还原的途径
+只剩 `node_modules/.pnpm/element-plus@2.14.5_*/` 那份残留副本。**真要恢复 EP 之前先把它拷出去**，
+否则下一次 `pnpm install` 之后它就真没了。

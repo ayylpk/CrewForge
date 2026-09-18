@@ -48,7 +48,6 @@
   --void-wash: rgba(194, 58, 46, 0.1);
   --pencil: #5f7280; /* 铅笔灰：草稿/未盖章（虚线世界） */
   --rust: #a05a2c; /* 铁锈橙：已暂停（区别于红黄） */
-  --violet: #5f7280; /* 兼容旧变量：不再用紫 */
 
   /* ===== 形状（一套圆角尺：4px 全局，弹窗 8px） ===== */
   --r-xs: 2px;
@@ -72,29 +71,113 @@
   --dur: 0.16s;
   --dur-slow: 0.42s;
 
-  /* ===== 兼容旧 scoped 页面（封存三页不回归） ===== */
-  --bg: var(--paper);
-  --bg2: var(--paper-raised);
-  --bg3: var(--paper-deep);
-  --bg4: var(--paper-deep);
-  --border: var(--line);
-  --border2: var(--line-2);
-  --text: var(--ink);
-  --text1: var(--ink);
-  --text2: var(--ink-2);
-  --text3: var(--ink-3);
-  --blue: var(--cyan); /* ⚠️ 此处只许给"旧名字"赋新值——--cyan 本身第 28 行已定义，
-                            再写 --cyan: var(--cyan) 就是自引用，整条链失效（9/17 截图实锤） */
-  --green: var(--pass);
-  --yellow: var(--wait);
-  --red: var(--void);
-  --orange: var(--rust);
-  --pink: var(--void);
-  --glass-bg: rgba(243, 246, 248, 0.92);
-  --glass-border: var(--line);
+  /* ===== 阴影（唯一活下来的"旧名"：语义本身没变，改了就白改） ===== */
   --shadow-sm: 0 1px 2px rgba(22, 34, 46, 0.1);
   --shadow: 0 6px 22px rgba(22, 34, 46, 0.14);
   --shadow-lg: 0 18px 48px rgba(14, 58, 92, 0.22);
+}
+
+/* ============================================================
+   .vsc-dark —— VS Code 默认暗色（Dark+）工作台配色
+   ------------------------------------------------------------
+   只给"工作台"型界面用（目前 = 执行面板：编辑器 / 文件树 / 日志 / 看板，
+   都是盯着看的密集信息面，暗底是这类界面的行业默认）。
+   其余五页保持晒图室纸面世界不动 —— 所以这不是"全局换暗色主题"，
+   而是一份**可挂载的暗色 token 作用域**。
+
+   为什么做成全局类而不是写在 ExecutionView 的 scoped 样式里：
+   AppModal 用了 <Teleport to="body">，腾出去之后它不再是 .exec 的后代，
+   **CSS 变量的继承链会断** → 暗色页面里的任务详情弹窗会留在浅色。
+   所以调用方必须显式把 .vsc-dark 也挂到弹窗上（AppModal 的 tone="dark"）。
+
+   ⚠️ 一处必须"分家"：纸面世界里 --cyan (#155e93) 同时兼任文字色与填充色
+   （浅底上两头都够对比）。暗底上不可能一个值兼顾：
+     #0e639c 当按钮底好看、当文字看不清；
+     #4fc1ff 当文字清楚、当按钮底压不住白字。
+   故 --cyan 留作填充，新增 --cyan-ink 给文字；用到 var(--cyan) 当文字色的
+   全局规则，由各暗色界面用 :deep() 改指 --cyan-ink。
+   ============================================================ */
+.vsc-dark {
+  /* --- VS Code Dark+ 原始值（取自默认暗色主题的语义色） --- */
+  --vsc-editor: #1e1e1e; /* editor.background */
+  --vsc-side: #252526; /* sideBar.background */
+  --vsc-activity: #333333; /* activityBar.background */
+  --vsc-border: #3c3c3c; /* editorGroup.border */
+  --vsc-border-2: #4d4d4d; /* input.border */
+  --vsc-fg: #d4d4d4; /* editor.foreground */
+  --vsc-fg-2: #c0c0c0; /* sideBar.foreground */
+  --vsc-muted: #9d9d9d; /* descriptionForeground */
+  --vsc-accent: #0e639c; /* button.background */
+  --vsc-accent-hover: #1177bb; /* button.hoverBackground */
+  --vsc-focus: #007fd4; /* focusBorder */
+  --vsc-green: #89d185;
+  --vsc-yellow: #cca700;
+  --vsc-yellow-ink: #d7ba7d;
+  --vsc-red: #f14c4c;
+  --vsc-red-ink: #f48771;
+  --vsc-rust: #ce9178;
+  --vsc-ink-blue: #4fc1ff; /* 暗底上的可读蓝（VS Code 变量名色） */
+
+  /* --- 设计 token → 暗色映射 --- */
+  --paper: var(--vsc-editor);
+  --paper-raised: var(--vsc-side);
+  --paper-deep: #2d2d2d;
+  --ink: var(--vsc-fg);
+  --ink-2: var(--vsc-fg-2);
+  --ink-3: var(--vsc-muted);
+  --line: var(--vsc-border);
+  --line-2: var(--vsc-border-2);
+  --cyan: var(--vsc-accent); /* 填充：主按钮底 / 选中条 / 灯 */
+  --cyan-ink: var(--vsc-ink-blue); /* 文字：暗底上拿它才不会糊 */
+  --cyan-deep: var(--vsc-accent-hover);
+  --cyan-plate: var(--vsc-activity);
+  --cyan-wash: rgba(14, 99, 156, 0.28);
+  --cyan-wash-2: rgba(14, 99, 156, 0.45);
+  --pass: var(--vsc-green);
+  --pass-ink: var(--vsc-green);
+  --wait: var(--vsc-yellow);
+  --wait-ink: var(--vsc-yellow-ink);
+  --void: var(--vsc-red);
+  --void-ink: var(--vsc-red-ink);
+  --pencil: var(--vsc-muted);
+  --rust: var(--vsc-rust);
+  --focus-cyan: var(--vsc-focus);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow: 0 6px 22px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 18px 48px rgba(0, 0, 0, 0.6);
+}
+
+/* 暗色作用域里的"青色文字"统一改指 --cyan-ink。
+   写在这里而不是各页面 scoped 里，是为了让 .exec 与 Teleport 出去的弹窗共用同一份。
+
+   ⚠️ 刻意**不用** :where() 包 .vsc-dark：:where() 权重归零，这类覆盖会退化成与
+   浅色原规则同权重，然后按源码顺序被后面的浅色规则反杀（本块在文件前半，必然输）。
+   这里靠 .vsc-dark 多加一个类把权重抬上去，顺序就无关了。 */
+.vsc-dark a,
+.vsc-dark .btn:hover,
+.vsc-dark .btn-ghost:hover,
+.vsc-dark .stamp-info,
+.vsc-dark .sheet-no,
+.vsc-dark .tb-word i,
+.vsc-dark .dir-ico {
+  color: var(--cyan-ink);
+}
+.vsc-dark :focus-visible {
+  outline-color: var(--vsc-focus);
+}
+/* 输入类控件的聚焦描边：浅色世界用 --cyan 当描边，暗底上 #0e639c 几乎看不出聚焦 */
+.vsc-dark .input:focus,
+.vsc-dark .textarea:focus,
+.vsc-dark .select:focus {
+  border-color: var(--vsc-focus);
+}
+.vsc-dark ::selection {
+  background: #264f78;
+  color: #ffffff;
+}
+/* 全局 .lamp 的描边是为浅底配的深色，暗底上会看不见 */
+.vsc-dark .lamp {
+  border-color: rgba(255, 255, 255, 0.22);
 }
 
 /* ===== 重置 ===== */

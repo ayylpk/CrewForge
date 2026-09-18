@@ -9,15 +9,22 @@
 /** 图章色名（= style.css .stamp-{tone}/.lamp-{tone} 的 tone，StampSeal.vue 同口径） */
 export type StampTone = 'pass' | 'void' | 'wait' | 'info' | 'pencil' | 'rust'
 
-/** 项目状态（后端 status 字段的 7 个取值） */
+/** 项目状态（后端 status 字段的 8 个取值） */
 export const PROJECT_STATUS: Record<string, { label: string; tone: StampTone }> = {
   draft: { label: '草稿', tone: 'pencil' }, // 铅笔灰：还没下墨
-  planning: { label: '规划中', tone: 'info' }, // 蓝图细线
+  // ⚠️ 规划中改铅笔灰（9/17 方案 A）：原来它和「执行中」共用 info（晒图青），
+  //    而青同时还是主按钮/链接/选中/图号的色 —— 一个色五种含义，
+  //    操作员一眼分不出"机器在跑"和"还没开工"，也分不出"这能点"和"这是状态"。
+  //    青从此专属 executing（+ 交互态）；draft 与 planning 撞灰是可接受的代价（都是"还没开工"）。
+  planning: { label: '规划中', tone: 'pencil' },
   clarifying: { label: '澄清中', tone: 'wait' }, // 待检黄：等人回答问题
-  executing: { label: '执行中', tone: 'info' }, // 晒图青：机器在画
+  executing: { label: '执行中', tone: 'info' }, // 晒图青：机器在画（唯一用青的状态）
   paused: { label: '已暂停', tone: 'rust' }, // 铁锈橙：停车队列
   done: { label: '已交付', tone: 'pass' }, // 合格绿：验收章已盖
   failed: { label: '失败', tone: 'void' }, // 验收红：修订云
+  // 引擎第三终态：跑完了但交付关没验过（skipped_unverified）。
+  // 漏了它前端就只会显示原始英文 "blocked" + 铅笔灰（见 projectStatusMeta 的兜底分支）。
+  blocked: { label: '未验证', tone: 'wait' },
 }
 
 export function projectStatusMeta(s?: string | null) {
@@ -44,7 +51,6 @@ export function nodeLabel(node?: string | null) {
 }
 
 /** 确认模式：前端串 ↔ 后端数字（0=绿 1=混合 2=手动），全局唯一一份 */
-export const MODE_STR_TO_NUM: Record<string, number> = { green: 0, mixed: 1, manual: 2 }
 export const MODE_NUM_TO_STR = ['green', 'mixed', 'manual'] as const
 export type ConfirmModeStr = (typeof MODE_NUM_TO_STR)[number]
 

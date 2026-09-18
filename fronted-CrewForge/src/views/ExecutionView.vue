@@ -48,6 +48,18 @@ const projectName = ref('项目 #' + route.params.id)
 const execStore = useExecutionStore()
 const confirmMode = ref(execStore.confirmMode)
 
+/**
+ * 路由 id → 有效数字；拿不到就 null。
+ * ⚠️ 9/17 修「一直弹系统繁忙」：原来 pollConfirms / loadFromDb / 首拉项目名
+ * 都直接 `Number(route.params.id)`，地址里没有有效项目号时得 NaN，
+ * 请求打成 /api/confirm/pending?projectId=NaN，后端报 400，10s 一轮 = 无限弹窗。
+ * 本页所有按 id 发请求的地方都必须先过这道闸（看板与文件树的轮询早已自己有守卫，这里补齐）。
+ */
+const routeProjectId = computed(() => {
+  const n = Number(route.params.id)
+  return Number.isFinite(n) && n > 0 ? n : null
+})
+
 /** 确认模式常量（收口到 constants/status：label/desc 逐字即旧 MODES） */
 const MODES = [0, 1, 2].map((n) => ({
   value: n as 0 | 1 | 2,
@@ -59,8 +71,10 @@ function setMode(mode: 0 | 1 | 2) {
   execStore.setConfirmMode(mode)
   // 阶段 3：模式落后端 sys_project.confirm_mode（引擎开工时读它决定 Cli/Http 分流）——
   // 只存 localStorage 的话选择器就是装饰，Web 上切了引擎也看不见
+  const id = routeProjectId.value
+  if (id == null) return // 没有有效项目号：本地态照切，不发注定失败的请求
   const strMode = MODE_NUM_TO_STR[mode]
-  updateProject(Number(route.params.id), { confirmMode: strMode } as never).catch(() => {
+  updateProject(id, { confirmMode: strMode } as never).catch(() => {
     /* 保存失败提示由拦截器统一弹；本地态保留，用户可重试 */
   })
 }
@@ -71,8 +85,10 @@ const confirmText = ref('')
 const confirmBusy = ref(false)
 
 async function pollConfirms() {
+  const id = routeProjectId.value
+  if (id == null) return // 没有有效项目号：直接跳过，别打成 ?projectId=NaN
   try {
-    pendingConfirms.value = await fetchPendingConfirms(Number(route.params.id))
+    pendingConfirms.value = await fetchPendingConfirms(id)
   } catch {
     /* 后端未就绪等：本轮不弹卡，下轮 10s 再试（卡是增强不是控制，永不拦看板） */
   }
@@ -287,8 +303,10 @@ async function openFile(node: FileNode) {
 
 /** 从数据库加载文件树（sys_project_file）：目录优先展开、文件按路径排序 */
 async function loadFromDb(): Promise<boolean> {
+  const id = routeProjectId.value
+  if (id == null) return false
   try {
-    const list = await fetchProjectFiles(Number(route.params.id))
+    const list = await fetchProjectFiles(id)
     if (!list || list.length === 0) return false
     fileTree.value = buildTreeFromVO(list)
     return true
@@ -457,17 +475,20 @@ onMounted(async () => {
   await pollTasks()
   void pollConfirms() // 确认门首拉：进页面就答，不等 10s（阶段 3）
   // 回填真项目名 + 库中确认模式（阶段 3：模式以 sys_project.confirm_mode 为真相，本地只是即时态）
-  fetchProjectById(Number(route.params.id))
-    .then((p) => {
-      projectName.value = p.name
-      if (p.confirmMode === 0 || p.confirmMode === 1 || p.confirmMode === 2) {
-        confirmMode.value = p.confirmMode
-        execStore.setConfirmMode(p.confirmMode)
-      }
-    })
-    .catch(() => {
-      /* 详情拉不到不拦面板主流程 */
-    })
+  const pid = routeProjectId.value
+  if (pid != null) {
+    fetchProjectById(pid)
+      .then((p) => {
+        projectName.value = p.name
+        if (p.confirmMode === 0 || p.confirmMode === 1 || p.confirmMode === 2) {
+          confirmMode.value = p.confirmMode
+          execStore.setConfirmMode(p.confirmMode)
+        }
+      })
+      .catch(() => {
+        /* 详情拉不到不拦面板主流程 */
+      })
+  }
   // 文件优先从数据库加载（agent 落库 sys_project_file），本地草稿兜底；任务状态只信 pollTasks
   if (!(await loadFromDb())) restoreFiles()
   // 10s 轮询：文件 + 任务 + 待答问题（引擎在跑就有新状态）
@@ -536,7 +557,7 @@ async function pollFiles() {
 </script>
 
 <template>
-  <div class="exec">
+  <div class="exec vsc-dark">
     <!-- 顶栏 -->
     <TopBar class="exec-top">
       <template #context>
@@ -709,6 +730,7 @@ async function pollFiles() {
             :key="activeFile.path"
             :language="langFor(activeFile.path)"
             :value="activeFile.content || ''"
+            theme="vs-dark"
             @change="onUserEdit"
             @save="onSave"
           />
@@ -785,6 +807,7 @@ async function pollFiles() {
         v-if="taskDetail"
         :title="taskDetail.title"
         sheet="TASK·DETAIL"
+        tone="dark"
         width="640px"
         @close="taskDetail = null"
       >
@@ -918,6 +941,28 @@ async function pollFiles() {
   flex-direction: column;
   overflow: hidden;
 }
+
+/* ============================================================
+   工作台配色：VS Code 默认暗色（Dark+）
+   ------------------------------------------------------------
+   为什么只有这一页暗：执行面板是"工作台"——编辑器、文件树、日志、
+   看板全是盯着看的密集信息面，暗底是这类界面的行业默认（VS Code /
+   终端 / 日志台）。其余五页保持晒图室纸面世界不动。
+
+   做法：不逐条改 700 行 CSS，而是在根节点挂 .vsc-dark 这个**暗色 token 作用域**
+   （定义在 style.css）。scoped 样式几乎全部走 var(--paper)/var(--ink)/
+   var(--line)/var(--cyan)…，而 CSS 变量沿 DOM 继承 —— 一处挂载就整体换肤，
+   并且自动带动 .topbar / .stamp / .lamp / .btn / .tblock 这些全局原子件
+   （它们都在 .exec 里面）。
+
+   ⚠️ Teleport 的坑：AppModal 用 <Teleport to="body"> 腾出 DOM 树，
+   CSS 变量继承会断 —— 所以那一处必须显式再挂一次 .vsc-dark（弹窗上的 tone="dark"）。
+   ============================================================ */
+.exec {
+  /* 自己也要铺底色：页面底色来自 body（在作用域之外），光挂 token 改不到它；
+     铺满后也顺手盖掉 body::before 的图板格线（图板格线只在纸面世界有意义） */
+  background: var(--vsc-editor);
+}
 .exec-top {
   flex: none;
   padding-inline: clamp(14px, 3vw, 42px);
@@ -965,7 +1010,7 @@ async function pollFiles() {
   min-height: 0;
 }
 
-/* ===== 活动栏：深蓝晒图纸底 ===== */
+/* ===== 活动栏：VS Code 的 activityBar（深灰 #333333 + 白色选中指示） ===== */
 .activity-bar {
   flex: none;
   width: 50px;
@@ -983,17 +1028,18 @@ async function pollFiles() {
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #7fa8c9;
+  /* 原来是为深蓝图纸底配的浅蓝，暗色下改成 VS Code 的"未激活=半透明白" */
+  color: rgba(255, 255, 255, 0.55);
   border-left: 2px solid transparent;
   transition: color var(--dur) var(--ease), background var(--dur) var(--ease);
 }
 .activity-item:hover {
-  color: #dbe9f5;
+  color: rgba(255, 255, 255, 0.85);
 }
 .activity-item.active {
-  color: #eaf3fa;
-  background: rgba(243, 246, 248, 0.08);
-  border-left-color: #9fc6e8;
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.08);
+  border-left-color: #ffffff;
 }
 .activity-badge {
   position: absolute;
@@ -1009,7 +1055,7 @@ async function pollFiles() {
   margin-top: auto;
   padding: 6px 0 4px;
   font-size: 10px;
-  color: #7fa8c9;
+  color: rgba(255, 255, 255, 0.55);
   font-variant-numeric: tabular-nums;
 }
 
@@ -1516,7 +1562,8 @@ async function pollFiles() {
   display: flex;
   flex-direction: column;
   border-top: 1px solid var(--line-2);
-  background: var(--paper-raised);
+  /* VS Code 的底部面板（终端/输出）用编辑器底色，而不是侧栏灰 */
+  background: var(--vsc-editor);
 }
 .log-panel {
   display: flex;
@@ -1564,7 +1611,7 @@ async function pollFiles() {
   font-size: 11px;
 }
 .ag-1 {
-  color: var(--cyan);
+  color: var(--cyan-ink);
 } /* 经理 */
 .ag-2 {
   color: var(--rust);
@@ -1598,7 +1645,7 @@ async function pollFiles() {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(22, 34, 46, 0.4);
+  background: rgba(0, 0, 0, 0.5);
   backdrop-filter: blur(3px);
   padding: 20px;
 }
