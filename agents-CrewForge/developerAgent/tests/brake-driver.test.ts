@@ -24,7 +24,7 @@ import {
     resolveBrakePolicy, type BrakePolicy, type BrakeQuestioner, type BrakeStatus,
 } from "../brake";
 import {
-    brakeCheckpoint, brakeFinalized, buildBriefFor, driveToTerminal, isBrakeStopRequested,
+    brakeCheckpoint, brakeFinalized, brakeStopReasonOf, buildBriefFor, driveToTerminal, isBrakeStopRequested,
     lastBrakePause, requestBrakeStop, resetBrakeStopForTest, resumeBriefText, summaryOf,
     taskWithBrief, waitForBrakeStop, type BrakeRound,
 } from "../../developerTeamRunner";
@@ -507,6 +507,36 @@ describe("驱动环·保状态退出时**进程真的会收工**（不然又会�
         expect(requestBrakeStop()).toBe(true);       // 第一次：真的触发了
         expect(requestBrakeStop()).toBe(false);      // 之后：已是"该收工"，不重复
         expect(isBrakeStopRequested()).toBe(true);
+        resetBrakeStopForTest();
+        expect(isBrakeStopRequested()).toBe(false);
+    });
+
+    // ★ 9/18 加：终态收工必须跟"刹车暂停"分开——drivePhases 要按原因给不同结局与日志。
+    //   事故：开发线判 blocked 后**从不**请求收工，drivePhases 死等 phase_request，
+    //   进程永不退出（实测 harness 等了 2961 秒才被人 kill，期间空烧一个核）。
+    it("★ 收工原因区分 paused / terminal：默认仍是刹车暂停（旧调用方零扰动）", async () => {
+        resetBrakeStopForTest();
+        requestBrakeStop();                                   // 不带参数 = 旧行为
+        expect(brakeStopReasonOf()).toBe("paused");
+        expect(await waitForBrakeStop()).toBe("paused");
+    });
+
+    it("★ 开发线判终态 → requestBrakeStop(\"terminal\")，唤醒方拿到 terminal", async () => {
+        resetBrakeStopForTest();
+        const waiting = waitForBrakeStop();                    // 先有人等（等价 drivePhases 卡在 race 里）
+        expect(requestBrakeStop("terminal")).toBe(true);
+        expect(await waiting).toBe("terminal");                // ★ 拿到的是终结，不是"暂停"
+        expect(brakeStopReasonOf()).toBe("terminal");
+    });
+
+    it("★ 先喊后等 也拿得到原因（已置位 → 短路返回，不会挂住）", async () => {
+        resetBrakeStopForTest();
+        requestBrakeStop("terminal");
+        expect(await waitForBrakeStop()).toBe("terminal");     // 短路，不新建 promise
+        // 幂等：已置位后第二次请求返回 false，且**不改**第一次的原因
+        expect(requestBrakeStop("paused")).toBe(false);
+        expect(brakeStopReasonOf()).toBe("terminal");
+        expect(await waitForBrakeStop()).toBe("terminal");
         resetBrakeStopForTest();
         expect(isBrakeStopRequested()).toBe(false);
     });

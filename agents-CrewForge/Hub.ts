@@ -149,6 +149,21 @@ export class TransferStation {
     hasPending(receiver: string): boolean {
         return this.getStatus(receiver).pendingCount > 0;
     }
+
+    /**
+     * 收件箱里**此刻真的躺着**消息吗（9/18 加）。
+     *
+     *   与 hasPending 的区别：hasPending 读的是记账计数 pendingCount，
+     *   那个计数**只有 markDone 能减**，而 markDone 通常写在异步回调里——
+     *   拿它当 `while` 条件 + 在回调里 markDone，就是一个**同步死循环**
+     *   （developerTeamRunner.drainStale 的实测事故：一个核烧穿、进程永不退出）。
+     *   要"清掉已经到站的消息"就用这个：它读真实队列，每消费一条就少一条，循环必然收敛。
+     *
+     *   刻意**不**经 getHub（那会惰性建箱）：没注册过的名字 = 没有队列 = false。
+     */
+    hasQueued(receiver: string): boolean {
+        return (this.teams[receiver]?.inbox.length ?? 0) > 0;
+    }
 }
 
 // 信号量工作队列：push 入队唤醒，pop 阻塞等待（开发工位流水线用）

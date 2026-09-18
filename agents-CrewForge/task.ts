@@ -185,7 +185,17 @@ export async function ensureTasksForPhase(tasks: ExecTask[], projectId: number, 
 export async function updateStatusByExt(projectId: number, extId: string, status: TaskStatus, errorMsg?: string, phaseId?: number | null): Promise<void> {
     try {
         const task = await getTaskByExt(projectId, extId, phaseId ?? undefined);
-        if (!task?.id) return;
+        if (!task?.id) {
+            // ★ 9/18：**不许再静默返回**。原先这里一声不吭，于是"任务行为什么还是 todo"
+            //   只能靠猜（实测：s1 那几轮 sys_task 停在 todo、error_msg 为空，
+            //   排查得从抄送台账一路读到 phase_id 匹配条件才看明白）。
+            //   最常见的真因：终态消息不带 phase，而 maintainer 的 currentPhase 没被声明填上
+            //   → SQL 多一个 `AND phase_id = 0` → 查无此行。
+            console.warn(`[task-bridge] ${extId}→${status} 写不中：project=${projectId}`
+                + `${phaseId == null ? "（未带 phase，按 extId 单键查）" : ` phase=${phaseId}`}`
+                + " 在 sys_task 里没有匹配行——记账已跳过（不影响任务本身，但看板会失真）");
+            return;
+        }
         if (task.status === "done" && status === "failed") {
             console.log(`[task-bridge] ${extId} 已 done，忽略迟到的 ${status}`);
             return;

@@ -99,6 +99,10 @@ export const ENV_WAIT_MINUTES = "CF_BRAKE_WAIT_MINUTES";
 export const ENV_HARD_WALL_MINUTES = "CF_HARD_WALL_MINUTES";
 /** 无人值守模式每次"y"给多少分钟 */
 export const ENV_EXTEND_MINUTES = "CF_BRAKE_EXTEND_MINUTES";
+/** 无人值守模式每次"y"给多少**次调用**（9/18 加；不配 = DEFAULT_EXTEND_LLM_CALLS） */
+export const ENV_EXTEND_LLM_CALLS = "CF_BRAKE_EXTEND_CALLS";
+/** 一次"继续"默认补多少调用（= 数据档的常规一档；运维档仍由 CF_MAX_LLM_CALLS 封顶） */
+export const DEFAULT_EXTEND_LLM_CALLS = 200;
 /** 无人值守模式的判定旋钮（评测台注入；本文件只读它做**测试可注入**的判定） */
 export const ENV_AUTO_CONFIRM = "AUTO_CONFIRM";
 
@@ -136,6 +140,16 @@ export interface BrakePolicy {
     waitMs: number;
     /** 无人值守模式下"y"一次给多少分钟 */
     extendMinutes: number;
+    /**
+     * 无人值守模式下"y"一次给多少**次调用**（9/18 加）。
+     *
+     *   ★ 治的病："加时加了个寂寞"。`grantBrakeExtension` 原先只前移墙钟，而一个
+     *   **调用数**耗尽的任务缺的恰恰是调用数——人答"继续：加时 30 分钟"之后
+     *   `callAllowance = min(数据档, 运维档)` 原地不动，下一圈立刻再次到顶，
+     *   白烧 MAX_ESCALATIONS_PER_TASK 的次数后判 blocked。
+     *   s1-crud-min 实测：活几乎干完（25 文件、ac-1/ac-2 都 exit=0），却被这条判死。
+     */
+    extendLlmCalls: number;
     /** 本次运行已经用掉的加时次数（账本续跑时从事件数重建） */
     extensionsUsed: number;
     /** 是否无人值守（AUTO_CONFIRM=1）：只有它为真时，HARD 天花板才生效 */
@@ -201,7 +215,7 @@ export function resolveBrakePolicy(
     const fromEnv: string[] = [];
     const knobs = [
         ENV_MAX_WALL_MINUTES, ENV_MAX_LLM_CALLS, ENV_WAIT_MINUTES,
-        ENV_HARD_WALL_MINUTES, ENV_EXTEND_MINUTES,
+        ENV_HARD_WALL_MINUTES, ENV_EXTEND_MINUTES, ENV_EXTEND_LLM_CALLS,
     ];
     for (const name of knobs) if (env[name] !== undefined) fromEnv.push(name);
 
@@ -213,6 +227,9 @@ export function resolveBrakePolicy(
         parsePositiveNumberEnv(env[ENV_WAIT_MINUTES], DEFAULT_WAIT_MINUTES), MAX_WAIT_MINUTES_CAP);
     const extendMinutes = clampPositive(
         parsePositiveNumberEnv(env[ENV_EXTEND_MINUTES], DEFAULT_EXTEND_MINUTES), MAX_WALL_MINUTES_CAP);
+    // 一次"继续"补多少调用（9/18）：上限受 MAX_LLM_CALLS_CAP 夹紧；实际生效还要过 hardLlmCalls
+    const extendLlmCalls = clampPositive(
+        parsePositiveNumberEnv(env[ENV_EXTEND_LLM_CALLS], DEFAULT_EXTEND_LLM_CALLS), MAX_LLM_CALLS_CAP);
     const maxWallMs = wallMinutes * 60_000;
     // 天花板必须**不低于** SOFT：env 写小了就等于把 SOFT 抬到天花板（宁可早收口，也不许倒挂）。
     // 两个都是**时长**（见文件头的量纲约定）。
@@ -229,6 +246,7 @@ export function resolveBrakePolicy(
         hardWallMs, hardLlmCalls,
         waitMs: waitMinutes * 60_000,
         extendMinutes,
+        extendLlmCalls,
         extensionsUsed: 0,
         unattended: isUnattended(env),
         source: { wallMinutes, fromEnv },
@@ -280,10 +298,20 @@ export function checkBrake(policy: BrakePolicy, used: BrakeUsage): BrakeStatus {
  *   驱动环下一圈的 checkBrake 读到的就是新期限——
  *   "和用户对话之后才继续开工"能成立，全靠这一点。
  */
+/**
+ * 加时（人答"继续"时调用）：**两个钟一起前移**。
+ *
+ *   ★ 9/18 修：原先只前移墙钟，`maxLlmCalls` 一个字不动——而"调用数耗尽"正是最常见的
+ *   刹车原因（s1-crud-min 实测：138/138 到顶、活几乎干完、ac-1/ac-2 都 exit=0，
+ *   却因为"继续"救不回调用数、两次求助用尽后判 blocked）。
+ *   现在两个钟都前移，但**调用数不许越过 hardLlmCalls**（那是跨不过去的绝对天花板，
+ *   无人值守模式下的成本兜底；SOFT 可以涨，HARD 不动）。
+ */
 export function grantBrakeExtension(policy: BrakePolicy, now: number = Date.now()): { index: number } {
     policy.extensionsUsed += 1;
     policy.maxWallMs += policy.extendMinutes * 60_000;
     policy.deadlineAt = now + policy.extendMinutes * 60_000;   // ★ 从"现在"起算，不是从旧期限起算
+    policy.maxLlmCalls = Math.min(policy.maxLlmCalls + policy.extendLlmCalls, policy.hardLlmCalls);
     return { index: policy.extensionsUsed };
 }
 

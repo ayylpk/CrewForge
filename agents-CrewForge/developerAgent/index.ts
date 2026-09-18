@@ -87,6 +87,12 @@ export interface DeveloperAgentOptions {
     sandbox?: Partial<SandboxConfig>;
     targets?: Partial<DeveloperTargets>;
     maxLlmCalls?: number;
+    /**
+     * 调用数预算的**可变读数**（9/18）：传了它以它为准，图每次判预算都现读——
+     * 于是刹车加时（人答"继续"）能当场抬高上限，不必重建 handle。
+     * 不传 = 用 `maxLlmCalls`（创建时定格），行为与改造前一致。
+     */
+    llmBudgetRef?: { value: number };
     maxStepsPerLoop?: number;
     /** 修复轮数上限（来自可信代码配置，不来自任务包或用户文本） */
     maxRepairAttempts?: number;
@@ -629,6 +635,9 @@ export function createDeveloperAgent(o: DeveloperAgentOptions): DeveloperAgentHa
         consultStation: consultPort,
         ...(o.targets ? { targets: o.targets } : {}),
         ...(o.maxLlmCalls !== undefined ? { maxLlmCalls: o.maxLlmCalls } : {}),
+        // ★ 9/18：预算的**可变读数**（刹车加时要在不重建 handle 的前提下抬高调用数上限）。
+        //   与 maxLlmCalls 并存：传了 ref 就以 ref 为准（图每次判预算现读），不传则行为不变。
+        ...(o.llmBudgetRef !== undefined ? { llmBudgetRef: o.llmBudgetRef } : {}),
         ...(o.maxStepsPerLoop !== undefined ? { maxStepsPerLoop: o.maxStepsPerLoop } : {}),
         ...(o.waitTestTimeoutMs !== undefined ? { waitTestTimeoutMs: o.waitTestTimeoutMs } : {}),
         ...(o.wallClockDeadlineAt !== undefined ? { wallClockDeadlineAt: o.wallClockDeadlineAt } : {}),

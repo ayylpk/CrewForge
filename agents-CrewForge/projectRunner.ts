@@ -289,7 +289,7 @@ async function drivePhases(
     phases: any[],
     startIdx: number,
     exitAtBoundary: boolean,
-): Promise<"done" | "boundary" | "paused"> {
+): Promise<"done" | "boundary" | "paused" | "terminal"> {
     for (let i = startIdx; i < phases.length; i++) {
         const isLast = i === phases.length - 1;
         station.sendMessage("manager", "architect", JSON.stringify({ type: "phase_plan", plan, phase: phases[i], projectId }));
@@ -301,9 +301,18 @@ async function drivePhases(
             //   否则 waitForMessage 死等 → 外层超时杀进程（任务状态缺失、死因缺失）。
             const raced = await Promise.race([
                 station.waitForMessage("manager").then((m) => ({ kind: "msg" as const, m })),
-                waitForBrakeStop().then(() => ({ kind: "paused" as const })),
+                waitForBrakeStop().then((r) => ({ kind: "stop" as const, r })),
             ]);
-            if (raced.kind === "paused") {
+            if (raced.kind === "stop") {
+                // ★ 9/18：终结态要跟"暂停"分开——一个是"人还没答、状态留着可续跑"，
+                //   一个是"开发线已判 blocked/failed、下游根本不会再有 phase_request"。
+                //   原先两者都走 paused 分支，而终态**从不**调 requestBrakeStop()，
+                //   于是这里死等到被人 kill（实测 2961 秒），期间还空烧一个核。
+                if (raced.r === "terminal") {
+                    console.log("[runner] ⛔ 开发线已判终态（blocked/failed）：本阶段不会再有 phase_request，"
+                        + "进程干净退出（任务状态已落库，Java 对账器下次重新拉进程续跑）");
+                    return "terminal";
+                }
                 console.log("[runner] 🌙 刹车检查点等不到人确认：开发线已保状态（waiting_human），本进程干净退出，"
                     + "Java 对账器下次重新拉进程续跑（题号不变，人答过就消费）");
                 return "paused";
@@ -465,11 +474,51 @@ export async function runProject(projectId: number, questioner: Questioner): Pro
         const gate = await runFinalGate(projectId, plan);
         await settleProject(projectId, gate);
     }
+    // ★ 9/18：开发线已判终态（blocked/failed）——本项目到此为止，**必须显式收口**。
+    //   原先这里没有分支：status 停在 executing，Java 对账器按"executing + 无活进程"一轮轮
+    //   重拉进程（每轮第一件事就是读回 ledger 的终态、立刻再终结），既刷日志也不产生任何东西。
+    //   收口走 settleOnFailure：finalGateStatus=failed + verified=false + 写失败报告，
+    //   与"进程异常退出"同一口径——**未验证就不许当通过**。
+    if (outcome === "terminal") {
+        // ★ 9/18：收口前先给"在途的终态消息"一个有界的消费机会。
+        //   终态消息是发给架构师 + 抄送 maintainer 的，而**记账（sys_task 失败行）在
+        //   maintainer 那条异步消息循环里**。这里立刻 return → 外层 process.exit(0)，
+        //   就可能把还没被调度的记账腰斩（实测：任务行停在 todo、error_msg 为空）。
+        //   有界等待（2s 上限）+ 只等在途队列排空，不改变任何判定语义。
+        //   （工位名与 developerTeamRunner 的 MAINTAINER_NAME/ARCHITECT_NAME 一致；那边没导出，
+        //    这里按 projectRunner 既有习惯用字面量——本文件别处也是 "manager"/"architect" 字面量）
+        await waitQueuesDrained(station, ["maintainer", "architect"], 2000);
+        await settleOnFailure(projectId, new Error("开发线已判终态（blocked/failed）：本阶段不会再有后续推进，项目按未验证收口"));
+        console.log("[runner] 流程结束（开发线终态，已按未验证收口）");
+        return;
+    }
     // ★ paused（刹车检查点等不到人）：**不动项目终态、不落 blocked/failed**。
     //   任务信息留在 developer 账本里（waiting_human + brake_paused），题号不变；
     //   sys_project.status 保持 executing，Java 对账器"executing + 无活进程"就会重新拉进程续跑。
     //   这正是老板要的"没确认就终止进程、任务信息保留、下次接着拉起来"。
     console.log(`[runner] 流程结束（${outcome === "paused" ? "刹车暂停，等对账器续拉" : outcome}）`);
+}
+
+/**
+ * 等这些工位把**在途消息**消费完（有界）。
+ *
+ *   为什么需要它（9/18 实测）：开发线判终态后，收口路径会立刻走到 `process.exit(0)`，
+ *   而"终态 → sys_task 记账"是 maintainer 那条**异步消息循环**里干的活——
+ *   进程先退出就把写腰斩了（现场：任务行停在 todo、error_msg 为空，项目状态却是 failed）。
+ *   这里只等"队列排空"，不改判定、不阻塞业务；到点就走（上限几百毫秒的正常情况）。
+ */
+async function waitQueuesDrained(
+    station: TransferStation, names: readonly string[], budgetMs: number,
+): Promise<void> {
+    const t0 = Date.now();
+    while (Date.now() - t0 < budgetMs && names.some((n) => station.hasQueued(n))) {
+        await new Promise((r) => setTimeout(r, 25));
+    }
+    const left = names.filter((n) => station.hasQueued(n));
+    if (left.length > 0) {
+        console.warn(`[runner] ⚠ ${left.join("、")} 的在途消息在 ${budgetMs}ms 内没消费完——`
+            + "按「不阻塞收口」继续（记账可能缺失，但不许因此把进程吊住）");
+    }
 }
 
 /**

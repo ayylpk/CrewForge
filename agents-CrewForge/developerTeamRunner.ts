@@ -74,13 +74,31 @@ const isTerminalStatus = (status: string): boolean =>
  * Java 对账器的模型正是这样：进程干净退出 + 状态保留 + status=executing → 重新拉进程续跑。
  */
 let brakeStopRequested = false;
+/** 收工原因：决定 projectRunner 打哪一行日志、返回哪个结局（"paused"=等人 / "terminal"=已终结） */
+let brakeStopReason: RunnerStopReason = "paused";
 let brakeStopResolve: (() => void) | null = null;
-let brakeStopPromise: Promise<void> | null = null;
+let brakeStopPromise: Promise<RunnerStopReason> | null = null;
 
-/** 请求进程收工（等不到确认时由刹车路径调用；幂等，只生效一次） */
-export function requestBrakeStop(): boolean {
+/**
+ * 收工原因（9/18 加）：
+ *   · "paused"   —— 刹车检查点等不到人确认（任务留在 waiting_human，**非终态**、可续跑）；
+ *   · "terminal" —— 开发线已判 blocked/failed（**终态**）：下游架构师不会再有 phase_request，
+ *                   驱动环若继续死等，进程就永远不退出。
+ *
+ * ★ 为什么必须区分（9/18 实测事故）：s1-crud-min 那轮开发线在 14:51 判了 blocked，
+ *   但 requestBrakeStop() 只在刹车路径调用 → drivePhases 的 while(!data) 一直在等一条
+ *   永远不会来的 phase_request → runProject 永不 resolve → 走不到 process.exit(0)：
+ *   harness 的 runPipeline 等子进程退出等了 **2961 秒**才被人手动 kill，
+ *   期间还有一个循环在 100% 烧一个核（实测 8 秒烧 9.44 秒 CPU）。
+ *   生产上等价后果：项目永远卡 executing，Java 对账器看到"进程还活着"就不会重拉。
+ */
+export type RunnerStopReason = "paused" | "terminal";
+
+/** 请求进程收工（幂等，只生效一次）；reason 决定收工语义，缺省 = 旧的刹车暂停行为 */
+export function requestBrakeStop(reason: RunnerStopReason = "paused"): boolean {
     if (brakeStopRequested) return false;
     brakeStopRequested = true;
+    brakeStopReason = reason;
     brakeStopResolve?.();
     brakeStopResolve = null;
     return true;
@@ -91,14 +109,22 @@ export function isBrakeStopRequested(): boolean {
     return brakeStopRequested;
 }
 
+/** 收工原因（未请求时 = "paused"，调用方应先看 isBrakeStopRequested） */
+export function brakeStopReasonOf(): RunnerStopReason {
+    return brakeStopReason;
+}
+
 /**
  * 等"该收工了"的信号（projectRunner.drivePhases 用它 race 掉 waitForMessage）。
  *   ⚠️ 惰性建 promise：只在真的有人等时才创建，避免每条消费线都挂一个常驻 promise。
+ *   返回收工原因（旧调用方 `.then(() => ...)` 用法不受影响）。
  */
-export function waitForBrakeStop(): Promise<void> {
-    if (brakeStopRequested) return Promise.resolve();
+export function waitForBrakeStop(): Promise<RunnerStopReason> {
+    if (brakeStopRequested) return Promise.resolve(brakeStopReason);
     if (!brakeStopPromise) {
-        brakeStopPromise = new Promise<void>((resolve) => { brakeStopResolve = resolve; });
+        brakeStopPromise = new Promise<RunnerStopReason>((resolve) => {
+            brakeStopResolve = () => resolve(brakeStopReason);
+        });
     }
     return brakeStopPromise;
 }
@@ -106,6 +132,7 @@ export function waitForBrakeStop(): Promise<void> {
 /** 仅供测试：清掉信号（同一进程里跑多轮用例时需要） */
 export function resetBrakeStopForTest(): void {
     brakeStopRequested = false;
+    brakeStopReason = "paused";
     brakeStopResolve = null;
     brakeStopPromise = null;
 }
@@ -143,19 +170,46 @@ export function startDeveloperLine(station: TransferStation, engineProjectId: nu
             } catch (e) {
                 console.error(`[developer-line] handle 生命周期异常（不杀驱动环）：${(e as Error).message}`);
             }
-            drainStale(station);   // 作废/终态后的残批清光，不带进下一个任务
+            await drainStale(station);   // 作废/终态后的残批清光，不带进下一个任务
         }
     })().catch((e) => console.error("[developer-line] ⛔ 驱动环死了，后续阶段无人消费：", e));
 }
 
-/** 收件箱清空（任务间卫生）：读出来只留痕，不回投（残批属于已作废/已完成的流） */
-function drainStale(station: TransferStation): void {
-    while (station.hasPending(DEVELOPER_NAME)) {
-        void station.waitForMessage(DEVELOPER_NAME)?.then((d) => {
-            station.markDone(DEVELOPER_NAME);
-            const t = (parseInbound(d?.content ?? "").ok ? (parseInbound(d!.content) as { message: { type: string } }).message.type : "?");
-            console.warn(`[developer-line] 清废弃残消息：${d?.sender ?? "?"} → ${t}`);
-        });
+/**
+ * 收件箱清空（任务间卫生）：读出来只留痕，不回投（残批属于已作废/已完成的流）。
+ *
+ * ★ 9/18 修**同步死循环**（实测事故，这一条比"卡住"更严重）：
+ *   原实现是
+ *     `while (station.hasPending(NAME)) { void station.waitForMessage(NAME)?.then((d) => { markDone(...) }) }`
+ *   —— `hasPending` 读的是 `pendingCount > 0`，而**唯一能让它减一的 `markDone` 写在 `.then` 里**。
+ *   微任务在这个**同步** while 里永远排不上队，所以只要任务结束时收件箱还有积压
+ *   （`developer_progress` 的抄送就够），它就是**同步空转**：一个核烧穿、一行日志都不出、
+ *   事件循环彻底堵死、`process.exit()` 永远执行不到。
+ *   现场数据：开发线 14:51 判终态后进程一直活着，8 秒烧掉 9.44 秒 CPU（>100% = 满一核），
+ *   累计 1371 秒；harness 的 `await 子进程退出` 因此挂了 2961 秒，最后靠人手动 kill
+ *   才拿到那份 pass 判定。**生产等价后果：项目永远卡 executing。**
+ *
+ *   修法：判据从 `hasPending`（记账计数，只有异步回调能减）换成 `hasQueued`
+ *   （读**真实队列**，每消费一条就少一条 → 循环必然收敛），每条都 `await`，
+ *   并留一道迭代上界兜底（真出现脏状态时如实报警退出，而不是把进程烧死）。
+ */
+export async function drainStale(station: TransferStation): Promise<void> {
+    let drained = 0;
+    const LIMIT = 500;   // 残消息上界：正常是个位数；到界说明状态脏了，报警退出而不是空转
+    while (station.hasQueued(DEVELOPER_NAME)) {
+        if (++drained > LIMIT) {
+            console.warn(`[developer-line] ⚠ 清残消息到上界 ${LIMIT} 条仍未清空——停止清理，避免空转`);
+            return;
+        }
+        const d = await station.waitForMessage(DEVELOPER_NAME);
+        station.markDone(DEVELOPER_NAME);
+        if (!d) {
+            console.warn("[developer-line] ⚠ 队列非空却取不到消息——跳过本轮清理");
+            return;
+        }
+        const parsed = parseInbound(d.content);
+        const type = parsed.ok ? parsed.message.type : parsed.error;
+        console.warn(`[developer-line] 清废弃残消息：${d.sender} → ${type}`);
     }
 }
 
@@ -170,19 +224,31 @@ function drainStale(station: TransferStation): void {
  *   真实 LLM 花费，收尾时既没有结论也没有死因（s4c/s4d 被杀时 HTTP 判据已经 6/6 全绿）。
  *
  *   现在的定价（三档取最小，全部有限）：
- *     ① 数据档：30 基数 + 18/工作项 + 9/判据，夹紧 [120, 900]——判据是"验收要过的东西"，
+ *     ① 数据档：40 基数 + 45/工作项 + 9/判据，夹紧 [120, 900]——判据是"验收要过的东西"，
  *        是任务规模最诚实的度量（架构师拆解的产物，项目越大自动越宽）；
  *     ② 运维档：CF_MAX_LLM_CALLS（brake.ts，默认 400，硬夹 ≤4000）；
  *     ③ 取 min：数据档算出来比运维档还宽时，以运维档为准（否则"规模大"就变成"成本无上限"）。
- *   校准：s4c（5 工作项 + 12 判据，含预演自修）实测 145~147 调，公式给 152，当时贴着上限；
- *   运维档 400 ≈ 该量的 2.7 倍，日常不误伤，同时给成本一个真上限。
- *   真失控仍由无进展保险丝（isAcceptanceStalled/isStalled/isRepeatedFailure）先兜——
- *   本闸是**天灾兜底**，不是日常油门。
+ *
+ *   ★ 9/18 重新校准（旧档 30 + 18/项 + 9/判据 实测不够，代价是一整轮跑挂）：
+ *     s1-crud-min 那轮（5 工作项 + 2 判据）= 旧公式给 **138**，跑满 138 时已经写完
+ *     w1 骨架 / w2 schema / w3 后端 CRUD（controller+service+repository+entity+dto+exception 全齐）
+ *     / w4 前端的 types+api+App.vue，25 个文件改盘、ac-1（mvnw package）与 ac-2（npm run build）
+ *     **都实测 exit=0** —— 活几乎干完了，却因为"调用预算耗尽、计划还有单元未完成"被判 blocked。
+ *     教训：**判据条数在这类任务上不是工作量的好代理**——s1 只有 2 条判据（都是编译检查），
+ *     要写的代码量却比当年用来校准的 s4c（5 项 + 12 判据，实测 145~147 调）大一倍。
+ *     系数按实测抬到 45/项：s1 从 138 → 283（实测需求 ~200，留 1.4 倍余量）。
+ *
+ *   ⚠️ 已知剩余缺口（本次没动，留证）：`grantBrakeExtension` **只前移墙钟，不加调用数**，
+ *     而 `llmBudget`（数据档）与图内 `deps.maxLlmCalls` 都是创建时定格的。所以对一个
+ *     **调用数**耗尽的任务，人答"继续：加时 30 分钟"其实**救不回来**——下一圈
+ *     `callAllowance = min(冻结的数据档, 运维档)` 原地不动，立刻再次到点，白烧掉
+ *     MAX_ESCALATIONS_PER_TASK 的次数后判 blocked。正确修法是在轮次循环里按人答"继续"
+ *     **用更大的 maxLlmCalls 重建 handle**（ledger 续跑路径已支持），属于独立改动。
  */
 function budgetOf(task: ArchitectTask, policy: BrakePolicy): number {
     const items = task.foundationPlan.workItems?.length ?? 0;
     const checks = task.acceptanceChecks?.length ?? 0;
-    const derived = Math.min(900, Math.max(120, 30 + 18 * items + 9 * checks));
+    const derived = Math.min(900, Math.max(120, 40 + 45 * items + 9 * checks));
     return Math.min(derived, policy.initialMaxLlmCalls);
 }
 
@@ -319,6 +385,14 @@ async function runOneTask(station: TransferStation, engineProjectId: number, tas
     //   加时改的是 policy 的 SOFT 阈值（deadlineAt 前移）——驱动环每圈重读，不缓存。
     const policy = resolveBrakePolicy();
     const llmBudget = budgetOf(task, policy);
+    /**
+     * ★ 9/18：预算的**可变读数**——同一个对象既喂给图（llmBudgetRef），也被驱动环读。
+     *   为什么必须是可变对象而不是常量：加时（人答"继续"）要能当场抬高调用数上限，
+     *   而图与驱动环都**不能**重建（重建 handle 代价大、还可能踩在途消息）。
+     *   治的病：原先 grantBrakeExtension 只加墙钟 → 对"调用数耗尽"的任务，答"继续"是空操作，
+     *   下一圈立刻再次到顶，白烧两次求助额度后判 blocked（s1-crud-min 实测死法）。
+     */
+    const budgetRef = { value: llmBudget };
     const handle = createDeveloperAgent({
         projectId: task.projectId, taskId: task.taskId,
         projectDir: dir,
@@ -335,6 +409,7 @@ async function runOneTask(station: TransferStation, engineProjectId: number, tas
         sandbox: { mode: "soft", backend: "local" },     // 与 hub-runner 实弹档一致（本机无 docker）
         llmErrorTolerance: 2,
         maxLlmCalls: llmBudget,
+        llmBudgetRef: budgetRef,                         // ★ 图每次判预算现读它 → 加时当场生效
         // 墙钟是**依赖**不是 env 深读：等待窗口（waiting_test）不许活得比整轮墙钟还久，
         // 否则刹车到点时账本上还挂着一条"正在等测试"的窗口，读起来像系统在等，其实整轮已超时。
         wallClockDeadlineAt: policy.deadlineAt,
@@ -387,18 +462,39 @@ async function runOneTask(station: TransferStation, engineProjectId: number, tas
     const round: BrakeRound = { n: resume?.round ?? 1 };
 
     for (; ;) {
-        const outcome = await driveToTerminal(handle, policy, llmBudget, round);
-        if (outcome.kind === "terminal") { await finishReport(handle, outcome.state, tokenTally); return true; }
-        // 无人值守天花板：自己收口（只可能出现在 AUTO_CONFIRM=1 那条路上）
+        // ★ 9/18：一律传 `budgetRef.value`（**每圈现读**），不再传那个冻结的 llmBudget。
+        //   否则加时抬了 ref、驱动环却还在按旧数算 allowance —— "加了时却还在按旧点刹车"。
+        const outcome = await driveToTerminal(handle, policy, budgetRef.value, round);
+        if (outcome.kind === "terminal") {
+            await finishReport(handle, outcome.state, tokenTally);
+            // ★ 9/18：**终态且非成功**时必须主动收工，否则 drivePhases 会一直等下一条
+            //   phase_request（开发线都 blocked 了，架构师不会再派下一步）——实测进程永远不退出。
+            //   `ready` 是成功终态，下游照常推进，绝不能在它上面收工（否则跑通的那条路被切断）。
+            if (outcome.state.status !== "ready") requestBrakeStop("terminal");
+            return true;
+        }
+        // 无人值守天花板：自己收口（只可能出现在 AUTO_CONFIRM=1 那条路上）——同样是终结，必须收工
         if (outcome.kind === "stopped") {
-            await brakeFinalized(handle, outcome.status, outcome.verdict, policy, llmBudget, tokenTally);
+            await brakeFinalized(handle, outcome.status, outcome.verdict, policy, budgetRef.value, tokenTally);
+            requestBrakeStop("terminal");
             return true;
         }
         // 到点该问人：问出去 → 静默等 → 按答案决定下一步
-        const next = await brakeCheckpoint(handle, outcome.status, policy, llmBudget, askHuman, round);
-        if (next === "continue") continue;                       // ★ 人答继续 → 加时后接着驱动
+        const next = await brakeCheckpoint(handle, outcome.status, policy, budgetRef.value, askHuman, round);
+        if (next === "continue") {
+            // ★ 9/18 关键一步：**把加时真的换算成调用数**。
+            //   brakeCheckpoint 内部已调 grantBrakeExtension（policy.maxLlmCalls 前移），
+            //   但真正卡住小任务的是数据档（budgetRef），两个钟必须一起抬，否则"继续"＝空操作：
+            //   下一圈 callAllowance 还是旧值 → 立刻再次到顶 → 白烧求助额度 → blocked。
+            const before = budgetRef.value;
+            budgetRef.value = Math.min(before + policy.extendLlmCalls, policy.hardLlmCalls);
+            console.log(`[developer-line] ↻ 人答继续：调用预算 ${before} → ${budgetRef.value} 调`
+                + `（加时 ${policy.extendLlmCalls}；运维档上限 ${policy.hardLlmCalls}），`
+                + `墙钟到点顺延至 +${policy.extendMinutes} 分钟`);
+            continue;                                            // ★ 接着驱动
+        }
         if (next === "stopped") {
-            await brakeFinalized(handle, lastStatus(round), "人确认收口/停止", policy, llmBudget, tokenTally);
+            await brakeFinalized(handle, lastStatus(round), "人确认收口/停止", policy, budgetRef.value, tokenTally);
             return true;
         }
         // next === "paused"：静默等满没人确认 → 保状态退出（**不 abort、不落 blocked**）

@@ -21,8 +21,8 @@ import { describe, expect, it } from "bun:test";
 import {
     acceptanceGreen, askBrakeQuietly, brakeEventName, brakeLogLine, brakeOptions, brakeQuestion,
     brakeQuestionId, brakeReasonLabel, brakeReasonText, buildProgressReport, checkBrake,
-    countExtensions, DEFAULT_EXTEND_MINUTES, DEFAULT_MAX_LLM_CALLS, DEFAULT_MAX_WALL_MINUTES,
-    DEFAULT_WAIT_MINUTES, ENV_AUTO_CONFIRM, ENV_EXTEND_MINUTES, ENV_HARD_WALL_MINUTES,
+    countExtensions, DEFAULT_EXTEND_LLM_CALLS, DEFAULT_EXTEND_MINUTES, DEFAULT_MAX_LLM_CALLS, DEFAULT_MAX_WALL_MINUTES,
+    DEFAULT_WAIT_MINUTES, ENV_AUTO_CONFIRM, ENV_EXTEND_LLM_CALLS, ENV_EXTEND_MINUTES, ENV_HARD_WALL_MINUTES,
     ENV_MAX_LLM_CALLS, ENV_MAX_WALL_MINUTES, ENV_WAIT_MINUTES, formatElapsed, formatMinutes,
     grantBrakeExtension, isUnattended, lastFailureReason, MAX_LLM_CALLS_CAP, MAX_WALL_MINUTES_CAP,
     parseBrakeAnswer, parsePositiveNumberEnv, remainingWallMs, resolveBrakePolicy,
@@ -44,6 +44,7 @@ const policyAt = (over: Partial<BrakePolicy> = {}): BrakePolicy => ({
     hardLlmCalls: 800,
     waitMs: 30 * 60_000,
     extendMinutes: 30,
+    extendLlmCalls: 200,          // ★ 9/18：一次"继续"补多少调用（与墙钟一起前移）
     extensionsUsed: 0,
     unattended: false,
     source: { wallMinutes: 120, fromEnv: [] },
@@ -259,6 +260,32 @@ describe("刹车·加时（人就答继续时唯一改期限的地方）", () =>
         expect(countExtensions([
             { type: "brake_extended" }, { type: "brake_paused" }, { type: "brake_extended" },
         ])).toBe(2);
+    });
+
+    // ★ 9/18 加（治"加时加了个寂寞"）——s1-crud-min 实测死法：调用数 138/138 到顶、
+    //   活几乎干完（25 文件、ac-1/ac-2 都 exit=0），人答"继续"却救不回调用数，
+    //   两次求助额度烧完判 blocked。加时必须**两个钟一起前移**。
+    it("★ 加时同时抬高调用数上限（原先只加墙钟 → 对「调用数耗尽」的任务是空操作）", () => {
+        const p = policyAt();                       // maxLlmCalls=400, hardLlmCalls=800, extendLlmCalls=200
+        const before = p.maxLlmCalls;
+        grantBrakeExtension(p, p.startedAt + mins(121));
+        expect(p.maxLlmCalls).toBe(before + p.extendLlmCalls);
+    });
+
+    it("★ 调用数加时**不许越过 hardLlmCalls**（那是跨不过去的绝对天花板，SOFT 涨 HARD 不动）", () => {
+        const p = policyAt();
+        const hard = p.hardLlmCalls;
+        for (let i = 0; i < 10; i++) grantBrakeExtension(p, p.startedAt + mins(121 + i * 31));
+        expect(p.maxLlmCalls).toBe(hard);           // 顶到天花板就停在那儿
+        expect(p.hardLlmCalls).toBe(hard);          // 天花板自己一个字没动
+    });
+
+    it("★ CF_BRAKE_EXTEND_CALLS 可控；不配 = 默认值", () => {
+        expect(resolveBrakePolicy({}).extendLlmCalls).toBe(DEFAULT_EXTEND_LLM_CALLS);
+        expect(resolveBrakePolicy({ [ENV_EXTEND_LLM_CALLS]: "350" }).extendLlmCalls).toBe(350);
+        // 垃圾/超大值都要被夹回合法区间（不许 NaN、不许越 MAX_LLM_CALLS_CAP）
+        expect(resolveBrakePolicy({ [ENV_EXTEND_LLM_CALLS]: "abc" }).extendLlmCalls).toBe(DEFAULT_EXTEND_LLM_CALLS);
+        expect(resolveBrakePolicy({ [ENV_EXTEND_LLM_CALLS]: "999999" }).extendLlmCalls).toBe(MAX_LLM_CALLS_CAP);
     });
 });
 
