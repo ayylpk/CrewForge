@@ -33,6 +33,16 @@ DeskTop-CrewForge/
 
 # ===== 引擎运行产物 =====
 agents-CrewForge/runs/
+# 9/18 目录重构后引擎产物改到 agent/runs/（同一件事的新位置）
+agent/runs/
+
+# ===== tsc / vue-tsc 就地 emit 的编译产物（9/18 逮到）=====
+# frontend 的 tsconfig 没关 emit，`vue-tsc -b` 会在源文件旁边生成同名 .js。
+# 这不是"会不会发生"的问题：每次类型检查都会生成。9/18 我用 `git add -A` 时被扫进仓库 42 个
+# （每个都有对应的 .ts/.vue，0 个孤儿 —— 确认全是产物）。这里封死，防止再被 add -A 带进去。
+# 用通配而不是写死 frontend/：将来别处同样配置的目录也一并覆盖。
+frontend/src/**/*.js
+frontend/src/*.js
 
 # ===== 引擎编译产物/测试临时文件 =====
 # 9/17 由 `agents-CrewForge/dist-node/` 改成通配：写死单条路径时，别的目录的同类产物

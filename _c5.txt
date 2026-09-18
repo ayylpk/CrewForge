@@ -1,0 +1,23 @@
+chore: 清掉 42 个 tsc 就地 emit 的编译产物 + 封死忽略规则
+
+## 怎么回事
+
+`frontend` 的 tsconfig 没关 emit，`vue-tsc -b`（每次类型检查都跑）会在**源文件旁边**
+生成同名 `.js`。上一个提交（目录重构）我用了 `git add -A`，把它们一起扫进了仓库：
+`frontend/src/views/ExecutionView.vue.js`、`frontend/src/api/*.js` … 共 **42 个**。
+
+判据不是"看着像产物"，是逐个核对：**42 个全部有对应源文件，0 个孤儿** —— 即没有任何一个是手写的。
+时间戳也印证（产物 21:54 晚于源文件 21:44）。
+
+## 处理
+
+- `git rm --cached` 停止跟踪 + 从磁盘删除（下次类型检查会再生成，但那属于本地临时文件）
+- `.gitignore` 封死，并**实测过规则生效**（新建一个 `_probe.js`，`git status` 看不到它）
+- 顺手把 `agents-CrewForge/runs/` 的忽略补成 `agent/runs/`（重构后的新位置），
+  否则引擎一开工就又会在忽略规则外冒出一个产物目录
+
+## 教训
+
+`git add -A` 在有"就地 emit"配置的项目里是危险的 —— 它会把编译产物当源码提交。
+两条防线都补上了：**规则**（.gitignore 通配）+ **判据**（以后 add -A 之前，
+先 `git status` 看一眼有没有 `*.js` 混在源码目录里）。
