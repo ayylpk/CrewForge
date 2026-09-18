@@ -4,9 +4,9 @@
 # ============================================================
 FROM node:22-alpine AS build
 WORKDIR /src
-COPY fronted-CrewForge/package.json fronted-CrewForge/package-lock.json* ./
+COPY frontend/package.json frontend/package-lock.json* ./
 RUN npm ci || npm install
-COPY fronted-CrewForge ./
+COPY frontend ./
 RUN npm run build
 
 FROM nginx:1.27-alpine

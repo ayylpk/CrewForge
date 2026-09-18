@@ -1,0 +1,789 @@
+{
+  "type": "architect_batch",
+  "projectId": "p7",
+  "taskId": "p7-t1",
+  "itemId": "w7",
+  "detail": "在 backend/src/routes/tags.js 实现标签与任务-标签关联两组路由，并在应用入口挂载。文件内分两块：(a) 项目标签——POST/GET /api/projects/{id}/tags；(b) 任务标签关联——POST /api/tasks/{id}/tags、DELETE /api/tasks/{id}/tags/{tagId}、DELETE /api/tags/{id}。所有写操作先过 X-User-Id 认证中间件（复用 w3 落地），再做项目成员判定，非成员一律 403；私密项目读侧（GET 标签列表）非成员 403，公开项目任何人可读。标签唯一性按 trim 后同 projectId+name 查重（DB 侧 w2 的唯一索引兜底），重复创建 400；打标签前校验 tag.projectId === task.projectId，跨项目或 tag/task 不存在 400，重复关联 400；去标签关联不存在 404。删除标签与去关联都显式 DELETE task_tags 行（与 w2 外键级联互为兜底）。成功统一 {data:...}、错误统一 {error:{message}} 壳，字段 camelCase（projectId、taskId、tagId、deleted、removed），状态码照 contract。与 w6 任务路由的 tagId 过滤参数对接（列表返回 tagIds 供其过滤）。",
+  "checks": [
+    {
+      "id": "ac-41",
+      "kind": "CONTRACT",
+      "method": "POST",
+      "path": "/api/projects/{pid}/tags",
+      "expectedStatus": 201,
+      "expected": "owner 作为项目成员在项目内创建标签成功，返回 data.name",
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "tag-owner-41"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "uid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects",
+          "body": {
+            "name": "proj-41"
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "pid",
+            "from": "data.id"
+          }
+        }
+      ],
+      "headers": {
+        "X-User-Id": "{uid}"
+      },
+      "body": {
+        "name": "bug"
+      },
+      "assertJson": [
+        {
+          "path": "data.name",
+          "equals": "bug"
+        },
+        {
+          "path": "data.id",
+          "exists": true
+        }
+      ]
+    },
+    {
+      "id": "ac-42",
+      "kind": "CONTRACT",
+      "method": "POST",
+      "path": "/api/projects/{pid}/tags",
+      "expectedStatus": 400,
+      "expected": "同项目内重复标签名必须拒绝（400）",
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "tag-owner-42"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "uid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects",
+          "body": {
+            "name": "proj-42"
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "pid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects/{pid}/tags",
+          "body": {
+            "name": "dup"
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201
+        }
+      ],
+      "headers": {
+        "X-User-Id": "{uid}"
+      },
+      "body": {
+        "name": "dup"
+      }
+    },
+    {
+      "id": "ac-43",
+      "kind": "CONTRACT",
+      "method": "GET",
+      "path": "/api/projects/{pid}/tags",
+      "expectedStatus": 200,
+      "expected": "列出项目标签，返回该项目已建的全部标签",
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "tag-owner-43"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "uid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects",
+          "body": {
+            "name": "proj-43"
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "pid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects/{pid}/tags",
+          "body": {
+            "name": "t1"
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects/{pid}/tags",
+          "body": {
+            "name": "t2"
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201
+        }
+      ],
+      "headers": {
+        "X-User-Id": "{uid}"
+      },
+      "assertJson": [
+        {
+          "path": "data",
+          "minLength": 2
+        },
+        {
+          "path": "data.0.name",
+          "exists": true
+        }
+      ]
+    },
+    {
+      "id": "ac-44",
+      "kind": "CONTRACT",
+      "method": "POST",
+      "path": "/api/tasks/{taskId}/tags",
+      "expectedStatus": 400,
+      "expected": "跨项目打标签（tag 与 task 不属于同一项目）必须拒绝（400）",
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "tag-owner-44"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "uid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects",
+          "body": {
+            "name": "projA-44"
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "pidA",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects",
+          "body": {
+            "name": "projB-44"
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "pidB",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects/{pidA}/tags",
+          "body": {
+            "name": "onlyA"
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "tagA",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects/{pidB}/tasks",
+          "body": {
+            "title": "taskB"
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "taskId",
+            "from": "data.id"
+          }
+        }
+      ],
+      "headers": {
+        "X-User-Id": "{uid}"
+      },
+      "body": {
+        "tagId": "{tagA}"
+      }
+    },
+    {
+      "id": "ac-45",
+      "kind": "CONTRACT",
+      "method": "POST",
+      "path": "/api/tasks/{taskId}/tags",
+      "expectedStatus": 400,
+      "expected": "同一任务重复打同一标签必须拒绝（400）",
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "tag-owner-45"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "uid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects",
+          "body": {
+            "name": "proj-45"
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "pid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects/{pid}/tasks",
+          "body": {
+            "title": "task-45"
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "taskId",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects/{pid}/tags",
+          "body": {
+            "name": "t45"
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "tagId",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/tasks/{taskId}/tags",
+          "body": {
+            "tagId": "{tagId}"
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201
+        }
+      ],
+      "headers": {
+        "X-User-Id": "{uid}"
+      },
+      "body": {
+        "tagId": "{tagId}"
+      }
+    },
+    {
+      "id": "ac-46",
+      "kind": "CONTRACT",
+      "method": "DELETE",
+      "path": "/api/tasks/{taskId}/tags/{tagId}",
+      "expectedStatus": 200,
+      "expected": "去掉任务上的标签成功，返回 removed:true",
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "tag-owner-46"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "uid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects",
+          "body": {
+            "name": "proj-46"
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "pid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects/{pid}/tasks",
+          "body": {
+            "title": "task-46"
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "taskId",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects/{pid}/tags",
+          "body": {
+            "name": "t46"
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "tagId",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/tasks/{taskId}/tags",
+          "body": {
+            "tagId": "{tagId}"
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201
+        }
+      ],
+      "headers": {
+        "X-User-Id": "{uid}"
+      },
+      "assertJson": [
+        {
+          "path": "data.removed",
+          "equals": true
+        },
+        {
+          "path": "data.taskId",
+          "exists": true
+        },
+        {
+          "path": "data.tagId",
+          "exists": true
+        }
+      ]
+    },
+    {
+      "id": "ac-47",
+      "kind": "CONTRACT",
+      "method": "DELETE",
+      "path": "/api/tags/{tagId}",
+      "expectedStatus": 200,
+      "expected": "删除项目标签成功，返回 deleted:true",
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "tag-owner-47"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "uid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects",
+          "body": {
+            "name": "proj-47"
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "pid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects/{pid}/tags",
+          "body": {
+            "name": "t47"
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "tagId",
+            "from": "data.id"
+          }
+        }
+      ],
+      "headers": {
+        "X-User-Id": "{uid}"
+      },
+      "assertJson": [
+        {
+          "path": "data.deleted",
+          "equals": true
+        },
+        {
+          "path": "data.id",
+          "exists": true
+        }
+      ]
+    },
+    {
+      "id": "ac-48",
+      "kind": "CONTRACT",
+      "method": "POST",
+      "path": "/api/projects/{pid}/tags",
+      "expectedStatus": 403,
+      "expected": "非成员在私密项目内建标签，写操作限成员 → 403",
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "tag-owner-48"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "uid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects",
+          "body": {
+            "name": "proj-48-private",
+            "isPrivate": true
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "pid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "outsider-48"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "uid2",
+            "from": "data.id"
+          }
+        }
+      ],
+      "headers": {
+        "X-User-Id": "{uid2}"
+      },
+      "body": {
+        "name": "nope"
+      }
+    },
+    {
+      "id": "ac-49",
+      "kind": "CONTRACT",
+      "method": "GET",
+      "path": "/api/projects/{pid}/tags",
+      "expectedStatus": 403,
+      "expected": "非成员读私密项目的标签列表 → 403",
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "tag-owner-49"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "uid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects",
+          "body": {
+            "name": "proj-49-private",
+            "isPrivate": true
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "pid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects/{pid}/tags",
+          "body": {
+            "name": "t49"
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201
+        },
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "outsider-49"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "uid2",
+            "from": "data.id"
+          }
+        }
+      ],
+      "headers": {
+        "X-User-Id": "{uid2}"
+      }
+    },
+    {
+      "id": "ac-50",
+      "kind": "CONTRACT",
+      "method": "POST",
+      "path": "/api/projects/{pid}/tags",
+      "expectedStatus": 400,
+      "expected": "去除首尾空白后同名（'x' 与 ' x '）仍视为重复，必须 400",
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "tag-owner-50"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "uid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects",
+          "body": {
+            "name": "proj-50"
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "pid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects/{pid}/tags",
+          "body": {
+            "name": "x"
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201
+        }
+      ],
+      "headers": {
+        "X-User-Id": "{uid}"
+      },
+      "body": {
+        "name": " x "
+      }
+    },
+    {
+      "id": "ac-51",
+      "kind": "CONTRACT",
+      "method": "GET",
+      "path": "/api/tasks/{taskId}",
+      "expectedStatus": 200,
+      "expected": "删除标签后，任务详情里的 tags 不再含该标签（级联移除 task_tag）",
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "tag-owner-51"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "uid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects",
+          "body": {
+            "name": "proj-51"
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "pid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects/{pid}/tasks",
+          "body": {
+            "title": "task-51"
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "taskId",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects/{pid}/tags",
+          "body": {
+            "name": "t51"
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "tagId",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/tasks/{taskId}/tags",
+          "body": {
+            "tagId": "{tagId}"
+          },
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 201
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/tags/{tagId}",
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "expectedStatus": 200
+        }
+      ],
+      "headers": {
+        "X-User-Id": "{uid}"
+      },
+      "assertJson": [
+        {
+          "path": "data.tags",
+          "length": 0
+        }
+      ]
+    }
+  ]
+}

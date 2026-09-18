@@ -1,0 +1,55 @@
+{
+  "type": "architect_task",
+  "projectId": "mysite",
+  "taskId": "mysite-T3a-diary",
+  "requirementSnapshot": {
+    "goal": "mysite 后端 diary 模块：日记增删改查 + 按年月过滤。完全复用 T2 projects 已确立的分层模式（entity/repository/service/controller/dto），禁止另起炉灶改已有结构。",
+    "context": "现状：Project 模块五端点已验收绿；H2 file 库 jdbc:h2:file:./data/mysite + ddl-auto=update；服务端口 8180。"
+  },
+  "stackProfile": {
+    "frontend": "Vue3 + Vite + TS（本任务不动 frontend/）",
+    "backend": "Spring Boot 3.5.5 + Java 17，构建入口 backend/mvnw.cmd -q package -DskipTests",
+    "database": "H2 file（MODE=MySQL），沿用 T2 配置不动"
+  },
+  "domainModel": {
+    "entity": "diary_entry",
+    "table": "diary_entry",
+    "fields": [
+      { "name": "id", "type": "bigint", "pk": true, "auto": true },
+      { "name": "title", "type": "varchar(200)", "nullable": false },
+      { "name": "content", "type": "TEXT", "nullable": false, "note": "columnDefinition=TEXT" },
+      { "name": "mood", "type": "varchar(20)", "nullable": true },
+      { "name": "tags", "type": "varchar(500)", "nullable": true, "note": "库内逗号分隔；API 层是字符串数组，service 负责 join/split" },
+      { "name": "created_at", "type": "datetime", "nullable": false, "auto": "插入时" },
+      { "name": "updated_at", "type": "datetime", "nullable": false, "auto": "更新时" }
+    ],
+    "namingRule": "表/列严格照抄（diary_entry 是单数下划线）；实体类 DiaryEntry"
+  },
+  "contract": {
+    "version": "1",
+    "base": "/api/diaries",
+    "endpoints": [
+      { "method": "GET", "path": "/api/diaries", "query": "?year=2026&month=9 可选", "desc": "列表 created_at desc；带 year&month 时按 created_at 所在年月过滤（两个参数都缺才不过滤，只给一个也过滤）", "expectStatus": 200, "responseBody": "[DiaryDto]" },
+      { "method": "GET", "path": "/api/diaries/{id}", "expectStatus": 200, "responseBody": "DiaryDto", "notFound": 404 },
+      { "method": "POST", "path": "/api/diaries", "body": "{\"title\":必填,\"content\":必填,\"mood\":可选,\"tags\":[\"字符串\",...]|null}", "desc": "title/content 任一缺失或空白 → 400", "expectStatus": 201, "responseBody": "DiaryDto(含id/createdAt)" },
+      { "method": "PUT", "path": "/api/diaries/{id}", "body": "同 POST（更新时同样校验 title/content 非空）", "expectStatus": 200, "responseBody": "DiaryDto(updatedAt 刷新)" },
+      { "method": "DELETE", "path": "/api/diaries/{id}", "expectStatus": 204, "notFound": 404 }
+    ],
+    "dtoShape": { "id": "number", "title": "string", "content": "string", "mood": "string|null", "tags": "string[] (空/null 存返回 [])", "createdAt": "ISO string", "updatedAt": "ISO string" },
+    "notes": "与 Project 一致：裸资源不套壳、JSON 驼峰"
+  },
+  "foundationPlan": {
+    "dirs": ["backend"],
+    "workItems": [
+      { "id": "w1-diary", "kind": "backend", "title": "DiaryEntry 实体+五端点+年月过滤", "paths": ["backend/src/main/java/com/kangzong/mysite"] }
+    ]
+  },
+  "allowedRoots": ["backend", "frontend"],
+  "forbiddenPaths": ["backend/mvnw", "backend/mvnw.cmd", "backend/.mvn", "scripts"],
+  "acceptanceChecks": [
+    { "id": "backend-build", "command": "mvnw.cmd", "args": ["-q", "package", "-DskipTests"], "cwd": "backend", "timeoutMs": 600000, "category": "COMPILE" },
+    { "id": "diary-loop", "command": "node", "args": ["../scripts/verify-t3a.mjs"], "cwd": "backend", "timeoutMs": 120000, "category": "BOOT" },
+    { "id": "frontend-still-builds", "command": "npm", "args": ["run", "build"], "cwd": "frontend", "timeoutMs": 300000, "category": "COMPILE" }
+  ],
+  "developerInstructions": "先 readFile 看 T2 的 ProjectController/ProjectService/ProjectDto 怎么写的，照同一套路写 Diary*（Repository 派生查询即可满足年月过滤：findByCreatedAtBetween，或 @Query——注意边界含首不含尾）。步骤建议：mkdir → 5 个新文件（entity/DiaryEntry, repository/DiaryRepository, dto/DiaryDto, service/DiaryService, controller/DiaryController）→ runBuild 一次 → 绿了 done。tags 数组↔逗号串转换放 service 层；createdAt 过滤用 java.time.LocalDateTime。禁止：动 Project 任何文件、动 application.yml、动 frontend。"
+}

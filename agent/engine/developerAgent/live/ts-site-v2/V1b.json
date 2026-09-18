@@ -1,0 +1,46 @@
+{
+  "projectId": "ts-site-v2",
+  "phase": 1,
+  "pmPlan": {
+    "project": "ts-site-v2",
+    "features": [
+      { "name": "健康检查后端", "description": "Express 服务提供 GET /health" }
+    ],
+    "phases": [
+      { "phase": 1, "name": "后端地基", "goal": "可构建、可独立验收的最小后端", "features": ["健康检查后端"] }
+    ],
+    "mvp_scope": ["健康检查后端"],
+    "risks": []
+  },
+  "semantics": {
+    "goal": "建立可构建、可被独立验收的 Express + TypeScript 后端（GET /health）",
+    "features": [
+      { "name": "健康检查后端", "description": "Express 服务提供 GET /health，响应体含 ok" }
+    ],
+    "stack": {
+      "frontend": "无（本阶段只做后端）",
+      "backend": "Express 4 + TypeScript",
+      "database": "无",
+      "why": "最小真实任务：装依赖 → tsc 构建 → 起进程 → 过独立探针；用于验证新协议链路（与 V1.json 的桩导向包区分）"
+    },
+    "entities": [
+      { "entity": "HealthResponse", "table": "不适用（本阶段不接数据库）", "fields": [{ "name": "ok", "type": "boolean", "required": true }] }
+    ],
+    "endpoints": [
+      { "method": "GET", "path": "/health", "purpose": "健康检查", "expectedStatus": 200, "expectBodyContains": "ok" }
+    ],
+    "pages": [
+      { "path": "/health", "purpose": "健康检查端点（本阶段无前端页面）" }
+    ],
+    "workItems": [
+      { "id": "foundation", "kind": "foundation", "title": "建立后端工程基础", "paths": ["backend"] }
+    ],
+    "instructions": "【独立验收契约（验收器照此执行，只认机器证据）】\n① 构建：验收器在 cwd=backend 执行 `npm run build`，要求 exit=0 —— backend/package.json 的 scripts.build 必须是 tsc。\n② 启动：验收器在 cwd=backend 执行 `node dist/index.js`，PORT 由验收器随机注入。入口必须写 `const port = Number(process.env.PORT) || 8182`，监听 127.0.0.1 —— 不读 PORT 会起在验收器探测不到的端口上，直接判失败。\n③ 健康判据：GET /health → 200，响应体必须包含字符串 ok（用 JSON {\"ok\":true} 即可）。\n【范围】只允许写 backend/ 下的文件。本阶段不接数据库：不要建表、不要引入任何数据库依赖。不要加静态托管与 SPA fallback（本阶段没有前端）。\n【依赖】允许且仅允许 express@4、typescript、@types/express、@types/node。必须用 express 实现路由——不许改用 node:http 手写替代，本阶段同时要验证依赖安装链路。\n【交付物（3 个文件）】backend/package.json、backend/tsconfig.json（outDir=dist、strict）、backend/src/index.ts（Express 应用 + GET /health）。\n【自检要求】写完后必须真实跑通一遍：npm install → npm run build → 启动 node dist/index.js → 请求 GET /health 确认 200 且 body 含 ok → 停掉进程。只写代码不跑通不算完成。",
+    "risks": []
+  },
+  "allowedRoots": ["backend"],
+  "budget": { "files": 3, "installSteps": 1, "buildSteps": 1, "selfCheckSteps": 2, "rounds": 2 },
+  "serve": { "command": "node", "args": ["dist/index.js"], "cwd": "backend", "portEnv": "PORT", "bootWaitMs": 30000, "healthPath": "/health" },
+  "maxStepsPerLoop": 16,
+  "maxLlmCalls": 40
+}

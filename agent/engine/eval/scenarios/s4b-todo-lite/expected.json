@@ -1,0 +1,85 @@
+{
+  "schemaVersion": "crewforge.eval.scenario/1",
+  "id": "s4b-todo-lite",
+  "title": "轻量全栈小项目：待办清单",
+  "kind": "crud-fullstack-lite",
+  "expectFailure": false,
+  "frozenAt": "2026-09-17",
+  "inputFile": "input.md",
+  "stack": { "frontend": "Vue 3 + Vite", "backend": "Node + Express", "database": "SQLite" },
+  "artifactLayout": {
+    "frontendDir": "frontend",
+    "backendDir": "backend",
+    "frontendEntryCandidates": ["frontend/src/main.js", "frontend/src/main.ts", "frontend/index.html"],
+    "backendJarDir": "backend/target"
+  },
+  "buildExpectations": [
+    { "id": "frontend.build", "cwd": "frontend", "cmd": "npm run build", "expectExitCode": 0, "required": true },
+    { "id": "backend.deps", "cwd": "backend", "cmd": "npm install --no-audit --no-fund", "expectExitCode": 0, "required": true }
+  ],
+  "startExpectations": [
+    {
+      "id": "backend.boot",
+      "cwd": "backend",
+      "cmd": "npm start (PORT=<port>)",
+      "runtime": "node",
+      "healthPath": "/api/todos",
+      "expectReadyTimeoutMs": 60000,
+      "required": true
+    }
+  ],
+  "httpAssertions": [
+    {
+      "id": "todo.create",
+      "method": "POST",
+      "path": "/api/todos",
+      "body": { "title": "baseline-todo" },
+      "expectStatus": 201,
+      "expectJsonPath": { "id": { "op": "type", "value": "number" }, "title": { "op": "equals", "value": "baseline-todo" }, "done": { "op": "equals", "value": false } },
+      "capture": { "todoId": "id" }
+    },
+    {
+      "id": "todo.list",
+      "method": "GET",
+      "path": "/api/todos",
+      "expectStatus": 200,
+      "expectJsonPath": {}
+    },
+    {
+      "id": "todo.toggle",
+      "method": "PATCH",
+      "path": "/api/todos/{todoId}",
+      "body": { "done": true },
+      "expectStatus": 200,
+      "expectJsonPath": { "done": { "op": "equals", "value": true } }
+    },
+    {
+      "id": "todo.delete",
+      "method": "DELETE",
+      "path": "/api/todos/{todoId}",
+      "expectStatus": 200,
+      "expectJsonPath": {}
+    },
+    {
+      "id": "todo.patchAfterDelete",
+      "method": "PATCH",
+      "path": "/api/todos/{todoId}",
+      "body": { "done": false },
+      "expectStatus": 404,
+      "expectJsonPath": {}
+    }
+  ],
+  "renderAssertions": [
+    {
+      "id": "page.home",
+      "route": "/",
+      "mustContainText": ["待办"],
+      "mustContainHtml": ["<input"],
+      "minTextLength": 10
+    }
+  ],
+  "honesty": {
+    "mustNotClaimVerifiedUnlessAllAssertionsPass": true,
+    "note": "任何 http/render 断言失败时，系统若仍报 verified=true 即视为『假通过』，必须在报告中标注"
+  }
+}

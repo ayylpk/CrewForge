@@ -1,0 +1,1159 @@
+{
+  "schemaVersion": "crewforge.eval.baseline/1",
+  "kind": "baseline-before",
+  "generatedAt": "2026-09-11T03:02:44.191Z",
+  "generator": "agents-CrewForge/eval/report.ts",
+  "note": "阶段 0 基线：用【当前旧系统】跑冻结场景得到的真实结果。未改写控制流、未删除旧代码。所有 pass 都绑定真实命令与退出码（由 runner.ts 的 assertPassIsBound 强制）。",
+  "system": {
+    "repo": "F:\\code\\project\\CrewForge",
+    "engine": "agents-CrewForge",
+    "pipelineEntry": "projectRunner.ts",
+    "stack": "Vue 3 + Vite / Spring Boot 3 / MySQL 8",
+    "invariants": [
+      "判定只来自命令与退出码",
+      "静态检查与 LLM 文字不得单独产生 pass",
+      "未能判定一律 blocked（未验证 ≠ 通过）"
+    ]
+  },
+  "environment": {
+    "schemaVersion": "crewforge.eval.env/1",
+    "probedAt": "2026-09-11T03:02:44.188Z",
+    "cwd": "F:\\code\\project\\CrewForge\\agents-CrewForge",
+    "platform": "win32 10.0.26200 node=v24.3.0 bun=1.3.14",
+    "tools": [
+      {
+        "name": "bun",
+        "command": "C:\\Users\\kangzong\\.bvm\\runtime\\current\\bin\\bun.exe --version",
+        "found": true,
+        "path": "C:\\Users\\kangzong\\.bvm\\runtime\\current\\bin\\bun.exe",
+        "exitCode": 0,
+        "versionLine": "1.3.14",
+        "ok": true,
+        "note": "直连真实 bun.exe（绕开 bvm shim）"
+      },
+      {
+        "name": "node",
+        "command": "node --version",
+        "found": true,
+        "path": "node",
+        "exitCode": 0,
+        "versionLine": "v24.8.0",
+        "ok": true,
+        "note": ""
+      },
+      {
+        "name": "npm",
+        "command": "npm.cmd --version",
+        "found": true,
+        "path": "npm.cmd",
+        "exitCode": 0,
+        "versionLine": "11.6.0",
+        "ok": true,
+        "note": ""
+      },
+      {
+        "name": "java",
+        "command": "java -version",
+        "found": true,
+        "path": "java",
+        "exitCode": 0,
+        "versionLine": "openjdk version \"17.0.18\" 2026-01-20",
+        "ok": true,
+        "note": ""
+      },
+      {
+        "name": "javac",
+        "command": "javac -version",
+        "found": true,
+        "path": "javac",
+        "exitCode": 0,
+        "versionLine": "javac 17.0.18",
+        "ok": true,
+        "note": ""
+      },
+      {
+        "name": "mvn",
+        "command": "mvn.cmd -v",
+        "found": false,
+        "path": null,
+        "exitCode": -1,
+        "versionLine": null,
+        "ok": false,
+        "note": "全局 mvn（项目自带 mvnw 亦可）"
+      },
+      {
+        "name": "mvnw(backed-CrewForge)",
+        "command": "cmd.exe /c mvnw.cmd -v",
+        "found": true,
+        "path": "cmd.exe",
+        "exitCode": 0,
+        "versionLine": "Apache Maven 3.9.16 (2bdd9fddda4b155ebf8000e807eb73fd829a51d5)",
+        "ok": true,
+        "note": ""
+      },
+      {
+        "name": "docker",
+        "command": "docker version --format {{.Server.Version}}",
+        "found": true,
+        "path": "docker",
+        "exitCode": 1,
+        "versionLine": "failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine; check if the path is correct and if the daemon is running: open //./pipe/dockerDesktopLinuxEngine: The system cannot f",
+        "ok": false,
+        "note": ""
+      },
+      {
+        "name": "git",
+        "command": "git --version",
+        "found": true,
+        "path": "git",
+        "exitCode": 0,
+        "versionLine": "git version 2.54.0.rc1.windows.1",
+        "ok": true,
+        "note": ""
+      },
+      {
+        "name": "msedge",
+        "command": "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe --version",
+        "found": true,
+        "path": "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+        "exitCode": 0,
+        "versionLine": "��������������Ự�д򿪡�",
+        "ok": true,
+        "note": "路径 C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"
+      }
+    ],
+    "services": [
+      {
+        "name": "mysql",
+        "probe": "TCP 3306 + mysql2 SELECT VERSION()（用 .env 的 DB_* 凭据）",
+        "reachable": true,
+        "exitCode": null,
+        "evidence": "mysql2 连接成功：version=8.0.45 database=crewforge；TCP 127.0.0.1:3306 已连接",
+        "note": "可直连（可作生成应用的宿主数据库）"
+      },
+      {
+        "name": "redis",
+        "probe": "TCP 127.0.0.1:6379",
+        "reachable": false,
+        "exitCode": null,
+        "evidence": "TCP 127.0.0.1:6379 失败：connect ECONNREFUSED 127.0.0.1:6379",
+        "note": "旧引擎运行路径未见 Redis 依赖（仅部署脚本提及）"
+      },
+      {
+        "name": "docker",
+        "probe": "docker version --format {{.Server.Version}}",
+        "reachable": false,
+        "exitCode": 1,
+        "evidence": "failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine; check if the path is correct and if the daemon is running: open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified.",
+        "note": "docker CLI 在但 daemon 不可用"
+      },
+      {
+        "name": "msedge-headless",
+        "probe": "msedge --headless=new --dump-dom data:text/html,<h1>cf</h1>",
+        "reachable": true,
+        "exitCode": 0,
+        "evidence": "exit=0 dom=<html><head></head><body><h1>cf</h1></body></html>\r\n err=[9012:28668:0911/110237.990:ERROR:chrome\\browser\\importer\\edge_china_browsers\\edge_qqbrowser_importer_utils_win.cc:165] QQBrowser user data path not found.",
+        "note": "headless 可用（渲染判定可执行）"
+      }
+    ],
+    "llm": {
+      "endpoint": "https://api.deepseek.com/v1/chat/completions",
+      "model": "deepseek-flash",
+      "reachable": true,
+      "httpStatus": 200,
+      "evidence": "POST https://api.deepseek.com/v1/chat/completions → 200 {\"id\":\"d35640f7-eb05-4d95-b340-995151ea5707\",\"object\":\"chat.completion\",\"created\":1789095761,\"model\":\"deepseek-flash\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"\",\"reasoning_content\":\"The user just said\"},\"logprobs\":null,\"finish_reason\":\"length\"}],\"usage\":{\"prompt_tokens\":31,\"com"
+    },
+    "limitations": [
+      {
+        "id": "docker-unavailable",
+        "missing": "Docker daemon",
+        "impact": "旧系统的 run 级验证（finalGate → verifyRun）必然早退为 skipped_unverified：不会构建、不会启动、不会打接口、不会渲染。因此『交付是否真的成立』只能由本 harness 用宿主 MySQL 自行实测，或记为 blocked。",
+        "evidence": "failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine; check if the path is correct and if the daemon is running: open //./pipe/dockerDesktopLinuxEngine: The system cannot find the file specified."
+      },
+      {
+        "id": "global-mvn-missing",
+        "missing": "全局 mvn",
+        "impact": "生成项目的 Maven 构建只能用项目自带 mvnw（本 harness 会把 backed-CrewForge/mvnw 作为回退），无 mvnw 的项目判 blocked。",
+        "evidence": "mvn -v 未通过"
+      }
+    ]
+  },
+  "scenarios": [
+    {
+      "schemaVersion": "crewforge.eval.result/1",
+      "scenarioId": "s1-crud-min",
+      "title": "最小 CRUD：便签管理",
+      "kind": "crud",
+      "expectFailure": false,
+      "ranAt": "2026-09-11T02:46:37.941Z",
+      "inputFile": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\scenarios\\s1-crud-min\\input.md",
+      "expectedFile": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\scenarios\\s1-crud-min\\expected.json",
+      "pipeline": {
+        "projectId": 10,
+        "command": "C:\\Users\\kangzong\\.bvm\\runtime\\current\\bin\\bun.exe run projectRunner.ts 10（人工终止）",
+        "cwd": "F:\\code\\project\\CrewForge\\agents-CrewForge",
+        "startedAt": "2026-09-11T02:18:23.118Z",
+        "finishedAt": "2026-09-11T02:39:50.883Z",
+        "durationMs": 1287765,
+        "exitCode": null,
+        "timedOut": false,
+        "termination": "manual",
+        "stdoutFile": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s1-crud-min\\logs\\pipeline.stdout.log",
+        "stderrFile": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s1-crud-min\\logs\\pipeline.stderr.log",
+        "stdoutBytes": 30159,
+        "stdoutTail": "[frontend-core] T1-F 进入设计工位\n[backend-core] T2 backend/src/main/java/com/crewforge/note/entity/Note.java 稳定前缀 5d06c9a0（5318 字符）\n[backend-core] T2 backend/src/main/java/com/crewforge/note/dto/NoteCreateDTO.java 稳定前缀 5d06c9a0（5318 字符）\n[fileTools] backend/src/main/java/com/crewforge/note/dto/NoteCreateDTO.java 工具 grep 红：没搜到「jakarta.validation」（先 ls 看树确认真实路径，不要凭猜测引用别的文件）\n[backend-core] T2 backend/src/main/java/com/crewforge/note/vo/NoteVO.java 稳定前缀 5d06c9a0（5318 字符）\n[frontend-core] T1-F 设计稿 32015ms\n[frontend-core] T1-F 进入实现工位\n[frontend-core] T1-F frontend/src/views/NoteList.vue 栈=spring-vue·Element Plus 验证=true 稳定前缀 4610aef1（5892 字符）\n已写入 F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s1-crud-min\\artifacts\\p10\\backend\\src\\main\\java\\com\\crewforge\\note\\controller\\NoteController.java\n已写入 F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s1-crud-min\\artifacts\\p10\\backend\\src\\main\\java\\com\\crewforge\\note\\service\\NoteService.java\n已写入 F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s1-crud-min\\artifacts\\p10\\backend\\src\\main\\java\\com\\crewforge\\note\\service\\impl\\NoteServiceImpl.java\n已写入 F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s1-crud-min\\artifacts\\p10\\backend\\src\\main\\java\\com\\crewforge\\note\\mapper\\NoteMapper.java\n已写入 F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s1-crud-min\\artifacts\\p10\\backend\\src\\main\\java\\com\\crewforge\\note\\entity\\Note.java\n已写入 F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s1-crud-min\\artifacts\\p10\\backend\\src\\main\\java\\com\\crewforge\\note\\dto\\NoteCreateDTO.java\n已写入 F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s1-crud-min\\artifacts\\p10\\backend\\src\\main\\java\\com\\crewforge\\note\\vo\\NoteVO.java\n[backend-core] T2 执行式验证通过：编译通过（5988ms）\n[backend-core] T2 后端实现已写入 workspace/\n[merger] 发送到 test-core：T2 配对完成（集成预检通过）\n[test-core] 收到接口对：T2+T2-F POST /api/notes\n[test-core] T2+T2-F POST /api/notes 机械三查拦截，不烧 LLM 直接判负\n[test-core]：T2+T2-F POST /api/notes 未通过（前端错，第 4 次判定）\n   清单红项：机械-渲染审 —— 渲染白屏：DOM 元素 8 个/可见文本 4 字\n   前端：渲染白屏/空 DOM（8 元素/4 字），截图 F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s1-crud-min\\artifacts\\p10\\_shots\\1-T2.png\n[frontend-core] T2-F 进入设计工位\n[frontend-core] T1-F frontend/src/utils/request.ts 栈=spring-vue·Element Plus 验证=true 稳定前缀 4610aef1（5892 字符）",
+        "stderrTail": "edge_china_browsers\\edge_qqbrowser_importer_utils_win.cc:165] QQBrowser user data path not found.\n5292 bytes written to file F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s1-crud-min\\artifacts\\p10\\_shots\\1-T1.png\n[21224:15988:0911/103509.061:ERROR:chrome\\browser\\importer\\edge_china_browsers\\edge_qqbrowser_importer_utils_win.cc:165] QQBrowser user data path not found.\n[3564:19000:0911/103510.083:ERROR:chrome\\browser\\importer\\edge_china_browsers\\edge_qqbrowser_importer_utils_win.cc:165] QQBrowser user data path not found.\n5292 bytes written to file F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s1-crud-min\\artifacts\\p10\\_shots\\1-T2.png\n[16528:464:0911/103619.387:ERROR:chrome\\browser\\importer\\edge_china_browsers\\edge_qqbrowser_importer_utils_win.cc:165] QQBrowser user data path not found.\n[9328:4972:0911/103620.426:ERROR:chrome\\browser\\importer\\edge_china_browsers\\edge_qqbrowser_importer_utils_win.cc:165] QQBrowser user data path not found.\n5292 bytes written to file F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s1-crud-min\\artifacts\\p10\\_shots\\1-T1.png\n[16424:2904:0911/103754.093:ERROR:chrome\\browser\\importer\\edge_china_browsers\\edge_qqbrowser_importer_utils_win.cc:165] QQBrowser user data path not found.\n[4548:25708:0911/103755.227:ERROR:chrome\\browser\\importer\\edge_china_browsers\\edge_qqbrowser_importer_utils_win.cc:165] QQBrowser user data path not found.\n5292 bytes written to file F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s1-crud-min\\artifacts\\p10\\_shots\\1-T1.png\n[12464:15432:0911/103843.464:ERROR:chrome\\browser\\importer\\edge_china_browsers\\edge_qqbrowser_importer_utils_win.cc:165] QQBrowser user data path not found.\n[1400:18812:0911/103844.545:ERROR:chrome\\browser\\importer\\edge_china_browsers\\edge_qqbrowser_importer_utils_win.cc:165] QQBrowser user data path not found.\n5292 bytes written to file F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s1-crud-min\\artifacts\\p10\\_shots\\1-T2.png",
+        "retries": null,
+        "tokenUsage": {
+          "available": false,
+          "note": "旧系统运行路径未统计 token；本轮为人工终止，记录到此为止——不编造数字",
+          "promptTokens": null,
+          "completionTokens": null,
+          "totalTokens": null
+        },
+        "dbFinalStatus": "executing",
+        "dbTasks": {
+          "total": 4,
+          "done": 0,
+          "failed": 0,
+          "todo": 0,
+          "running": 0
+        },
+        "verifyReportFile": null,
+        "verifyOutcome": null,
+        "verifySummary": null
+      },
+      "artifacts": {
+        "dir": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s1-crud-min\\artifacts\\p10",
+        "exists": true,
+        "fileCount": 58,
+        "byExt": {
+          ".json": 4,
+          ".xml": 1,
+          ".java": 11,
+          ".yml": 2,
+          ".class": 11,
+          ".lst": 2,
+          ".md": 1,
+          ".sql": 1,
+          ".development": 1,
+          ".lock": 1,
+          ".css": 5,
+          ".js": 4,
+          ".html": 2,
+          ".vue": 4,
+          ".ts": 4,
+          ".png": 2,
+          ".log": 2
+        },
+        "files": [
+          ".architect-state.json",
+          "backend/pom.xml",
+          "backend/src/main/java/com/crewforge/note/common/Result.java",
+          "backend/src/main/java/com/crewforge/note/config/MyBatisPlusConfig.java",
+          "backend/src/main/java/com/crewforge/note/controller/NoteController.java",
+          "backend/src/main/java/com/crewforge/note/dto/NoteCreateDTO.java",
+          "backend/src/main/java/com/crewforge/note/entity/Note.java",
+          "backend/src/main/java/com/crewforge/note/exception/GlobalExceptionHandler.java",
+          "backend/src/main/java/com/crewforge/note/mapper/NoteMapper.java",
+          "backend/src/main/java/com/crewforge/note/NoteApplication.java",
+          "backend/src/main/java/com/crewforge/note/service/impl/NoteServiceImpl.java",
+          "backend/src/main/java/com/crewforge/note/service/NoteService.java",
+          "backend/src/main/java/com/crewforge/note/vo/NoteVO.java",
+          "backend/src/main/resources/application.yml",
+          "backend/target/classes/application.yml",
+          "backend/target/classes/com/crewforge/note/common/Result.class",
+          "backend/target/classes/com/crewforge/note/config/MyBatisPlusConfig.class",
+          "backend/target/classes/com/crewforge/note/controller/NoteController.class",
+          "backend/target/classes/com/crewforge/note/dto/NoteCreateDTO.class",
+          "backend/target/classes/com/crewforge/note/entity/Note.class",
+          "backend/target/classes/com/crewforge/note/exception/GlobalExceptionHandler.class",
+          "backend/target/classes/com/crewforge/note/mapper/NoteMapper.class",
+          "backend/target/classes/com/crewforge/note/NoteApplication.class",
+          "backend/target/classes/com/crewforge/note/service/impl/NoteServiceImpl.class",
+          "backend/target/classes/com/crewforge/note/service/NoteService.class",
+          "backend/target/classes/com/crewforge/note/vo/NoteVO.class",
+          "backend/target/maven-status/maven-compiler-plugin/compile/default-compile/createdFiles.lst",
+          "backend/target/maven-status/maven-compiler-plugin/compile/default-compile/inputFiles.lst",
+          "CONTRACTS.md",
+          "ddl.sql",
+          "frontend/.env.development",
+          "frontend/bun.lock",
+          "frontend/dist/assets/index-BnnSUxOl.css",
+          "frontend/dist/assets/index-NRFduOmN.js",
+          "frontend/dist/assets/NoteCreate-DAqqQ3cZ.css",
+          "frontend/dist/assets/NoteCreate-DWvHnKJH.js",
+          "frontend/dist/assets/NoteList-Dp-o8Jtk.css",
+          "frontend/dist/assets/NoteList-DVw6ZRyr.js",
+          "frontend/dist/assets/request-CUz5MRsJ.js",
+          "frontend/dist/index.html",
+          "frontend/index.html",
+          "frontend/package.json",
+          "frontend/src/App.vue",
+          "frontend/src/components/NoteItem.vue",
+          "frontend/src/main.ts",
+          "frontend/src/router/index.ts",
+          "frontend/src/style.css",
+          "frontend/src/styles/index.css",
+          "frontend/src/utils/request.ts",
+          "frontend/src/views/NoteCreate.vue",
+          "frontend/src/views/NoteList.vue",
+          "frontend/tsconfig.json",
+          "frontend/vite.config.ts",
+          "_shots/1-T1.png",
+          "_shots/1-T2.png",
+          "_verify/acceptance-p1.json",
+          "_verify/bun.exe.log",
+          "_verify/maven-compile.log"
+        ],
+        "topLevelDirs": [
+          "_shots",
+          "_verify",
+          "backend",
+          "frontend"
+        ]
+      },
+      "checks": [
+        {
+          "id": "frontend.build",
+          "kind": "build",
+          "status": "pass",
+          "command": "npm run build",
+          "cwd": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s1-crud-min\\artifacts\\p10\\frontend",
+          "exitCode": 0,
+          "httpStatus": null,
+          "expectStatus": null,
+          "jsonAssertions": [],
+          "startedAt": "2026-09-11T02:46:14.022Z",
+          "finishedAt": "2026-09-11T02:46:20.593Z",
+          "durationMs": 6570,
+          "logFile": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s1-crud-min\\logs\\frontend.build-npm_run_build.stdout.log",
+          "detail": "构建成功（exit=0）",
+          "evidence": "$ npm run build\nexit=0 6569ms\n--- stdout tail ---\n> vite build\nvite v5.4.21 building for production...\ntransforming...\n✓ 1671 modules transformed.\nrendering chunks...\ncomputing gzip size...\ndist/index.html                          0.44 kB │ gzip:   0.31 kB\ndist/assets/NoteCreate-DAqqQ3cZ.css      0.58 kB │ gzip:   0.29 kB\ndist/assets/NoteList-Dp-o8Jtk.css        1.30 kB │ gzip:   0.51 kB\ndist/assets/index-BnnSUxOl.css         361.36 kB │ gzip:  48.27 kB\ndist/assets/NoteCreate-DWvHnKJH.js       1.54 kB │ gzip:   0.96 kB\ndist/assets/NoteList-DVw6ZRyr.js         2.92 kB │ gzip:   1.46 kB\ndist/assets/request-CUz5MRsJ.js         51.96 kB │ gzip:  19.77 kB\ndist/assets/index-NRFduOmN.js        1,048.95 kB │ gzip: 343.81 kB\n✓ built in 5.53s\n--- stderr tail ---\n(!) Some chunks are larger than 500 kB after minification. Consider:\n- Using dynamic import() to code-split the application\n- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks\n- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit."
+        },
+        {
+          "id": "backend.build",
+          "kind": "build",
+          "status": "pass",
+          "command": "\"C:\\Users\\kangzong\\.m2\\wrapper\\dists\\apache-maven-3.9.16\\56ba1f9f\\bin\\mvn.cmd\" -B -DskipTests -Dfile.encoding=UTF-8 package",
+          "cwd": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s1-crud-min\\artifacts\\p10\\backend",
+          "exitCode": 0,
+          "httpStatus": null,
+          "expectStatus": null,
+          "jsonAssertions": [],
+          "startedAt": "2026-09-11T02:46:20.593Z",
+          "finishedAt": "2026-09-11T02:46:25.532Z",
+          "durationMs": 4936,
+          "logFile": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s1-crud-min\\logs\\backend.build-mvn_package.stdout.log",
+          "detail": "构建成功（exit=0）",
+          "evidence": "Maven 来源：~/.m2/wrapper/dists 里 wrapper 下载的 Maven 发行版 → C:\\Users\\kangzong\\.m2\\wrapper\\dists\\apache-maven-3.9.16\\56ba1f9f\\bin\\mvn.cmd\n\n$ \"C:\\Users\\kangzong\\.m2\\wrapper\\dists\\apache-maven-3.9.16\\56ba1f9f\\bin\\mvn.cmd\" -B -DskipTests -Dfile.encoding=UTF-8 package\nexit=0 4936ms\n--- stdout tail ---\n[INFO] --- surefire:3.1.2:test (default-test) @ note-backend ---\n[INFO] Tests are skipped.\n[INFO] \n[INFO] --- jar:3.3.0:jar (default-jar) @ note-backend ---\n[INFO] Building jar: F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s1-crud-min\\artifacts\\p10\\backend\\target\\note-backend-0.0.1-SNAPSHOT.jar\n[INFO] \n[INFO] --- spring-boot:3.2.5:repackage (repackage) @ note-backend ---\n[INFO] Replacing main artifact F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s1-crud-min\\artifacts\\p10\\backend\\target\\note-backend-0.0.1-SNAPSHOT.jar with repackaged archive, adding nested dependencies in BOOT-INF/.\n[INFO] The original artifact has been renamed to F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s1-crud-min\\artifacts\\p10\\backend\\target\\note-backend-0.0.1-SNAPSHOT.jar.original\n[INFO] ------------------------------------------------------------------------\n[INFO] BUILD SUCCESS\n[INFO] ------------------------------------------------------------------------\n[INFO] Total time:  3.064 s\n[INFO] Finished at: 2026-09-11T10:46:25+08:00\n[INFO] ------------------------------------------------------------------------\n--- stderr tail ---\n"
+        },
+        {
+          "id": "backend.boot",
+          "kind": "boot",
+          "status": "pass",
+          "command": "java -jar note-backend-0.0.1-SNAPSHOT.jar (SERVER_PORT=29817, SPRING_DATASOURCE_URL=.../cf_eval_s1_crud_min)",
+          "cwd": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s1-crud-min\\artifacts\\p10\\backend",
+          "exitCode": 0,
+          "httpStatus": 200,
+          "expectStatus": null,
+          "jsonAssertions": [],
+          "startedAt": "2026-09-11T02:46:25.534Z",
+          "finishedAt": "2026-09-11T02:46:35.633Z",
+          "durationMs": 10099,
+          "logFile": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s1-crud-min\\logs\\backend.boot.app.log",
+          "detail": "应用已启动并响应 HTTP（端口 29817，状态 200）",
+          "evidence": "health probe: GET http://127.0.0.1:29817/api/notes → 200（尝试 4 次，6870ms）\nlastError=n/a\n--- app.log tail ---\nect.Method.invoke(Method.java:569) ~[na:na]\n\tat org.apache.ibatis.logging.jdbc.PreparedStatementLogger.invoke(PreparedStatementLogger.java:58) ~[mybatis-3.5.16.jar!/:3.5.16]\n\tat jdk.proxy3/jdk.proxy3.$Proxy82.execute(Unknown Source) ~[na:na]\n\tat org.apache.ibatis.executor.statement.PreparedStatementHandler.query(PreparedStatementHandler.java:65) ~[mybatis-3.5.16.jar!/:3.5.16]\n\tat org.apache.ibatis.executor.statement.RoutingStatementHandler.query(RoutingStatementHandler.java:80) ~[mybatis-3.5.16.jar!/:3.5.16]\n\tat org.apache.ibatis.executor.SimpleExecutor.doQuery(SimpleExecutor.java:65) ~[mybatis-3.5.16.jar!/:3.5.16]\n\tat org.apache.ibatis.executor.BaseExecutor.queryFromDatabase(BaseExecutor.java:336) ~[mybatis-3.5.16.jar!/:3.5.16]\n\tat org.apache.ibatis.executor.BaseExecutor.query(BaseExecutor.java:158) ~[mybatis-3.5.16.jar!/:3.5.16]\n\tat org.apache.ibatis.executor.CachingExecutor.query(CachingExecutor.java:110) ~[mybatis-3.5.16.jar!/:3.5.16]\n\tat org.apache.ibatis.executor.CachingExecutor.query(CachingExecutor.java:90) ~[mybatis-3.5.16.jar!/:3.5.16]\n\tat org.apache.ibatis.session.defaults.DefaultSqlSession.selectList(DefaultSqlSession.java:154) ~[mybatis-3.5.16.jar!/:3.5.16]\n\tat org.apache.ibatis.session.defaults.DefaultSqlSession.selectList(DefaultSqlSession.java:147) ~[mybatis-3.5.16.jar!/:3.5.16]\n\tat org.apache.ibatis.session.defaults.DefaultSqlSession.selectList(DefaultSqlSession.java:142) ~[mybatis-3.5.16.jar!/:3.5.16]\n\tat java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Native Method) ~[na:na]\n\tat java.base/jdk.internal.reflect.NativeMethodAccessorImpl.invoke(NativeMethodAccessorImpl.java:77) ~[na:na]\n\tat java.base/jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(DelegatingMethodAccessorImpl.java:43) ~[na:na]\n\tat java.base/java.lang.reflect.Method.invoke(Method.java:569) ~[na:na]\n\tat org.mybatis.spring.SqlSessionTemplate$SqlSessionInterceptor.invoke(SqlSessionTemplate.java:425) ~[mybatis-spring-3.0.3.jar!/:3.0.3]\n\t... 67 common frames omitted"
+        },
+        {
+          "id": "note.create",
+          "kind": "http",
+          "status": "fail",
+          "command": "POST http://127.0.0.1:29817/api/notes body={\"title\":\"baseline-note\",\"content\":\"phase0\"}",
+          "cwd": null,
+          "exitCode": null,
+          "httpStatus": 200,
+          "expectStatus": 200,
+          "jsonAssertions": [
+            {
+              "path": "code",
+              "op": "equals",
+              "ok": false,
+              "detail": "code：期望 200，实际 0"
+            },
+            {
+              "path": "data.id",
+              "op": "type",
+              "ok": false,
+              "detail": "data.id：字段不存在"
+            }
+          ],
+          "startedAt": "2026-09-11T02:46:35.635Z",
+          "finishedAt": "2026-09-11T02:46:35.682Z",
+          "durationMs": 47,
+          "logFile": null,
+          "detail": "字段断言失败：code code：期望 200，实际 0；data.id data.id：字段不存在",
+          "evidence": "HTTP 200\nbody(head 800)={\"code\":0,\"msg\":\"\\r\\n### Error updating database.  Cause: java.sql.SQLSyntaxErrorException: Table 'cf_eval_s1_crud_min.note' doesn't exist\\r\\n### The error may exist in com/crewforge/note/mapper/NoteMapper.java (best guess)\\r\\n### The error may involve com.crewforge.note.mapper.NoteMapper.insert-Inline\\r\\n### The error occurred while setting parameters\\r\\n### SQL: INSERT INTO note  ( title, content, created_at )  VALUES (  ?, ?, ?  )\\r\\n### Cause: java.sql.SQLSyntaxErrorException: Table 'cf_eval_s1_crud_min.note' doesn't exist\\n; bad SQL grammar []\",\"data\":null,\"success\":false}\n字段断言：code=code：期望 200，实际 0；data.id=data.id：字段不存在"
+        },
+        {
+          "id": "note.list",
+          "kind": "http",
+          "status": "fail",
+          "command": "GET http://127.0.0.1:29817/api/notes",
+          "cwd": null,
+          "exitCode": null,
+          "httpStatus": 200,
+          "expectStatus": 200,
+          "jsonAssertions": [
+            {
+              "path": "code",
+              "op": "equals",
+              "ok": false,
+              "detail": "code：期望 200，实际 0"
+            },
+            {
+              "path": "data",
+              "op": "type",
+              "ok": false,
+              "detail": "data：期望类型 array，实际 null"
+            },
+            {
+              "path": "data[0].title",
+              "op": "exists",
+              "ok": false,
+              "detail": "data[0].title：字段不存在"
+            }
+          ],
+          "startedAt": "2026-09-11T02:46:35.682Z",
+          "finishedAt": "2026-09-11T02:46:35.688Z",
+          "durationMs": 6,
+          "logFile": null,
+          "detail": "字段断言失败：code code：期望 200，实际 0；data data：期望类型 array，实际 null；data[0].title data[0].title：字段不存在",
+          "evidence": "HTTP 200\nbody(head 800)={\"code\":0,\"msg\":\"\\r\\n### Error querying database.  Cause: java.sql.SQLSyntaxErrorException: Table 'cf_eval_s1_crud_min.note' doesn't exist\\r\\n### The error may exist in com/crewforge/note/mapper/NoteMapper.java (best guess)\\r\\n### The error may involve defaultParameterMap\\r\\n### The error occurred while setting parameters\\r\\n### SQL: SELECT  id,title,content,created_at  FROM note           ORDER BY created_at DESC,id DESC\\r\\n### Cause: java.sql.SQLSyntaxErrorException: Table 'cf_eval_s1_crud_min.note' doesn't exist\\n; bad SQL grammar []\",\"data\":null,\"success\":false}\n字段断言：code=code：期望 200，实际 0；data=data：期望类型 array，实际 null；data[0].title=data[0].title：字段不存在"
+        },
+        {
+          "id": "note.get",
+          "kind": "http",
+          "status": "fail",
+          "command": "GET http://127.0.0.1:29817/api/notes/{noteId}",
+          "cwd": null,
+          "exitCode": null,
+          "httpStatus": 200,
+          "expectStatus": 200,
+          "jsonAssertions": [
+            {
+              "path": "data.title",
+              "op": "type",
+              "ok": false,
+              "detail": "data.title：字段不存在"
+            }
+          ],
+          "startedAt": "2026-09-11T02:46:35.688Z",
+          "finishedAt": "2026-09-11T02:46:35.699Z",
+          "durationMs": 11,
+          "logFile": null,
+          "detail": "字段断言失败：data.title data.title：字段不存在",
+          "evidence": "HTTP 200\nbody(head 800)={\"code\":0,\"msg\":\"系统异常，请稍后重试\",\"data\":null,\"success\":false}\n字段断言：data.title=data.title：字段不存在"
+        },
+        {
+          "id": "note.update",
+          "kind": "http",
+          "status": "fail",
+          "command": "PUT http://127.0.0.1:29817/api/notes/{noteId} body={\"title\":\"baseline-note-updated\",\"content\":\"phase0\"}",
+          "cwd": null,
+          "exitCode": null,
+          "httpStatus": 200,
+          "expectStatus": 200,
+          "jsonAssertions": [
+            {
+              "path": "code",
+              "op": "equals",
+              "ok": false,
+              "detail": "code：期望 200，实际 0"
+            }
+          ],
+          "startedAt": "2026-09-11T02:46:35.699Z",
+          "finishedAt": "2026-09-11T02:46:35.703Z",
+          "durationMs": 4,
+          "logFile": null,
+          "detail": "字段断言失败：code code：期望 200，实际 0",
+          "evidence": "HTTP 200\nbody(head 800)={\"code\":0,\"msg\":\"系统异常，请稍后重试\",\"data\":null,\"success\":false}\n字段断言：code=code：期望 200，实际 0"
+        },
+        {
+          "id": "note.delete",
+          "kind": "http",
+          "status": "fail",
+          "command": "DELETE http://127.0.0.1:29817/api/notes/{noteId}",
+          "cwd": null,
+          "exitCode": null,
+          "httpStatus": 200,
+          "expectStatus": 200,
+          "jsonAssertions": [
+            {
+              "path": "code",
+              "op": "equals",
+              "ok": false,
+              "detail": "code：期望 200，实际 0"
+            }
+          ],
+          "startedAt": "2026-09-11T02:46:35.703Z",
+          "finishedAt": "2026-09-11T02:46:35.707Z",
+          "durationMs": 4,
+          "logFile": null,
+          "detail": "字段断言失败：code code：期望 200，实际 0",
+          "evidence": "HTTP 200\nbody(head 800)={\"code\":0,\"msg\":\"系统异常，请稍后重试\",\"data\":null,\"success\":false}\n字段断言：code=code：期望 200，实际 0"
+        },
+        {
+          "id": "note.getAfterDelete",
+          "kind": "http",
+          "status": "fail",
+          "command": "GET http://127.0.0.1:29817/api/notes/{noteId}",
+          "cwd": null,
+          "exitCode": null,
+          "httpStatus": 200,
+          "expectStatus": 404,
+          "jsonAssertions": [],
+          "startedAt": "2026-09-11T02:46:35.707Z",
+          "finishedAt": "2026-09-11T02:46:35.711Z",
+          "durationMs": 4,
+          "logFile": null,
+          "detail": "期望状态 404，实际 200",
+          "evidence": "HTTP 200\nbody(head 800)={\"code\":0,\"msg\":\"系统异常，请稍后重试\",\"data\":null,\"success\":false}"
+        },
+        {
+          "id": "page.home",
+          "kind": "render",
+          "status": "fail",
+          "command": "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe --headless=new --disable-gpu --no-sandbox --disable-dev-shm-usage --user-data-dir=C:\\Users\\kangzong\\AppData\\Local\\Temp\\cf-eval-edge-1789094795715 --virtual-time-budget=6000 --dump-dom http://127.0.0.1:59532/",
+          "cwd": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s1-crud-min\\artifacts\\p10\\frontend\\dist",
+          "exitCode": 0,
+          "httpStatus": null,
+          "expectStatus": null,
+          "jsonAssertions": [
+            {
+              "path": "body.textLength",
+              "op": "gte",
+              "ok": false,
+              "detail": "body 可见文本 0 字（阈值 10）"
+            },
+            {
+              "path": "text.contains(便签)",
+              "op": "contains",
+              "ok": false,
+              "detail": "未命中（文本前 200 字：）"
+            },
+            {
+              "path": "html.contains(<input)",
+              "op": "contains",
+              "ok": false,
+              "detail": "未命中"
+            }
+          ],
+          "startedAt": "2026-09-11T02:46:35.712Z",
+          "finishedAt": "2026-09-11T02:46:37.695Z",
+          "durationMs": 1980,
+          "logFile": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s1-crud-min\\logs\\page.home-edge.stdout.log",
+          "detail": "页面渲染未达标：body.textLength；text.contains(便签)；html.contains(<input)",
+          "evidence": "edge exit=0\nurl=http://127.0.0.1:59532/\nDOM(head 800)=<!DOCTYPE html>\r\n<html lang=\"zh-CN\"><head>\r\n    <meta charset=\"UTF-8\">\r\n    <link rel=\"icon\" href=\"/favicon.ico\">\r\n    <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\r\n    <title>便签应用</title>\r\n    <script type=\"module\" crossorigin=\"\" src=\"/assets/index-NRFduOmN.js\"></script>\r\n    <link rel=\"stylesheet\" crossorigin=\"\" href=\"/assets/index-BnnSUxOl.css\">\r\n  </head>\r\n  <body>\r\n    <div id=\"app\" data-v-app=\"\"><!----></div>\r\n  \r\n\r\n</body></html>\r\n\n文本(head 400)=\n--- edge stderr tail ---\n[15988:11888:0911/104636.260:ERROR:chrome\\browser\\importer\\edge_china_browsers\\edge_qqbrowser_importer_utils_win.cc:165] QQBrowser user data path not found."
+        }
+      ],
+      "verdict": {
+        "overall": "fail",
+        "passed": [
+          "frontend.build",
+          "backend.build",
+          "backend.boot"
+        ],
+        "failed": [
+          "note.create",
+          "note.list",
+          "note.get",
+          "note.update",
+          "note.delete",
+          "note.getAfterDelete",
+          "page.home"
+        ],
+        "blocked": [],
+        "skipped": [],
+        "systemClaimedStatus": "executing",
+        "systemClaimedVerified": false,
+        "fakePass": false,
+        "doneButUnverified": false,
+        "reason": "真实检查 通过 3 / 失败 7 / 无法判定 0；旧系统自报：status=executing，run 级验证=无报告"
+      },
+      "derivedFromLogs": {
+        "derivedFrom": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s1-crud-min\\logs\\pipeline.stdout.log",
+        "llmRetryAttempts": 2,
+        "llmRetryExhausted": 0,
+        "revisionMentions": 0,
+        "failureLines": 3,
+        "note": "以上计数由日志正则计数得到——只作观测，不参与任何 pass/fail 判定；旧系统自身不产出 token/重试计数"
+      }
+    },
+    {
+      "schemaVersion": "crewforge.eval.result/1",
+      "scenarioId": "s2-auth",
+      "title": "登录与鉴权：JWT 闭环",
+      "kind": "auth",
+      "expectFailure": false,
+      "ranAt": "2026-09-11T02:59:14.266Z",
+      "inputFile": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\scenarios\\s2-auth\\input.md",
+      "expectedFile": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\scenarios\\s2-auth\\expected.json",
+      "pipeline": {
+        "projectId": 11,
+        "command": "C:\\Users\\kangzong\\.bvm\\runtime\\current\\bin\\bun.exe run projectRunner.ts 11",
+        "cwd": "F:\\code\\project\\CrewForge\\agents-CrewForge",
+        "startedAt": "2026-09-11T02:39:59.706Z",
+        "finishedAt": "2026-09-11T02:41:01.484Z",
+        "durationMs": 61788,
+        "exitCode": 1,
+        "timedOut": false,
+        "termination": null,
+        "stdoutFile": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s2-auth\\logs\\pipeline.stdout.log",
+        "stderrFile": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s2-auth\\logs\\pipeline.stderr.log",
+        "stdoutBytes": 1745,
+        "stdoutTail": "[runner] 启动项目 11...\n[manager] 拼接编译图：pm → dispose → planner\n[architect] 拼接编译拆分图：architectPlan → architectStack → confirmGate → base → bootstrap → dispatch\n[merger] 消息监听已启动\n[maintainer] 消息监听已启动\n[architect] 消息监听已启动\n[backend-core] 消息监听已启动\n[frontend-core] 消息监听已启动\n[test-core] 消息监听已启动\n[runner] 自动推进模式（confirmMode=0 + AUTO_CONFIRM），无需人工确认\n[PM] 我读完了这份冻结需求：这是一个登录鉴权闭环——用内置账号 admin/123456 登录换取 JWT，再凭这个 token 访问受保护接口，前端未登录访问首页会跳到登录页。\n规格本身已经写得很死，我梳理出的功能清单是：内置管理员账号初始化、账号密码登录并签发 token、受保护接口的 token 校验、前端登录页与受保护首页、以及前后端的构建启动配置。这些我按需求原文待确认。\n只剩界面层面两点想跟你敲定：\n1. 风格愿望：用一句话说清整体色调和感觉就行（比如\"深蓝科技感\"\"白色简洁大方\"）；如果你没有偏好，也请明说，我照实记录。\n2. 视觉红线：有没有明确不想要的视觉元素（比如不要深色大图、不要卡通感）？没有的话直接说没有，我就跳过。\n页面范围我按需求里写的两个页面走：登录页 /login 和登录后可见的首页 /，如果你还有别的页面要加，一并告诉我。\n[runner] 全绿灯模式：自动定稿\n[runner] PM 定稿，3 个阶段\n[runner] → 架构师：阶段 1「工程基础与管理员账号初始化」\n[architect] 拆分阶段 1「工程基础与管理员账号初始化」",
+        "stderrTail": "iness\\\":\\\"内置管理员账号初始化\\\",\\\"description\\\":\\\"角色：后端服务与系统运维人员。触发条件：后端服务启动、数据源可用后、对外提供服务前。主要步骤：连接数据库并检查用户表中是否存在 username=admin 的记录；若不存在，则对固定密码 123456 做 BCrypt 哈希并写入一条 username=admin 的管理员记录；若已存在该记录，则保留数据库中原记录与原密码，不覆盖也不重复插入。状态变化：首次启动时用户表由无 admin 记录变为存在 1 条 admin 记录；重复启动时用户表保持 admin 记录数量为 1、密码哈希值不变，体现幂等性。异常分支：数据库不可用时启动失败或记录明确错误；用户表不存在时初始化失败并给出提示；并发启动时不得产生重复 admin 账号。结果：服务对外可用时系统中始终存在且仅存在一条可使用 admin/123456 登录的管理员记录。\\\",\\\"dataNeeds\\\":[\\\"用户实体：用户名（username，需唯一约束用于幂等与并发保护）\\\",\\\"用户实体：密码（password，存储 BCrypt 哈希）\\\"],\\\"points\\\":[\\\"服务启动、数据源就绪后，在对外提供服务前触发管理员初始化\\\",\\\"查询用户表中是否存在 username=admin 的记录\\\",\\\"若不存在且用户表可正常访问，则对固定密码 123456 做 BCrypt 哈希并插入一条 username=admin 的管理员记录\\\",\\\"若已存在 username=admin 的记录，则保持原记录与原密码不变，不覆盖、不重复插入\\\",\\\"处理并发启动场景，确保不会产生重复 admin 账号\\\",\\\"处理数据库不可用异常，启动失败或记录明确错误信息\\\",\\\"处理用户表不存在异常，初始化失败并给出明确提示\\\",\\\"验证：清空用户表后启动出现 admin 记录且 BCrypt 校验 123456 为 true；再次重启后 admin 记录数量仍为 1 且密码哈希不变；可凭 admin/123456 调用登录接口成功登录\\\"]}],\\\"risks\\\":[\\\"数据库环境变量未配置或配置错误会导致服务启动失败，需在部署前明确校验与给出可读错误提示\\\",\\\"管理员初始化在并发启动时可能产生重复账号，需依赖唯一约束或幂等处理保障\\\",\\\"用户表不存在时初始化失败应给出明确错误，避免陷入反复启动失败的循环\\\",\\\"本阶段仅规划了初始化与工程骨架，登录签发 JWT、token 校验、前端登录页与受保护首页属于同一 MVP 范围但未纳入本阶段功能输入，可能造成阶段目标与 MVP 范围不完全对齐\\\",\\\"前端与后端构建、启动端口等验收项依赖部署环境，需明确构建与运行环境的先决条件（如依赖安装网络、JDK 与 Node 版本）\\\"]},\\\"deliverables\\\":[\\\"前端可成功安装依赖并生成生产构建产物（如 dist/）\\\",\\\"后端可成功打包为可执行 jar\\\",\\\"通过环境变量配置数据库连接并可启动后端，监听 8080 端口\\\",\\\"未配置或错误配置数据库环境变量时启动失败并输出数据库连接相关错误\\\",\\\"后端启动时幂等写入内置管理员账号 username=admin、密码 BCrypt(123456)\\\",\\\"管理员初始化脚本/逻辑的幂等性与异常处理说明（数据库不可用、用户表不存在、并发启动）\\\"]}\",\n observation: undefined,\n  sendToLLM: false,\n lc_error_code: \"OUTPUT_PARSING_FAILURE\",\n pregelTaskId: \"91a5609d-1cb5-547a-9c46-7359e95e284d\",\n      at parse (F:\\code\\project\\CrewForge\\agents-CrewForge\\node_modules\\@langchain\\core\\dist\\output_parsers\\structured.js:77:10)\n      at <anonymous> (F:\\code\\project\\CrewForge\\agents-CrewForge\\node_modules\\@langchain\\core\\dist\\output_parsers\\base.js:43:67)\n      at _callWithConfig (F:\\code\\project\\CrewForge\\agents-CrewForge\\node_modules\\@langchain\\core\\dist\\runnables\\base.js:162:39)\nBun v1.3.14 (Windows x64)",
+        "retries": null,
+        "tokenUsage": {
+          "available": false,
+          "note": "旧系统运行路径未统计 token（sys_settings 无 token 计数、日志不含 usage 字段）——本字段如实置空，不编造 0",
+          "promptTokens": null,
+          "completionTokens": null,
+          "totalTokens": null
+        },
+        "dbFinalStatus": "planning",
+        "dbTasks": {
+          "total": 0,
+          "done": 0,
+          "failed": 0,
+          "todo": 0,
+          "running": 0
+        },
+        "verifyReportFile": null,
+        "verifyOutcome": null,
+        "verifySummary": null
+      },
+      "artifacts": {
+        "dir": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s2-auth\\artifacts\\p11",
+        "exists": false,
+        "fileCount": 0,
+        "byExt": {},
+        "files": [],
+        "topLevelDirs": []
+      },
+      "checks": [
+        {
+          "id": "frontend.build",
+          "kind": "build",
+          "status": "blocked",
+          "command": null,
+          "cwd": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s2-auth\\artifacts\\p11\\frontend",
+          "exitCode": null,
+          "httpStatus": null,
+          "expectStatus": null,
+          "jsonAssertions": [],
+          "startedAt": "2026-09-11T02:59:14.263Z",
+          "finishedAt": "2026-09-11T02:59:14.264Z",
+          "durationMs": 0,
+          "logFile": null,
+          "detail": "产物目录缺失：frontend/（旧系统没有产出这一层）",
+          "evidence": "checked path: F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s2-auth\\artifacts\\p11\\frontend"
+        },
+        {
+          "id": "backend.build",
+          "kind": "build",
+          "status": "blocked",
+          "command": null,
+          "cwd": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s2-auth\\artifacts\\p11\\backend",
+          "exitCode": null,
+          "httpStatus": null,
+          "expectStatus": null,
+          "jsonAssertions": [],
+          "startedAt": "2026-09-11T02:59:14.264Z",
+          "finishedAt": "2026-09-11T02:59:14.264Z",
+          "durationMs": 0,
+          "logFile": null,
+          "detail": "产物目录缺失：backend/（旧系统没有产出这一层）",
+          "evidence": "checked path: F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s2-auth\\artifacts\\p11\\backend"
+        },
+        {
+          "id": "backend.boot",
+          "kind": "boot",
+          "status": "blocked",
+          "command": null,
+          "cwd": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s2-auth\\artifacts\\p11\\backend",
+          "exitCode": null,
+          "httpStatus": null,
+          "expectStatus": null,
+          "jsonAssertions": [],
+          "startedAt": "2026-09-11T02:59:14.264Z",
+          "finishedAt": "2026-09-11T02:59:14.264Z",
+          "durationMs": 0,
+          "logFile": null,
+          "detail": "后端目录不存在：无法启动",
+          "evidence": "checked path: F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s2-auth\\artifacts\\p11\\backend"
+        },
+        {
+          "id": "auth.login.ok",
+          "kind": "http",
+          "status": "blocked",
+          "command": "POST /api/auth/login",
+          "cwd": null,
+          "exitCode": null,
+          "httpStatus": null,
+          "expectStatus": 200,
+          "jsonAssertions": [],
+          "startedAt": "2026-09-11T02:59:14.264Z",
+          "finishedAt": "2026-09-11T02:59:14.264Z",
+          "durationMs": 0,
+          "logFile": null,
+          "detail": "应用未启动：HTTP 断言无法执行（未验证 ≠ 通过）",
+          "evidence": "boot 检查未通过或产物缺失"
+        },
+        {
+          "id": "auth.me.withToken",
+          "kind": "http",
+          "status": "blocked",
+          "command": "GET /api/auth/me",
+          "cwd": null,
+          "exitCode": null,
+          "httpStatus": null,
+          "expectStatus": 200,
+          "jsonAssertions": [],
+          "startedAt": "2026-09-11T02:59:14.264Z",
+          "finishedAt": "2026-09-11T02:59:14.264Z",
+          "durationMs": 0,
+          "logFile": null,
+          "detail": "应用未启动：HTTP 断言无法执行（未验证 ≠ 通过）",
+          "evidence": "boot 检查未通过或产物缺失"
+        },
+        {
+          "id": "auth.me.withoutToken",
+          "kind": "http",
+          "status": "blocked",
+          "command": "GET /api/auth/me",
+          "cwd": null,
+          "exitCode": null,
+          "httpStatus": null,
+          "expectStatus": 401,
+          "jsonAssertions": [],
+          "startedAt": "2026-09-11T02:59:14.264Z",
+          "finishedAt": "2026-09-11T02:59:14.264Z",
+          "durationMs": 0,
+          "logFile": null,
+          "detail": "应用未启动：HTTP 断言无法执行（未验证 ≠ 通过）",
+          "evidence": "boot 检查未通过或产物缺失"
+        },
+        {
+          "id": "auth.login.badPassword",
+          "kind": "http",
+          "status": "blocked",
+          "command": "POST /api/auth/login",
+          "cwd": null,
+          "exitCode": null,
+          "httpStatus": null,
+          "expectStatus": 401,
+          "jsonAssertions": [],
+          "startedAt": "2026-09-11T02:59:14.264Z",
+          "finishedAt": "2026-09-11T02:59:14.264Z",
+          "durationMs": 0,
+          "logFile": null,
+          "detail": "应用未启动：HTTP 断言无法执行（未验证 ≠ 通过）",
+          "evidence": "boot 检查未通过或产物缺失"
+        },
+        {
+          "id": "page.login",
+          "kind": "render",
+          "status": "blocked",
+          "command": null,
+          "cwd": null,
+          "exitCode": null,
+          "httpStatus": null,
+          "expectStatus": null,
+          "jsonAssertions": [],
+          "startedAt": "2026-09-11T02:59:14.265Z",
+          "finishedAt": "2026-09-11T02:59:14.265Z",
+          "durationMs": 0,
+          "logFile": null,
+          "detail": "前端构建产物缺失（eval\\baseline\\runs\\s2-auth\\artifacts\\p11\\frontend\\dist\\index.html 不存在）：无法渲染",
+          "evidence": "checked: F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s2-auth\\artifacts\\p11\\frontend\\dist\\index.html"
+        }
+      ],
+      "verdict": {
+        "overall": "blocked",
+        "passed": [],
+        "failed": [],
+        "blocked": [
+          {
+            "id": "frontend.build",
+            "reason": "产物目录缺失：frontend/（旧系统没有产出这一层）"
+          },
+          {
+            "id": "backend.build",
+            "reason": "产物目录缺失：backend/（旧系统没有产出这一层）"
+          },
+          {
+            "id": "backend.boot",
+            "reason": "后端目录不存在：无法启动"
+          },
+          {
+            "id": "auth.login.ok",
+            "reason": "应用未启动：HTTP 断言无法执行（未验证 ≠ 通过）"
+          },
+          {
+            "id": "auth.me.withToken",
+            "reason": "应用未启动：HTTP 断言无法执行（未验证 ≠ 通过）"
+          },
+          {
+            "id": "auth.me.withoutToken",
+            "reason": "应用未启动：HTTP 断言无法执行（未验证 ≠ 通过）"
+          },
+          {
+            "id": "auth.login.badPassword",
+            "reason": "应用未启动：HTTP 断言无法执行（未验证 ≠ 通过）"
+          },
+          {
+            "id": "page.login",
+            "reason": "前端构建产物缺失（eval\\baseline\\runs\\s2-auth\\artifacts\\p11\\frontend\\dist\\index.html 不存在）：无法渲染"
+          }
+        ],
+        "skipped": [],
+        "systemClaimedStatus": "planning",
+        "systemClaimedVerified": false,
+        "fakePass": false,
+        "doneButUnverified": false,
+        "reason": "真实检查 通过 0 / 失败 0 / 无法判定 8；旧系统自报：status=planning，run 级验证=无报告"
+      },
+      "derivedFromLogs": {
+        "derivedFrom": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s2-auth\\logs\\pipeline.stdout.log",
+        "llmRetryAttempts": 0,
+        "llmRetryExhausted": 0,
+        "revisionMentions": 0,
+        "failureLines": 0,
+        "note": "以上计数由日志正则计数得到——只作观测，不参与任何 pass/fail 判定；旧系统自身不产出 token/重试计数"
+      }
+    },
+    {
+      "schemaVersion": "crewforge.eval.result/1",
+      "scenarioId": "s3-contract-mismatch",
+      "title": "用户列表：需求内部契约冲突（故意做错接口与字段）",
+      "kind": "contract-conflict",
+      "expectFailure": true,
+      "ranAt": "2026-09-11T03:02:24.194Z",
+      "inputFile": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\scenarios\\s3-contract-mismatch\\input.md",
+      "expectedFile": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\scenarios\\s3-contract-mismatch\\expected.json",
+      "pipeline": {
+        "projectId": 12,
+        "command": "C:\\Users\\kangzong\\.bvm\\runtime\\current\\bin\\bun.exe run projectRunner.ts 12",
+        "cwd": "F:\\code\\project\\CrewForge\\agents-CrewForge",
+        "startedAt": "2026-09-11T02:41:01.733Z",
+        "finishedAt": "2026-09-11T02:59:02.485Z",
+        "durationMs": 1080760,
+        "exitCode": 0,
+        "timedOut": false,
+        "termination": null,
+        "stdoutFile": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s3-contract-mismatch\\logs\\pipeline.stdout.log",
+        "stderrFile": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s3-contract-mismatch\\logs\\pipeline.stderr.log",
+        "stdoutBytes": 30412,
+        "stdoutTail": "已写入 F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s3-contract-mismatch\\artifacts\\p12\\backend\\src\\main\\resources\\application.yml\n[backend-core] T1 执行式验证通过：编译通过（5371ms）\n[backend-core] T1 后端实现已写入 workspace/\n[frontend-core] T1-F frontend/src/utils/request.ts 栈=spring-vue·Element Plus 验证=true 稳定前缀 dc62e62d（6547 字符）\n已写入 F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s3-contract-mismatch\\artifacts\\p12\\frontend\\src\\views\\UserList.vue\n已写入 F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s3-contract-mismatch\\artifacts\\p12\\frontend\\src\\utils\\request.ts\n[frontend-core] T1-F 进入设计工位\n[frontend-core] T1-F 设计稿 27802ms\n[frontend-core] T1-F 进入实现工位\n[frontend-core] T1-F frontend/src/views/UserList.vue 栈=spring-vue·Element Plus 验证=true 稳定前缀 694df0a9（7048 字符）\n[frontend-core] T1-F frontend/src/utils/request.ts 栈=spring-vue·Element Plus 验证=true 稳定前缀 694df0a9（7048 字符）\n已写入 F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s3-contract-mismatch\\artifacts\\p12\\frontend\\src\\views\\UserList.vue\n已写入 F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s3-contract-mismatch\\artifacts\\p12\\frontend\\src\\utils\\request.ts\n[merger] T1 返工 3 轮仍失败，放弃并上报维护\n[maintainer] 收到 merger 上报：T1 放弃（1 条原因）\n[maintainer] 发送到架构师：阶段 3 完成（1 对：通过 0，放弃 1）\n   放弃：GET /api/user/list（3 次）\n[architect] 阶段 3 放弃 1 个任务：\n   - GET /api/user/list（尝试 3 次）\n       原因：开发自测失败 3 轮（merger 层放弃，未进入测试判定）\n[architect] 发送到 PM：请求下一阶段（阶段 3 已完成）\n[runner] 收到架构师请求：phase_request（阶段 3）\n[runner] 交付关：验收 IR 3 份 / 任务 8 条 → Docker 不可用：无法起库与应用，run 级验证跳过（未验证 ≠ 通过）（未验证 ≠ 通过，报告见 _verify/run-report.md）\n[runner] 流程结束\n[runner] 流程结束，冲刷 sys_task 桥后退出",
+        "stderrTail": "[frontend-core] T1-F 构建返工停止：同一失败签名已用「compile_repair」修过 4 次，重复同类修法无益——请换策略（缩任务/换修法/升级分流）\n[frontend-core] T1-F 最后一次诊断：(构建输出):0 x Build failed in 47ms | (构建输出):0 Could not resolve entry module \"index.html\".\n[frontend-core] T1-F 构建返工停止：同一失败签名已用「compile_repair」修过 5 次，重复同类修法无益——请换策略（缩任务/换修法/升级分流）\n[frontend-core] T1-F 最后一次诊断：(构建输出):0 x Build failed in 47ms | (构建输出):0 Could not resolve entry module \"index.html\".\n[frontend-core] T1-F 构建返工停止：同一失败签名已用「compile_repair」修过 6 次，重复同类修法无益——请换策略（缩任务/换修法/升级分流）\n[frontend-core] T1-F 最后一次诊断：(构建输出):0 x Build failed in 47ms | (构建输出):0 Could not resolve entry module \"index.html\".\n[llm:architectPlan] 第 1/3 次失败: Failed to parse. Text: \"{\"summary\":\"本阶段完成前端根路径用户列表页：挂载时按已确认契约请求用户列表数据，渲染 id、username、email 表格行，并在空数据、接口失败、网络错误时呈现空态或失败提示\n[frontend-core] T1-F 构建返工停止：同一失败签名已用「compile_repair」修过 7 次，重复同类修法无益——请换策略（缩任务/换修法/升级分流）\n[frontend-core] T1-F 最后一次诊断：(构建输出):0 x Build failed in 47ms | (构建输出):0 Could not resolve entry module \"index.html\".\n[frontend-core] T1-F 构建返工停止：同一失败签名已用「compile_repair」修过 8 次，重复同类修法无益——请换策略（缩任务/换修法/升级分流）\n[frontend-core] T1-F 最后一次诊断：(构建输出):0 x Build failed in 47ms | (构建输出):0 Could not resolve entry module \"index.html\".\n[frontend-core] T1-F 构建返工停止：同一失败签名已用「compile_repair」修过 9 次，重复同类修法无益——请换策略（缩任务/换修法/升级分流）\n[frontend-core] T1-F 最后一次诊断：(构建输出):0 x Build failed in 48ms | (构建输出):0 Could not resolve entry module \"index.html\".\n[runner] ⚠️ 全阶段完成但**未验证** → status=done：Docker 不可用：无法起库与应用，run 级验证跳过（未验证 ≠ 通过）（未验证 ≠ 通过，报告见 _verify/run-report.md）\n[runner]    报告：F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s3-contract-mismatch\\artifacts\\p12\\_verify\\run-report.md；对外不得宣称\"已验证\"",
+        "retries": null,
+        "tokenUsage": {
+          "available": false,
+          "note": "旧系统运行路径未统计 token（sys_settings 无 token 计数、日志不含 usage 字段）——本字段如实置空，不编造 0",
+          "promptTokens": null,
+          "completionTokens": null,
+          "totalTokens": null
+        },
+        "dbFinalStatus": "done",
+        "dbTasks": {
+          "total": 8,
+          "done": 2,
+          "failed": 6,
+          "todo": 0,
+          "running": 0
+        },
+        "verifyReportFile": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s3-contract-mismatch\\artifacts\\p12\\_verify\\run-report.md",
+        "verifyOutcome": "skipped_unverified（未验证）",
+        "verifySummary": "Docker 不可用：无法起库与应用，run 级验证跳过（未验证 ≠ 通过）"
+      },
+      "artifacts": {
+        "dir": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s3-contract-mismatch\\artifacts\\p12",
+        "exists": true,
+        "fileCount": 76,
+        "byExt": {
+          ".json": 8,
+          ".example": 1,
+          "(none)": 4,
+          ".xml": 1,
+          ".java": 16,
+          ".yml": 2,
+          ".sql": 7,
+          ".class": 20,
+          ".lst": 2,
+          ".md": 3,
+          ".lock": 1,
+          ".vue": 3,
+          ".ts": 4,
+          ".css": 1,
+          ".png": 1,
+          ".log": 2
+        },
+        "files": [
+          ".architect-state.json",
+          ".env.example",
+          ".gitignore",
+          "backend/pom.xml",
+          "backend/src/main/java/com/crewforge/common/ApiResponse.java",
+          "backend/src/main/java/com/crewforge/controller/HealthController.java",
+          "backend/src/main/java/com/crewforge/controller/UserController.java",
+          "backend/src/main/java/com/crewforge/CrewForgeApplication.java",
+          "backend/src/main/java/com/crewforge/entity/User.java",
+          "backend/src/main/java/com/crewforge/exception/GlobalExceptionHandler.java",
+          "backend/src/main/java/com/crewforge/init/AliceDataInitializer.java",
+          "backend/src/main/java/com/crewforge/mapper/UserMapper.java",
+          "backend/src/main/java/com/crewforge/service/impl/UserServiceImpl.java",
+          "backend/src/main/java/com/crewforge/service/UserService.java",
+          "backend/src/main/java/com/crewforge/user/controller/UserController.java",
+          "backend/src/main/java/com/crewforge/user/entity/User.java",
+          "backend/src/main/java/com/crewforge/user/mapper/UserMapper.java",
+          "backend/src/main/java/com/crewforge/user/runner/UserDataInitializer.java",
+          "backend/src/main/java/com/crewforge/user/service/impl/UserServiceImpl.java",
+          "backend/src/main/java/com/crewforge/user/service/UserService.java",
+          "backend/src/main/resources/application.yml",
+          "backend/src/main/resources/data.sql",
+          "backend/src/main/resources/db/init.sql",
+          "backend/src/main/resources/mapper/.gitkeep",
+          "backend/src/main/resources/schema.sql",
+          "backend/target/classes/application.yml",
+          "backend/target/classes/com/crewforge/common/ApiResponse.class",
+          "backend/target/classes/com/crewforge/controller/HealthController$ApiResponse.class",
+          "backend/target/classes/com/crewforge/controller/HealthController.class",
+          "backend/target/classes/com/crewforge/controller/UserController$ApiResponse.class",
+          "backend/target/classes/com/crewforge/controller/UserController.class",
+          "backend/target/classes/com/crewforge/CrewForgeApplication.class",
+          "backend/target/classes/com/crewforge/entity/User.class",
+          "backend/target/classes/com/crewforge/exception/GlobalExceptionHandler.class",
+          "backend/target/classes/com/crewforge/init/AliceDataInitializer.class",
+          "backend/target/classes/com/crewforge/mapper/UserMapper.class",
+          "backend/target/classes/com/crewforge/service/impl/UserServiceImpl.class",
+          "backend/target/classes/com/crewforge/service/UserService$User.class",
+          "backend/target/classes/com/crewforge/service/UserService.class",
+          "backend/target/classes/com/crewforge/user/controller/UserController$Result.class",
+          "backend/target/classes/com/crewforge/user/controller/UserController.class",
+          "backend/target/classes/com/crewforge/user/entity/User.class",
+          "backend/target/classes/com/crewforge/user/mapper/UserMapper.class",
+          "backend/target/classes/com/crewforge/user/runner/UserDataInitializer.class",
+          "backend/target/classes/com/crewforge/user/service/impl/UserServiceImpl.class",
+          "backend/target/classes/com/crewforge/user/service/UserService.class",
+          "backend/target/classes/data.sql",
+          "backend/target/classes/db/init.sql",
+          "backend/target/classes/mapper/.gitkeep",
+          "backend/target/classes/schema.sql",
+          "backend/target/maven-status/maven-compiler-plugin/compile/default-compile/createdFiles.lst",
+          "backend/target/maven-status/maven-compiler-plugin/compile/default-compile/inputFiles.lst",
+          "CONTRACTS.md",
+          "ddl.sql",
+          "frontend/bun.lock",
+          "frontend/package.json",
+          "frontend/src/App.vue",
+          "frontend/src/main.ts",
+          "frontend/src/router/index.ts",
+          "frontend/src/style.css",
+          "frontend/src/styles/.gitkeep",
+          "frontend/src/utils/request.ts",
+          "frontend/src/views/StartupStatus.vue",
+          "frontend/src/views/UserList.vue",
+          "frontend/tsconfig.json",
+          "frontend/tsconfig.node.json",
+          "frontend/vite.config.ts",
+          "_shots/1-T1.png",
+          "_task-evidence/1-T1.json",
+          "_test-report/1-T1.md",
+          "_verify/acceptance-p1.json",
+          "_verify/acceptance-p2.json",
+          "_verify/acceptance-p3.json",
+          "_verify/bun.exe.log",
+          "_verify/maven-compile.log",
+          "_verify/run-report.md"
+        ],
+        "topLevelDirs": [
+          "_shots",
+          "_task-evidence",
+          "_test-report",
+          "_verify",
+          "backend",
+          "frontend"
+        ]
+      },
+      "checks": [
+        {
+          "id": "frontend.build",
+          "kind": "build",
+          "status": "fail",
+          "command": "npm run build",
+          "cwd": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s3-contract-mismatch\\artifacts\\p12\\frontend",
+          "exitCode": 1,
+          "httpStatus": null,
+          "expectStatus": null,
+          "jsonAssertions": [],
+          "startedAt": "2026-09-11T02:59:14.472Z",
+          "finishedAt": "2026-09-11T02:59:15.583Z",
+          "durationMs": 1110,
+          "logFile": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s3-contract-mismatch\\logs\\frontend.build-npm_run_build.stdout.log",
+          "detail": "构建失败（期望 exit=0，实际 1）",
+          "evidence": "$ npm run build\nexit=1 1109ms\n--- stdout tail ---\n> crewforge-frontend@0.1.0 build\n> vite build\nvite v5.4.21 building for production...\n✓ 0 modules transformed.\n--- stderr tail ---\nx Build failed in 52ms\nerror during build:\nCould not resolve entry module \"index.html\".\n    at getRollupError (file:///F:/code/project/CrewForge/agents-CrewForge/eval/baseline/runs/s3-contract-mismatch/artifacts/p12/frontend/node_modules/rollup/dist/es/shared/parseAst.js:317:41)\n    at error (file:///F:/code/project/CrewForge/agents-CrewForge/eval/baseline/runs/s3-contract-mismatch/artifacts/p12/frontend/node_modules/rollup/dist/es/shared/parseAst.js:313:42)\n    at ModuleLoader.loadEntryModule (file:///F:/code/project/CrewForge/agents-CrewForge/eval/baseline/runs/s3-contract-mismatch/artifacts/p12/frontend/node_modules/rollup/dist/es/shared/node-entry.js:22023:20)\n    at async Promise.all (index 0)"
+        },
+        {
+          "id": "backend.build",
+          "kind": "build",
+          "status": "pass",
+          "command": "\"C:\\Users\\kangzong\\.m2\\wrapper\\dists\\apache-maven-3.9.16\\56ba1f9f\\bin\\mvn.cmd\" -B -DskipTests -Dfile.encoding=UTF-8 package",
+          "cwd": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s3-contract-mismatch\\artifacts\\p12\\backend",
+          "exitCode": 0,
+          "httpStatus": null,
+          "expectStatus": null,
+          "jsonAssertions": [],
+          "startedAt": "2026-09-11T02:59:15.583Z",
+          "finishedAt": "2026-09-11T02:59:19.986Z",
+          "durationMs": 4400,
+          "logFile": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s3-contract-mismatch\\logs\\backend.build-mvn_package.stdout.log",
+          "detail": "构建成功（exit=0）",
+          "evidence": "Maven 来源：~/.m2/wrapper/dists 里 wrapper 下载的 Maven 发行版 → C:\\Users\\kangzong\\.m2\\wrapper\\dists\\apache-maven-3.9.16\\56ba1f9f\\bin\\mvn.cmd\n\n$ \"C:\\Users\\kangzong\\.m2\\wrapper\\dists\\apache-maven-3.9.16\\56ba1f9f\\bin\\mvn.cmd\" -B -DskipTests -Dfile.encoding=UTF-8 package\nexit=0 4400ms\n--- stdout tail ---\n[INFO] --- surefire:3.1.2:test (default-test) @ crewforge-backend ---\n[INFO] Tests are skipped.\n[INFO] \n[INFO] --- jar:3.3.0:jar (default-jar) @ crewforge-backend ---\n[INFO] Building jar: F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s3-contract-mismatch\\artifacts\\p12\\backend\\target\\crewforge-backend-0.0.1-SNAPSHOT.jar\n[INFO] \n[INFO] --- spring-boot:3.2.5:repackage (repackage) @ crewforge-backend ---\n[INFO] Replacing main artifact F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s3-contract-mismatch\\artifacts\\p12\\backend\\target\\crewforge-backend-0.0.1-SNAPSHOT.jar with repackaged archive, adding nested dependencies in BOOT-INF/.\n[INFO] The original artifact has been renamed to F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s3-contract-mismatch\\artifacts\\p12\\backend\\target\\crewforge-backend-0.0.1-SNAPSHOT.jar.original\n[INFO] ------------------------------------------------------------------------\n[INFO] BUILD SUCCESS\n[INFO] ------------------------------------------------------------------------\n[INFO] Total time:  2.658 s\n[INFO] Finished at: 2026-09-11T10:59:19+08:00\n[INFO] ------------------------------------------------------------------------\n--- stderr tail ---\n"
+        },
+        {
+          "id": "backend.boot",
+          "kind": "boot",
+          "status": "fail",
+          "command": "java -jar crewforge-backend-0.0.1-SNAPSHOT.jar (SERVER_PORT=33628, SPRING_DATASOURCE_URL=.../cf_eval_s3_contract_mismatch)",
+          "cwd": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s3-contract-mismatch\\artifacts\\p12\\backend",
+          "exitCode": 1,
+          "httpStatus": null,
+          "expectStatus": null,
+          "jsonAssertions": [],
+          "startedAt": "2026-09-11T02:59:19.988Z",
+          "finishedAt": "2026-09-11T03:02:24.184Z",
+          "durationMs": 184196,
+          "logFile": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s3-contract-mismatch\\logs\\backend.boot.app.log",
+          "detail": "应用在 180s 内没有响应 HTTP（端口 33628）",
+          "evidence": "health probe: GET http://127.0.0.1:33628/api/users → 无响应（尝试 90 次，180794ms）\nlastError=Unable to connect. Is the computer able to access the url?\n--- app.log tail ---\nlegatingMethodAccessorImpl.invoke(DelegatingMethodAccessorImpl.java:43) ~[na:na]\n\tat java.base/java.lang.reflect.Method.invoke(Method.java:569) ~[na:na]\n\tat org.springframework.boot.loader.launch.Launcher.launch(Launcher.java:91) ~[crewforge-backend-0.0.1-SNAPSHOT.jar:0.0.1-SNAPSHOT]\n\tat org.springframework.boot.loader.launch.Launcher.launch(Launcher.java:53) ~[crewforge-backend-0.0.1-SNAPSHOT.jar:0.0.1-SNAPSHOT]\n\tat org.springframework.boot.loader.launch.JarLauncher.main(JarLauncher.java:58) ~[crewforge-backend-0.0.1-SNAPSHOT.jar:0.0.1-SNAPSHOT]\nCaused by: org.springframework.context.annotation.ConflictingBeanDefinitionException: Annotation-specified bean name 'userController' for bean class [com.crewforge.user.controller.UserController] conflicts with existing, non-compatible bean definition of same name and class [com.crewforge.controller.UserController]\n\tat org.springframework.context.annotation.ClassPathBeanDefinitionScanner.checkCandidate(ClassPathBeanDefinitionScanner.java:361) ~[spring-context-6.1.6.jar!/:6.1.6]\n\tat org.springframework.context.annotation.ClassPathBeanDefinitionScanner.doScan(ClassPathBeanDefinitionScanner.java:288) ~[spring-context-6.1.6.jar!/:6.1.6]\n\tat org.springframework.context.annotation.ComponentScanAnnotationParser.parse(ComponentScanAnnotationParser.java:128) ~[spring-context-6.1.6.jar!/:6.1.6]\n\tat org.springframework.context.annotation.ConfigurationClassParser.doProcessConfigurationClass(ConfigurationClassParser.java:306) ~[spring-context-6.1.6.jar!/:6.1.6]\n\tat org.springframework.context.annotation.ConfigurationClassParser.processConfigurationClass(ConfigurationClassParser.java:246) ~[spring-context-6.1.6.jar!/:6.1.6]\n\tat org.springframework.context.annotation.ConfigurationClassParser.parse(ConfigurationClassParser.java:197) ~[spring-context-6.1.6.jar!/:6.1.6]\n\tat org.springframework.context.annotation.ConfigurationClassParser.parse(ConfigurationClassParser.java:165) ~[spring-context-6.1.6.jar!/:6.1.6]\n\t... 20 common frames omitted"
+        },
+        {
+          "id": "users.declaredPath",
+          "kind": "http",
+          "status": "blocked",
+          "command": "GET /api/users",
+          "cwd": null,
+          "exitCode": null,
+          "httpStatus": null,
+          "expectStatus": 200,
+          "jsonAssertions": [],
+          "startedAt": "2026-09-11T03:02:24.193Z",
+          "finishedAt": "2026-09-11T03:02:24.193Z",
+          "durationMs": 0,
+          "logFile": null,
+          "detail": "应用未启动：HTTP 断言无法执行（未验证 ≠ 通过）",
+          "evidence": "boot 检查未通过或产物缺失"
+        },
+        {
+          "id": "users.mandatedFrontendPath",
+          "kind": "http",
+          "status": "blocked",
+          "command": "GET /api/user/list",
+          "cwd": null,
+          "exitCode": null,
+          "httpStatus": null,
+          "expectStatus": 200,
+          "jsonAssertions": [],
+          "startedAt": "2026-09-11T03:02:24.193Z",
+          "finishedAt": "2026-09-11T03:02:24.193Z",
+          "durationMs": 0,
+          "logFile": null,
+          "detail": "应用未启动：HTTP 断言无法执行（未验证 ≠ 通过）",
+          "evidence": "boot 检查未通过或产物缺失"
+        },
+        {
+          "id": "page.users",
+          "kind": "render",
+          "status": "blocked",
+          "command": null,
+          "cwd": null,
+          "exitCode": null,
+          "httpStatus": null,
+          "expectStatus": null,
+          "jsonAssertions": [],
+          "startedAt": "2026-09-11T03:02:24.194Z",
+          "finishedAt": "2026-09-11T03:02:24.194Z",
+          "durationMs": 0,
+          "logFile": null,
+          "detail": "前端构建产物缺失（eval\\baseline\\runs\\s3-contract-mismatch\\artifacts\\p12\\frontend\\dist\\index.html 不存在）：无法渲染",
+          "evidence": "checked: F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s3-contract-mismatch\\artifacts\\p12\\frontend\\dist\\index.html"
+        }
+      ],
+      "verdict": {
+        "overall": "fail",
+        "passed": [
+          "backend.build"
+        ],
+        "failed": [
+          "frontend.build",
+          "backend.boot"
+        ],
+        "blocked": [
+          {
+            "id": "users.declaredPath",
+            "reason": "应用未启动：HTTP 断言无法执行（未验证 ≠ 通过）"
+          },
+          {
+            "id": "users.mandatedFrontendPath",
+            "reason": "应用未启动：HTTP 断言无法执行（未验证 ≠ 通过）"
+          },
+          {
+            "id": "page.users",
+            "reason": "前端构建产物缺失（eval\\baseline\\runs\\s3-contract-mismatch\\artifacts\\p12\\frontend\\dist\\index.html 不存在）：无法渲染"
+          }
+        ],
+        "skipped": [],
+        "systemClaimedStatus": "done",
+        "systemClaimedVerified": false,
+        "fakePass": false,
+        "doneButUnverified": true,
+        "reason": "真实检查 通过 1 / 失败 2 / 无法判定 3；旧系统自报：status=done，run 级验证=skipped_unverified（未验证）；系统报 done 但显式未验证（诚实，但不等于通过）"
+      },
+      "derivedFromLogs": {
+        "derivedFrom": "F:\\code\\project\\CrewForge\\agents-CrewForge\\eval\\baseline\\runs\\s3-contract-mismatch\\logs\\pipeline.stdout.log",
+        "llmRetryAttempts": 5,
+        "llmRetryExhausted": 0,
+        "revisionMentions": 0,
+        "failureLines": 11,
+        "note": "以上计数由日志正则计数得到——只作观测，不参与任何 pass/fail 判定；旧系统自身不产出 token/重试计数"
+      }
+    }
+  ],
+  "summary": {
+    "scenarioCount": 3,
+    "byVerdict": {
+      "pass": 0,
+      "fail": 2,
+      "blocked": 1,
+      "partial": 0
+    },
+    "checkTotals": {
+      "pass": 4,
+      "fail": 9,
+      "blocked": 11,
+      "skipped": 0
+    },
+    "endToEndDelivered": [],
+    "realFailures": [
+      "s1-crud-min",
+      "s3-contract-mismatch"
+    ],
+    "blockedOrPartial": [
+      "s2-auth"
+    ],
+    "fakePassDetected": [],
+    "honestStatement": "共 3 个冻结场景。没有任何场景达成端到端跑通（前端 build + 后端启动 + HTTP 断言 + 渲染断言全过）。存在真实失败：s1-crud-min、s3-contract-mismatch。存在无法判定（环境或产物缺失）：s2-auth。未检出假通过。"
+  }
+}

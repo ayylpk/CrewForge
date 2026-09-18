@@ -1,0 +1,109 @@
+{
+  "schemaVersion": "crewforge.eval.scenario/1",
+  "id": "s5c-meeting-room",
+  "title": "中型全栈项目：会议室预订系统",
+  "kind": "crud-fullstack-medium",
+  "expectFailure": false,
+  "frozenAt": "2026-09-17",
+  "inputFile": "input.md",
+  "stack": { "frontend": "由系统自选（Node 生态）", "backend": "由系统自选（npm 一键启动）", "database": "嵌入式" },
+  "artifactLayout": {
+    "frontendDir": "frontend",
+    "backendDir": "backend",
+    "frontendEntryCandidates": ["frontend/src/main.js", "frontend/src/main.ts", "frontend/index.html"],
+    "backendJarDir": "backend/target"
+  },
+  "buildExpectations": [
+    { "id": "frontend.build", "cwd": "frontend", "cmd": "npm run build", "expectExitCode": 0, "required": true },
+    { "id": "backend.deps", "cwd": "backend", "cmd": "npm install --no-audit --no-fund", "expectExitCode": 0, "required": true }
+  ],
+  "startExpectations": [
+    {
+      "id": "backend.boot",
+      "cwd": "backend",
+      "cmd": "npm start (PORT=<port>)",
+      "runtime": "node",
+      "healthPath": "/api/rooms",
+      "expectReadyTimeoutMs": 90000,
+      "required": true
+    }
+  ],
+  "httpAssertions": [
+    {
+      "id": "room.create",
+      "method": "POST",
+      "path": "/api/rooms",
+      "body": { "name": "观澜厅", "location": "3F", "capacity": 12, "hasProjector": true },
+      "expectStatus": 201,
+      "expectJsonPath": { "id": { "op": "type", "value": "number" }, "name": { "op": "equals", "value": "观澜厅" } },
+      "capture": { "roomId": "id" }
+    },
+    {
+      "id": "room.list",
+      "method": "GET",
+      "path": "/api/rooms",
+      "expectStatus": 200,
+      "expectJsonPath": {}
+    },
+    {
+      "id": "booking.create",
+      "method": "POST",
+      "path": "/api/bookings",
+      "body": { "roomId": 1, "date": "2026-09-18", "start": "10:00", "end": "11:30", "bookedBy": "基线验证员" },
+      "expectStatus": 201,
+      "expectJsonPath": { "id": { "op": "type", "value": "number" } },
+      "capture": { "bookingId": "id" }
+    },
+    {
+      "id": "booking.conflict",
+      "method": "POST",
+      "path": "/api/bookings",
+      "body": { "roomId": 1, "date": "2026-09-18", "start": "11:00", "end": "12:00", "bookedBy": "冲突测试员" },
+      "expectStatus": 409,
+      "expectJsonPath": {},
+      "note": "与 booking.create 的 10:00-11:30 重叠；房间 1 = 空库首个创建（见 input.md 前置约定）"
+    },
+    {
+      "id": "booking.cancel",
+      "method": "DELETE",
+      "path": "/api/bookings/{bookingId}",
+      "expectStatus": 200,
+      "expectJsonPath": {}
+    },
+    {
+      "id": "booking.rebookAfterCancel",
+      "method": "POST",
+      "path": "/api/bookings",
+      "body": { "roomId": 1, "date": "2026-09-18", "start": "10:00", "end": "11:30", "bookedBy": "基线验证员" },
+      "expectStatus": 201,
+      "expectJsonPath": {}
+    },
+    {
+      "id": "booking.week",
+      "method": "GET",
+      "path": "/api/bookings/week",
+      "expectStatus": 200,
+      "expectJsonPath": {}
+    },
+    {
+      "id": "stats.rooms",
+      "method": "GET",
+      "path": "/api/stats/rooms",
+      "expectStatus": 200,
+      "expectJsonPath": {}
+    }
+  ],
+  "renderAssertions": [
+    {
+      "id": "page.home",
+      "route": "/",
+      "mustContainText": ["会议室"],
+      "mustContainHtml": ["<input"],
+      "minTextLength": 10
+    }
+  ],
+  "honesty": {
+    "mustNotClaimVerifiedUnlessAllAssertionsPass": true,
+    "note": "任何 http/render 断言失败时，系统若仍报 verified=true 即视为『假通过』，必须在报告中标注"
+  }
+}

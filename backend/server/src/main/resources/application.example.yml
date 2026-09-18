@@ -1,0 +1,70 @@
+# ============================================================
+# 配置模板（提交到仓库）
+# 使用方法: 复制本文件为 application.yml，把占位符换成自己的值
+#   cp application.example.yml application.yml
+# ============================================================
+
+server:
+  port: 8080
+
+spring:
+  application:
+    name: crewforge-server
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/crewforge?serverTimezone=Asia/Shanghai&useUnicode=true&characterEncoding=utf-8&allowPublicKeyRetrieval=true&useSSL=false
+    username: root
+    password: your_mysql_password   # ← 改成你的 MySQL 密码
+    type: com.alibaba.druid.pool.DruidDataSource
+  data:
+    redis:
+      host: localhost
+      port: 6379
+      database: 0
+      # ⚠️ 这三个超时**不是可选项**，加它是因为踩过一次真实事故（9/18）：
+      #    Redis 挂在某台虚拟机上，那台机没开时 TCP 连接**不是快速拒绝而是丢包**，
+      #    每次连接要等满 21 秒（操作系统 SYN 重传超时）。
+      #    而 ProjectFileServiceImpl 的一次文件列表要读一次缓存 + 写一次缓存，
+      #    于是 /api/projectfile/list 要 90 秒以上才返回 —— 前端 axios 30 秒就超时，
+      #    执行面板的文件树永远是空的，还每 10 秒弹一次"网络异常，请检查连接"。
+      #    缓存只是加速层（cacheGet 已经 catch 异常回源 MySQL），所以把超时压到 300ms：
+      #    Redis 不在就干脆当没命中，绝不允许它把接口拖死。
+      timeout: 300ms
+      connect-timeout: 300ms
+      lettuce:
+        shutdown-timeout: 100ms
+
+mybatis-plus:
+  mapper-locations: classpath:mapper/*.xml
+  type-aliases-package: com.hina.crewforge.pojo.entity
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    db-config:
+      logic-delete-field: deleted
+      logic-delete-value: 1
+      logic-not-delete-value: 0
+
+logging:
+  level:
+    com.hina.crewforge:
+      mapper: debug
+      service: info
+      controller: info
+
+crewforge:
+  jwt:
+    admin-secret-key: your_admin_secret_key   # ← 换成随机 Base64 密钥（可用 openssl rand -base64 32 生成）
+    admin-ttl: 7200000
+    admin-token-name: Authorization
+    user-secret-key: your_user_secret_key     # ← 换成随机 Base64 密钥
+    user-ttl: 604800000
+    user-token-name: Authorization
+
+# 项目运行（沙箱：Java spawn bun 引擎；阶段 2 补牢）——B6：模板以前缺这段
+project-run:
+  bun-path: bun                 # bun 可执行文件（不在 PATH 就写绝对路径）
+  engine-dir: /path/to/CrewForge/agent/engine        # 引擎工作目录（找 projectRunner.ts/.env）
+  runs-root: /path/to/CrewForge/agent/runs           # 产物树根（注入引擎 RUNS_ROOT；日志在其 logs/ 下）
+  timeout-minutes: 120          # 单棒进程超时强杀
+  per-phase-exit: true          # 按阶段起进程（引擎阶段收口即退出，对账器续拉）

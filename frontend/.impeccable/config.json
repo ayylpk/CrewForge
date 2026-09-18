@@ -1,0 +1,11 @@
+{
+  "buildPath": "code",
+  "detector": {
+    "ignoreFiles": [
+      "src/views/TeamView.vue",
+      "src/views/AgentRepositoryView.vue",
+      "src/views/AgentFormView.vue",
+      "src/components/DataFlowBg.vue"
+    ]
+  }
+}

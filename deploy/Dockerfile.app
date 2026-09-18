@@ -17,16 +17,16 @@
 FROM eclipse-temurin:17-jdk AS build
 WORKDIR /src
 # 先只拷 pom 以复用依赖层（改代码不必重下依赖）
-COPY backed-CrewForge/pom.xml ./backed-CrewForge/
-COPY backed-CrewForge/common/pom.xml ./backed-CrewForge/common/
-COPY backed-CrewForge/pojo/pom.xml ./backed-CrewForge/pojo/
-COPY backed-CrewForge/server/pom.xml ./backed-CrewForge/server/
-COPY backed-CrewForge/mvnw backed-CrewForge/mvnw.cmd ./backed-CrewForge/
-COPY backed-CrewForge/.mvn ./backed-CrewForge/.mvn
-RUN cd backed-CrewForge && chmod +x mvnw && ./mvnw -B -q -DskipTests dependency:go-offline || true
+COPY backend/pom.xml ./backend/
+COPY backend/common/pom.xml ./backend/common/
+COPY backend/pojo/pom.xml ./backend/pojo/
+COPY backend/server/pom.xml ./backend/server/
+COPY backend/mvnw backend/mvnw.cmd ./backend/
+COPY backend/.mvn ./backend/.mvn
+RUN cd backend && chmod +x mvnw && ./mvnw -B -q -DskipTests dependency:go-offline || true
 # 再拷源码构建
-COPY backed-CrewForge ./backed-CrewForge
-RUN cd backed-CrewForge && ./mvnw -B -DskipTests package \
+COPY backend ./backend
+RUN cd backend && ./mvnw -B -DskipTests package \
  && cp server/target/crewforge-server-*.jar /app.jar
 
 # ---------- 阶段 2：运行时（JRE + 生成项目工具链 + agent 引擎）----------
@@ -50,16 +50,16 @@ ENV PATH="/root/.bun/bin:${PATH}"
 WORKDIR /app
 # 后端 jar
 COPY --from=build /app.jar /app/app.jar
-# agent 引擎（运行时目录结构必须保持：backed-CrewForge/mvnw 是生成项目的包装器兜底）
-COPY agents-CrewForge /app/agents-CrewForge
-COPY backed-CrewForge/mvnw backed-CrewForge/mvnw.cmd /app/backed-CrewForge/
-COPY backed-CrewForge/.mvn /app/backed-CrewForge/.mvn
-COPY backed-CrewForge/sql /app/sql
+# agent 引擎（运行时目录结构必须保持：backend/mvnw 是生成项目的包装器兜底）
+COPY agent/engine /app/agent/engine
+COPY backend/mvnw backend/mvnw.cmd /app/backend/
+COPY backend/.mvn /app/backend/.mvn
+COPY backend/sql /app/sql
 
 # 产物树与工作区（挂卷持久化）
 RUN mkdir -p /app/runs /app/runs/_verify
 ENV RUNS_ROOT=/app/runs \
-    CREWFORGE_MVNW=/app/backed-CrewForge/mvnw \
+    CREWFORGE_MVNW=/app/backend/mvnw \
     PROJECT_ID="" \
     JAVA_BASE_URL=http://127.0.0.1:8080
 

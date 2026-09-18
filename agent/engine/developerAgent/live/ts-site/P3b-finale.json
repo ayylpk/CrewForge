@@ -1,0 +1,42 @@
+{
+  "type": "architect_task",
+  "projectId": "ts-site",
+  "taskId": "ts-site-P3b-finale",
+  "requirementSnapshot": {
+    "goal": "ts-site 全项目收官批：后端 diary/search/stats 已全绿（外部第 2 轮验证亲测通过，含 P1/P2 回归）。前端只差一个文件——router 第 14 行引用的 ../views/Search.vue 不存在，vite build 当场崩。写出它、跑绿构建与全站深链，拿下 developerReady。",
+    "context": "现状：frontend/src/views 已有 Home/Projects/ProjectDetail/Repos/Files/Diary/About 七个；router 六条路由齐；App.vue 导航已扩。唯一断点=Search.vue 缺失。禁止动其他任何已有文件，除非构建报错指名它们。",
+    "siteModules": ["projects", "repos", "files", "diary", "search", "stats", "about", "全站导航"]
+  },
+  "stackProfile": {
+    "frontend": "npm run build（vite，依赖已装）；新增一个 Search.vue 视图",
+    "backend": "不动。构建/契约全绿",
+    "database": "不动"
+  },
+  "domainModel": { "entity": "无新增（Search 页消费既有 /api/search）" },
+  "contract": {
+    "version": "1",
+    "base": "/api",
+    "endpoints": [
+      { "method": "GET", "path": "/api/search", "query": "?q=", "expectStatus": 200, "responseBody": "{\"projects\":[{id,slug,title,description}],\"diaries\":[{id,title,mood,createdAt}],\"files\":[{id,name,size}]}", "desc": "后端已实现并验收绿，前端照此渲染" }
+    ],
+    "notes": "探针 verify-p3-api.mjs 与 verify-p3-frontend.mjs 已修复可信；先 readFile verify-p3-frontend.mjs 看清页面判据"
+  },
+  "foundationPlan": {
+    "dirs": ["frontend"],
+    "workItems": [
+      { "id": "w1-search-view", "kind": "frontend", "title": "Search.vue 补齐 + 构建 + 实测", "paths": ["frontend/src/views/Search.vue"] }
+    ]
+  },
+  "allowedRoots": ["backend", "frontend"],
+  "forbiddenPaths": ["scripts"],
+  "acceptanceChecks": [
+    { "id": "backend-build", "command": "npm", "args": ["run", "build"], "cwd": "backend", "timeoutMs": 300000, "category": "COMPILE" },
+    { "id": "api-projects-regression", "command": "node", "args": ["../scripts/verify-p1-api.mjs"], "cwd": "backend", "timeoutMs": 180000, "category": "CONTRACT" },
+    { "id": "api-repos-regression", "command": "node", "args": ["../scripts/verify-p2-repos.mjs"], "cwd": "backend", "timeoutMs": 180000, "category": "CONTRACT" },
+    { "id": "api-files-regression", "command": "node", "args": ["../scripts/verify-p2-files.mjs"], "cwd": "backend", "timeoutMs": 180000, "category": "CONTRACT" },
+    { "id": "api-diary-search-stats", "command": "node", "args": ["../scripts/verify-p3-api.mjs"], "cwd": "backend", "timeoutMs": 240000, "category": "CONTRACT" },
+    { "id": "frontend-build", "command": "npm", "args": ["run", "build"], "cwd": "frontend", "timeoutMs": 300000, "category": "COMPILE" },
+    { "id": "frontend-pages", "command": "node", "args": ["../scripts/verify-p3-frontend.mjs"], "cwd": "frontend", "timeoutMs": 180000, "category": "RENDER" }
+  ],
+  "developerInstructions": "收官批，预算 10 步，别越界：\n1) readFile scripts/verify-p3-frontend.mjs + frontend/src/router/index.ts——看清 Search.vue 的判据与 /search 路由；\n2) writeFile frontend/src/views/Search.vue：<script setup lang=\"ts\"> 用 useRoute 读 query.q（字符串化，空值提示『输入关键词搜索』）；有 q 时 fetch(`/api/search?q=${encodeURIComponent(q)}`)；把结果分三节渲染：项目（title+description，链到 /projects/'+slug）、日记（title+mood+createdAt，日期用 new Date(x).toLocaleDateString('zh-CN') 即可）、文件（name+大小，<a :href=\"'/api/files/'+id+'/download'\">）；每组为空显示『无匹配』；样式沿用现有卡片风格；\n3) runCommand {command:\"npm\",args:[\"run\",\"build\"],cwd:\"frontend\"} 绿；顺手 {command:\"npm\",args:[\"run\",\"build\"],cwd:\"backend\"} 回归确认没碰到后端；\n4) startProcess {command:\"node\",args:[\"dist/index.js\"],cwd:\"backend\"} → httpRequest GET \"http://127.0.0.1:8181/api/search?q=%E9%A1%B9%E7%9B%AE\"（或任意中文词）确认 200+三组键存在 → stopProcess；\n5) {\"kind\":\"done\"}。\n\n【禁止】重写任何已验收绿的视图/路由/后端文件；碰 scripts/；加依赖。七段验收（含全量回归）外部终判。"
+}

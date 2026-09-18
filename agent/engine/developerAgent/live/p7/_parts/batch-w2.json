@@ -1,0 +1,26 @@
+{
+  "type": "architect_batch",
+  "projectId": "p7",
+  "taskId": "p7-t1",
+  "itemId": "w2",
+  "detail": "本项只在 backend/src/db 落地 SQLite 建表与启动期幂等迁移，供 w1 的 server 启动时调用，不做路由与业务逻辑。\n数据库文件固定为 backend/data/team-tasks.db；若目录不存在则创建，启动迁移必须可在空库、已有库、清空 backend/data 后重复执行且不报错。\n定义 users、projects、memberships、tasks、tags、task_tags、comments 七表，字段语义与 domainModel 一致；时间字段以 SQLite TEXT/ISO 字符串承载，布尔 is_private 用 0/1，JSON 输出时由路由层映射为 camelCase。\n必须启用外键约束；membership 约束 projectId+userId 唯一；tag 约束 projectId+name 唯一；task_tag 约束 taskId+tagId 唯一。\n级联删除按需求实现：project 删除清 memberships/tasks/tags/task_tags/comments；task 删除清 comments/task_tags；tag 删除清 task_tags；task.assigneeId 引用 user 但不级联用户。\n迁移文件保持轻量，建议导出 ensureSchema()/migrate() 单一入口，确保服务启动后即可用 API 探活。",
+  "checks": [
+    {
+      "id": "ac-3",
+      "kind": "CONTRACT",
+      "method": "GET",
+      "path": "/api/health",
+      "expectedStatus": 200,
+      "expected": "清空数据目录后服务仍可 node 启动并完成 SQLite 迁移，健康接口返回可机器解析的 ok 标记。",
+      "resetPaths": [
+        "backend/data/team-tasks.db"
+      ],
+      "assertJson": [
+        {
+          "path": "data.ok",
+          "equals": true
+        }
+      ]
+    }
+  ]
+}

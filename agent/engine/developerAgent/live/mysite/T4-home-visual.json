@@ -1,0 +1,41 @@
+{
+  "type": "architect_task",
+  "projectId": "mysite",
+  "taskId": "mysite-T4-home-visual",
+  "requirementSnapshot": {
+    "goal": "mysite 前端地基：全局视觉基线（蓝天白云绿草地+太阳，纯 CSS，无外部图片）+ 首页 Home + 导航骨架（/projects /diary /files 路由，diary/files 先占位，T5 填实）。",
+    "context": "现状：vue-router 已装；src/router/index.ts + views/ProjectList.vue 已存在且构建绿；后端三模块 API 全部验收绿。本任务只动 frontend/。"
+  },
+  "stackProfile": {
+    "frontend": "Vue3 + Vite + TS + vue-router（现有版本，不加新依赖——禁止 npm install 新包）",
+    "backend": "Spring Boot（本任务不动）",
+    "database": "H2（本任务不动）"
+  },
+  "domainModel": {
+    "entity": "(展示层任务，无新实体；页面数据模型沿用已验收契约：project/diary_entry/file_asset)"
+  },
+  "contract": {
+    "version": "1",
+    "endpoints": [],
+    "pages": [
+      { "route": "/", "view": "src/views/Home.vue", "desc": "英雄区：天空渐变+太阳+草地，站名 Kang's Space(或类似)，三个模块入口卡片链接 /projects /diary /files" },
+      { "route": "/projects", "view": "src/views/ProjectList.vue（已存在，只允许加统一导航包裹，不改其数据逻辑）" },
+      { "route": "/diary", "view": "src/views/DiaryList.vue（本任务占位：标题+温馨样式，T5 填真实数据）" },
+      { "route": "/files", "view": "src/views/FileList.vue（占位同上）" }
+    ]
+  },
+  "foundationPlan": {
+    "dirs": ["frontend"],
+    "workItems": [
+      { "id": "w1-home-visual", "kind": "frontend", "title": "全局样式+Home+导航+占位页+路由", "paths": ["frontend/src"] }
+    ]
+  },
+  "allowedRoots": ["backend", "frontend"],
+  "forbiddenPaths": ["backend/mvnw", "backend/mvnw.cmd", "backend/.mvn", "scripts"],
+  "acceptanceChecks": [
+    { "id": "frontend-build", "command": "npm", "args": ["run", "build"], "cwd": "frontend", "timeoutMs": 300000, "category": "COMPILE" },
+    { "id": "visual-contract", "command": "node", "args": ["../scripts/verify-t4.mjs"], "cwd": "frontend", "timeoutMs": 60000, "category": "RENDER" },
+    { "id": "backend-still-builds", "command": "mvnw.cmd", "args": ["-q", "package", "-DskipTests"], "cwd": "backend", "timeoutMs": 600000, "category": "COMPILE" }
+  ],
+  "developerInstructions": "硬性视觉要求（verify-t4 会静态断言）：\n1) 新建 src/styles/theme.css：CSS 变量定义 --sky(#87CEEB系渐变)/--cloud(#fff)/--grass(#7ec850系)/--sun(#FFD54F系)，并在 main.ts import；App.vue 顶部全局导航条含首页+三模块 router-link，页面底色天空渐变。\n2) Home.vue：英雄区必须含 linear-gradient 天空 + radial-gradient 太阳 + 草地色块（渐变/阴影实现白云，禁外链图片 URL）；三个模块入口 router-link 卡片。\n3) 路由：router/index.ts 增 '/' → Home（若现在 '/' 被 ProjectList 占了要调整成 Home，projects 归 /projects），补 /diary /files 指向新建占位视图。\n4) index.html 的 <title> 改成 mysite · 我的小站。\n5) 一步一事：先 mkdir/writeFile 铺 theme.css/Home.vue/两个占位视图，再 editFile 改 App.vue/main.ts/router/index.ts/index.html，最后 runBuild frontend 一次。绿了 done。禁止动 backend/、package.json 依赖、vite.config.ts。"
+}

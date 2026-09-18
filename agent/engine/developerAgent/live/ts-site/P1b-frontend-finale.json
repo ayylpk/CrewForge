@@ -1,0 +1,48 @@
+{
+  "type": "architect_task",
+  "projectId": "ts-site",
+  "taskId": "ts-site-P1b-frontend-finale",
+  "requirementSnapshot": {
+    "goal": "ts-site P1 收官批：补齐前端（App.vue/style.css/三个视图）→ 装依赖 → 两边构建 → 起服务实测 + 种两个示例项目 → done。后端已完成且编译绿，本任务**不重写后端**。",
+    "context": "已存在：backend 全部五文件（db.ts/projects.ts/index.ts/package.json/tsconfig）+ node_modules + 编译绿；frontend 的 package.json、vite.config.ts、index.html、src/main.ts、src/router/index.ts。缺：frontend node_modules（上一轮 'vite' 未识别=没装依赖）、src/App.vue、src/style.css、src/views/ 三个视图。先 inspectTree + readFile router 确认视图的确切文件名与路由，缺什么补什么。"
+  },
+  "stackProfile": {
+    "frontend": "Vue3 + Vite + TS + vue-router4（骨架已在，只补文件）：npm install 必跑一次 → npm run build（纯 vite build）",
+    "backend": "同 P1：Express4+TS+node:sqlite，dist 已构建；只做回归确认 npm run build 绿，不动逻辑",
+    "database": "node:sqlite ./data/ts-site.db（env DB_FILE 覆盖），已建表"
+  },
+  "domainModel": {
+    "entity": "project（表结构/DTO 见 contract，与已实现代码一致即不动）"
+  },
+  "contract": {
+    "version": "1",
+    "base": "/api",
+    "endpoints": [
+      { "method": "GET", "path": "/api/health", "expectStatus": 200, "responseBody": "{\"ok\":true}" },
+      { "method": "GET", "path": "/api/projects", "expectStatus": 200, "responseBody": "[ProjectDto] 仅 visible=1" },
+      { "method": "GET", "path": "/api/projects/{idOrSlug}", "expectStatus": 200, "notFound": 404 },
+      { "method": "POST", "path": "/api/projects", "expectStatus": 201, "desc": "校验 400/409 分支同 P1 契约" },
+      { "method": "PUT", "path": "/api/projects/{id}", "expectStatus": 200 },
+      { "method": "DELETE", "path": "/api/projects/{id}", "expectStatus": 204 }
+    ],
+    "dtoShape": { "id": "number", "title": "string", "slug": "string", "description": "string", "tags": "string[]", "repo": "string|null", "demoUrl": "string|null", "sortOrder": "number", "visible": "boolean", "createdAt": "ISO string", "updatedAt": "ISO string" },
+    "notes": "scripts/verify-p1-api.mjs 会全链路复测，先 readFile 它；若发现已实现代码与它不符，允许最小 editFile 修后端（不许重写）"
+  },
+  "foundationPlan": {
+    "dirs": ["backend", "frontend"],
+    "workItems": [
+      { "id": "w1-inspect", "kind": "inspect", "title": "核对 router 引用的视图与已有文件", "paths": ["frontend/src"] },
+      { "id": "w2-frontend-finale", "kind": "frontend", "title": "补 App/style/三视图 + install + build", "paths": ["frontend/src"] },
+      { "id": "w3-live", "kind": "pre-test", "title": "起服务实测 + 种示例数据", "paths": ["backend"] }
+    ]
+  },
+  "allowedRoots": ["backend", "frontend"],
+  "forbiddenPaths": ["scripts"],
+  "acceptanceChecks": [
+    { "id": "backend-build", "command": "npm", "args": ["run", "build"], "cwd": "backend", "timeoutMs": 300000, "category": "COMPILE" },
+    { "id": "api-projects", "command": "node", "args": ["../scripts/verify-p1-api.mjs"], "cwd": "backend", "timeoutMs": 180000, "category": "BOOT" },
+    { "id": "frontend-build", "command": "npm", "args": ["run", "build"], "cwd": "frontend", "timeoutMs": 300000, "category": "COMPILE" },
+    { "id": "frontend-pages", "command": "node", "args": ["../scripts/verify-p1-frontend.mjs"], "cwd": "frontend", "timeoutMs": 180000, "category": "RENDER" }
+  ],
+  "developerInstructions": "收官批，预算 16 步内干完，按序：\n1) inspectTree frontend + readFile src/router/index.ts——确认路由挂的视图文件名（Home/Projects/ProjectDetail 的确切路径与命名），readFile main.ts 确认 style.css 是否被引入；\n2) readFile frontend/package.json 与 vite.config.ts，不对才修（build 必须是纯 vite build；proxy 必须 /api→http://localhost:8181）；\n3) runCommand {command:\"npm\",args:[\"install\"],cwd:\"frontend\"}——**必跑**，上一轮就是死在没装依赖（'vite' 不是内部或外部命令）；\n4) writeFile 补齐缺的文件：src/App.vue（顶部暗色导航 #1e293b 两个 router-link 首页/项目 + <router-view/>）、src/style.css（白卡片 #fff、蓝青 #0ea5e9 点缀、若无引用则在 main.ts 加 import \"./style.css\"）、src/views/Home.vue（自我介绍+最新3项目 fetch(\"/api/projects\") slice）、src/views/Projects.vue（全列表卡片：title/description/tags/更新时间→链 /projects/:slug）、src/views/ProjectDetail.vue（fetch(\"/api/projects/\"+route.params.slug)，展示描述/tags/demoUrl 外链/repo；resp.status===404 时显示『项目不存在』+回列表链接）；\n5) runCommand {command:\"npm\",args:[\"run\",\"build\"],cwd:\"frontend\"}，红则按报错 editFile 最小修再跑一次（同一状态不重复跑）；runCommand {command:\"npm\",args:[\"run\",\"build\"],cwd:\"backend\"} 回归确认；\n6) startProcess {command:\"node\",args:[\"dist/index.js\"],cwd:\"backend\"} → readProcess 确认 listen → httpRequest GET http://127.0.0.1:8181/api/health → POST {title:\"CrewForge 多 Agent 编程平台\",slug:\"crewforge\",description:\"流水线协作的 AI 编程平台\",tags:[\"typescript\",\"langgraph\"]} 与 {title:\"Hina AI 陪伴应用\",slug:\"hina\",description:\"带长期记忆的 AI 陪伴\",tags:[\"java\",\"agent\"]} → GET /api/projects 确认 ≥2 条 → stopProcess；\n7) 输出 {\"kind\":\"done\"}。\n\n【禁止】不重写后端（发现与 verify-p1-api.mjs 不符处才允许最小 editFile 修）；不建测试文件；不碰 scripts/；不引新依赖；不做 diary/files/repos（P2/P3 的活）。外部 TestAgent 四段验收是终判。"
+}

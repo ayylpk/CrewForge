@@ -1,0 +1,89 @@
+chore: 目录重构——源码只剩三层 backend / frontend / agent（+ 清掉跑出来的东西）
+
+## 为什么
+
+用户拍板：**项目源码只有三层**，第一级看过去要能一眼分清是哪一层。
+原来四个目录名字还互相打架（`backed-CrewForge` / `fronted-CrewForge` / `agents-CrewForge` /
+`testAgent`——注意 back**ed** 与 front**ed** 都是少了一个字母的拼写），
+外加 `.runs`/`runs`/`_archive`/`.workbuddy`/散落的 png 混在顶层。
+
+## 改成什么
+
+```
+backend/     ← backed-CrewForge（Java：pojo/common/server）
+frontend/    ← fronted-CrewForge（Vue 3 + Vite）
+agent/
+├── engine/     ← agents-CrewForge（Bun 引擎）
+└── testAgent/  ← testAgent（独立验收器）
+```
+
+`deploy/`（真实部署件）、`docs/`（蓝图与本地知识笔记）保留 —— 非源码，且都不是"跑出来的东西"。
+
+**一个顺手的红利**：引擎从 `<根>/agents-CrewForge` 变成 `<根>/agent/engine`，
+而 testAgent 从 `<根>/testAgent` 变成 `<根>/agent/testAgent` —— 两者**相对位置没变**，
+所以 `testAgentAdapter.ts` 的默认值 `path.resolve(import.meta.dir, "..", "testAgent")`
+和它的测试 `"..", "..", "testAgent"` **一行都不用改**，实测仍然指对。
+
+## 清掉的（"跑出来的东西"）
+
+| 清掉 | 体积 | 说明 |
+|---|---|---|
+| `_archive/` | 2.23 MB | 早先清理时的两个 DB 备份（那次操作已完成，现网库是权威） |
+| `runs/` | 0.75 MB | 引擎产物树，改到 `agent/runs/`（下次开工重建） |
+| `.runs/` | 0.1 MB | 引擎本地中间产物 |
+| `.workbuddy/` | 0.06 MB | 工具缓存；其中 7 份知识笔记**移进 `docs/notes/`** 保留 |
+| `todo-ui-preview.png` | 0.02 MB | 散落的截图 |
+| `scripts/` | — | 并入 `deploy/scripts/`（都是"怎么构建/验证这套东西"） |
+
+## ⚠️ 踩到的坑：pnpm 的 Junction 是**绝对路径**
+
+改名之后前端类型检查挂了一片 `Cannot find module '@tabler/icons-vue'`。
+不是缺包 —— 是 pnpm 在 Windows 上用**绝对路径 Junction**：
+
+```
+frontend/node_modules/vue-tsc  →  F:\...\fronted-CrewForge\node_modules\.pnpm\...
+                                  ^^^^^^^^^^^^^^^^^^ 旧名字，改名后全部失效
+```
+
+**9 条顶层 + 572 条 `.pnpm` 内部 + 6 条作用域包**（`@tabler/icons-vue` 这类住在
+`node_modules/@scope/` 下一层，第一遍扫描漏了）全部指旧路径。逐条重建 Junction 后
+`vue-tsc` 回到 0 错。
+（引擎与 testAgent 没事：它们用 bun 装，node_modules 是真目录不是链接。）
+
+**教训**：**Windows 上带 pnpm `node_modules` 的目录不能直接改名** —— 要么先删 `node_modules`
+再重装，要么改名后必须重建全部 Junction。而且这类失败**不报错**，只表现为"某个包找不到"。
+
+## 引擎被移深了一层：所有"往上找仓库根"的路径都要多退一级
+
+这类改动最危险的地方是**静默指错**（不抛错，只是 fallback 到别处或匹配不到）。逐个修并验：
+
+| 文件 | 改动 |
+|---|---|
+| `backendEngineer.ts` | mvnw 兜底：`..` → `..`,`..`；且目录名 `backed-CrewForge` → `backend` |
+| `developerAgent/live/runner.ts` | `REPO_ROOT`/`CREWFORGE_ROOT` 各多退一级（**它正是路径闸门的"控制平面"边界**，指错等于把禁区划歪） |
+| `developerAgent/live/hub-runner.ts` | 同上 |
+| `eval/harness/checks.ts` | `REPO_ROOT` 退四级；mvnw 目录名 |
+| `eval/harness/env.ts` | `REPO_ROOT` 多退一级；探针名 `mvnw(backed-CrewForge)` → `mvnw(backend)` |
+| `engine/exec/verify/*-smoke.ts` | 五级 + `backend`；`runs/p9` → `agent/runs/p9` |
+| `application.yml` / `application.example.yml` | `engine-dir` → `agent/engine`；`runs-root` → `agent/runs` |
+| `deploy/{docker-compose,Dockerfile.app,Dockerfile.web,nginx.conf}`、`deploy/scripts/verify.ps1` | 全量改名；verify.ps1 的 `$root` 多退一级（它从 `scripts/` 挪到了 `deploy/scripts/`，少退一级会让三个路径全落空、"跑完什么都没测"） |
+| `README.md` | 布局表 + 架构图 |
+
+改名用的是一次性 Node 脚本（**显式 utf8 读、utf8 写**），不是 PowerShell 的
+`Get-Content`/`Set-Content` 往返 —— 后者会按控制台代码页解码再按 UTF-8 写回，
+把中文双重编码毁掉（本会话真踩过，整文件变乱码只能靠 git 回滚）。
+
+**不碰历史报告**：`docs/` 与 `eval/baseline/` 里的旧路径一律不改 —— 那些记录的是
+"当时是什么样"，改写它们等于篡改证据。
+
+## 验证
+
+| 检查 | 结果 |
+|---|---|
+| 引擎 `tsc --noEmit` | 0 错 |
+| 前端 `vue-tsc -b --force` | 0 错 |
+| testAgent `bun test tests/` | 77 过 0 败 |
+| 后端 `mvnw package -DskipTests` | 成功 |
+| 前端 node_modules 指向旧目录的链接 | **0 条**（修前 587 条） |
+| `application.yml` 的 engine-dir 真存在吗 | `projectRunner.ts` ✓ `.env` ✓ |
+| 服务 | 前端 5173 / 后端 8080 均已重启可访问 |

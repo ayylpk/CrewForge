@@ -28,7 +28,7 @@ services:
       #    docker-entrypoint-initdb.d 是按文件名顺序全量执行的，migration 会先于基线跑，
       #    而它们全是裸 ALTER ... ADD（给不存在的表加列）→ 初始化直接失败。
       #    schema.sql 是唯一基线（README 快速起环境也是导它）。
-      - ../backed-CrewForge/sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ../backend/sql/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-p${MYSQL_ROOT_PASSWORD}"]
       interval: 10s

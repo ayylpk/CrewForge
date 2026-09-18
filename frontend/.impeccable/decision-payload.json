@@ -1,0 +1,102 @@
+{
+  "title": "Choose the visual world · CrewForge 控制台",
+  "question": "发牌结果：晒图室（图纸工作间）。保留它、换备选、或者重发一手。四张落选挑战者的可取之处已折进第一张卡的 raised 行。",
+  "options": [
+    {
+      "id": "assigned",
+      "label": "晒图室 · The Drawing Office",
+      "kicker": "THE ROLL",
+      "lineage": "mid-century engineering drafting room: cyanotype prints, tracing film, title blocks, revision clouds, approval stamps",
+      "thesis": "整个控制台是一套正在被持续下发的图纸：每个页面是一张有图号和标题栏的图纸，项目的执行过程就是图纸被绘制、会签、盖章。架构师、目录树、验收门在这个世界里都有字面的行话可用。",
+      "palette": ["#e9eef2 制图纸", "#16222e 墨", "#155e93 晒图青", "#c23a2e 验收红", "#d98f1b 待检黄", "#2e8f5b 合格绿"],
+      "materials": ["蓝晒图", "硫酸纸半透叠层", "针管笔线宽层级(0.25/0.5/0.7mm)", "标题栏/会签栏", "橡胶印章", "修订云线", "丁字尺网格"],
+      "viewport": "登录页=领图登记：左 60% 一张蓝晒大图（流水线线稿图，生成图占位），图号 PRJ-0000-A 压在右下角标准标题栏里；右 40% 是标题栏结构的登录表单（账号/密码/进入工作台），加载时线稿按线宽层级自绘一次。无毛玻璃、无渐变字。",
+      "risk": "制图所隐喻容易过度化妆：标题栏若占面积过高会牺牲操作效率（对策：标题栏限高、执行面板用薄版）；浅色纸面对夜班使用者偏亮（对策：冷调低饱和纸色，绝不暖米黄）。",
+      "raised": [
+        { "from": "eboy-pixorama-metropolis", "raise": "图号可 hover 浮现铅笔级出图元数据（出图人/时间/比例）——把'网格深处藏着可发现的细节'折进图纸世界。" },
+        { "from": "scientific-notation-oscilloscope-signal-bench", "raise": "执行面板加一条常驻更新的流水线示波带：相位时间线按 10s tick 实时描画，状态是读出来的仪器数，不是静态文字。" },
+        { "from": "variable-font-specimen", "raise": "层级靠尺寸对比而非套盒：大图号/图纸名用尺规大字（Saira Condensed 数字牌），砍掉一部分卡片嵌套边框。" },
+        { "from": "textiles-weave-drape-fashion-sneaker-box-stacks", "raise": "项目卡统一为索引卡片标签格：图号/名称/修订三栏固定栅格，全站项目卡同一版式，像卷宗柜的脊标。" },
+        { "from": "clouds-storms-auroras-iridescent-cloud-edge", "raise": "彩色只出现在边线与章面：正文区近无色，状态色只在细条、边框、印章处落地。" }
+      ]
+    },
+    {
+      "id": "model-pick",
+      "label": "安灯与看板 · Andon Floor",
+      "kicker": "IMPECCABLE'S PICK",
+      "lineage": "Toyota production system shop floor: andon tower lamps, paper kanban cards, jidoka cord, takt boards",
+      "thesis": "控制台是一块车间看板：三色安灯塔=全局状态，任务=在制品卡片被逐列拉回，确认门=任何人可拉绳停线。",
+      "palette": ["#141a1f 设备深灰", "#f2f3f0 看板卡纸", "#e5533d 停线红", "#f0b429 待料黄", "#42a567 运行绿", "#6f7d8a 钢灰"],
+      "materials": ["塑料灯罩安灯塔", "磁贴卡片", "吊牌卡纸", "粉笔写板", "地面警示胶带"],
+      "viewport": "列表页顶部一排实体安灯塔（绘制/运行/待确认三色灯罩发光），下方任务卡按料架四列，卡片是白卡纸+黑胶带贴边，点击卡片抽出半张。",
+      "case": "我按共鸣度排第一的自主提案：机制贴合度最高（流水线状态就是产品本体），状态色语义直接继承旧口径。",
+      "risk": "这是 AI 流水线控制台这个品类最常落到的方向（暗底+状态灯+看板卡），熟人第一眼觉得'眼熟'；灯罩拟物与卡纸拟物两种材质混编，失手就散。"
+    },
+    {
+      "id": "challenger-starship",
+      "label": "星舰船员终端 · Starship Crew Terminal",
+      "verdict": "competitive",
+      "lineage": "Alien/Nostromo-era used future: phosphor CRTs, stenciled equipment codes, hazard pictogram plates",
+      "thesis": "飞船准备室的公用终端：绿磷光一行行打出任务，琥珀灯=警戒，危险条纹板标出不能碰的区。",
+      "palette": ["#0a0f0a CRT黑", "#46f27a 磷光绿", "#ffb347 琥珀警", "#d8d3c8 油污面板白", "#1a1a1a 模板黑"],
+      "materials": ["曲面CRT辉光", "军用漏字板(stencil)", "危险条纹铭牌", "磨损金属面板"],
+      "viewport": "主屏=绿磷光任务状态板，日志逐字符打印，确认门整屏切琥珀+危险条纹横幅。",
+      "case": "受众认同轴完胜（这就是这批开发者的精神老家，旧藏青赛博口径的正面版本），但'一屏一行一问'的拓扑扛不住看板+文件树+编辑器三面板并行的工作台，产品清晰度轴败给晒图室。",
+      "risk": "极易滑向复古未来 cosplay；磷光绿长时间阅读疲劳；逐字打印动效在 10s 轮询节奏下显得假忙。",
+      "hero": "https://impeccable.style/worlds/cards/pop-culture-shelf-industrial-starship-terminal-hero.webp",
+      "board": "https://impeccable.style/worlds/cards/pop-culture-shelf-industrial-starship-terminal.webp"
+    },
+    {
+      "id": "challenger-pixorama",
+      "label": "eBoy 像素大都会",
+      "verdict": "declined",
+      "case": "认同轴只有审美层（像素游戏情怀），等距城市放大看任务的拓扑对产品清晰度双轴全败。",
+      "kept": "已折进 THE ROLL：hover 发现隐藏元数据的彩蛋纪律（raised 第1条）。",
+      "hero": "https://impeccable.style/worlds/cards/eboy-pixorama-metropolis-hero.webp"
+    },
+    {
+      "id": "challenger-scope",
+      "label": "示波器信号台",
+      "verdict": "declined",
+      "case": "受众是电子工程师不是软件操作员（认同轴弱）；'一个时基一个屏'扛不住并行任务（清晰度轴弱），且撞'近黑底+单一荧光绿'的品类默认脸。",
+      "kept": "已折进 THE ROLL：常驻实时仪器读数纪律（raised 第2条）。",
+      "hero": "https://impeccable.style/worlds/cards/scientific-notation-oscilloscope-signal-bench-hero.webp"
+    },
+    {
+      "id": "challenger-specimen",
+      "label": "可变字体样张台",
+      "verdict": "declined",
+      "case": "滑杆形变字体是单点噱头，对流水线状态叙事无贡献，双轴全败。",
+      "kept": "已折进 THE ROLL：尺寸对比做层级、少套盒（raised 第3条）。",
+      "hero": "https://impeccable.style/worlds/cards/variable-font-specimen-hero.webp"
+    },
+    {
+      "id": "challenger-sneaker",
+      "label": "球鞋档案墙",
+      "verdict": "declined",
+      "case": "消费收藏文化与开发工具语境相悖，拉盒掀盖动效遮挡信息，双轴全败。",
+      "kept": "已折进 THE ROLL：统一索引卡标签格（raised 第4条）。",
+      "hero": "https://impeccable.style/worlds/cards/textiles-weave-drape-fashion-sneaker-box-stacks-hero.webp"
+    },
+    {
+      "id": "challenger-cloud",
+      "label": "虹彩云观测页",
+      "verdict": "declined",
+      "case": "气象科普的温柔白与工程调度的确定性相反，双轴全败；但它证明浅底方案在本品类可行。",
+      "kept": "已折进 THE ROLL：彩色只出现在边线、正文无色域（raised 第5条）。",
+      "hero": "https://impeccable.style/worlds/cards/clouds-storms-auroras-iridescent-cloud-edge-hero.webp"
+    }
+  ],
+  "reroll": { "registers": ["safer", "bolder"] },
+  "buildPath": { "value": "code", "toggle": false },
+  "canon": true,
+  "canonCard": {
+    "label": "品类标准脸 · Neutral Modern Console",
+    "thesis": "Linear/Vercel 式中性质感控制台：白灰底+单一蓝主色+表格卡片+状态徽章，以满分工艺执行这个品类该长的样子。",
+    "palette": ["#ffffff", "#f6f8fa 灰纸", "#111827 墨", "#2563eb 标准蓝", "#16a34a", "#dc2626"],
+    "materials": ["细边框卡片", "表格", "状态徽章", "轻量阴影"],
+    "viewport": "顶栏导航+项目表格+右侧详情抽屉，访客预期内的排版。",
+    "risk": "与任何同类产品不可区分——这是选它的全部理由也是唯一代价。"
+  },
+  "steer": true
+}

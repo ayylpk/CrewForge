@@ -8,29 +8,33 @@
 
 | 端 | 目录 | 技术 |
 |---|---|---|
-| 前端 | `fronted-CrewForge/` | Vue 3 + Vite + TypeScript + Element Plus（藏青/午夜蓝赛博朋克风） |
-| 后端 | `backed-CrewForge/` | Spring Boot 3 + MyBatis-Plus + MySQL 8 + JWT（`pojo/common/server` 三模块） |
-| Agent 引擎 | `agents-CrewForge/` | Bun + TypeScript + LangChain.js / LangGraph.js |
-| 独立验收器 | `testAgent/` | Bun + TypeScript：只读独立验收（`--verify`，零 LLM / 不写目标项目），被引擎的 test-core 工位 spawn |
+| 前端 | `frontend/` | Vue 3 + Vite + TypeScript + Element Plus（藏青/午夜蓝赛博朋克风） |
+| 后端 | `backend/` | Spring Boot 3 + MyBatis-Plus + MySQL 8 + JWT（`pojo/common/server` 三模块） |
+| Agent 引擎 | `agent/engine/` | Bun + TypeScript + LangChain.js / LangGraph.js |
+| 独立验收器 | `agent/testAgent/` | Bun + TypeScript：只读独立验收（`--verify`，零 LLM / 不写目标项目），被引擎的 test-core 工位 spawn |
 
-> `testAgent/` 原先在仓外（`F:/code/agent/testAgent`）单独一个仓库，2026-09-18 搬进本仓——
+> `agent/testAgent/` 原先在仓外（`F:/code/agent/testAgent`）单独一个仓库，2026-09-18 搬进本仓——
 > 现在 clone 下来就自带裁判，不再依赖某台机器上的绝对路径。
-> 接线在 `agents-CrewForge/testAgentAdapter.ts`（默认 `path.resolve(import.meta.dir, "..", "testAgent")`，
+> 接线在 `agent/engine/testAgentAdapter.ts`（默认 `path.resolve(import.meta.dir, "..", "testAgent")`，
 > 可用 `TESTAGENT_DIR` 覆盖）。它与引擎之间是**手工镜像的契约**（`testAgent/src/verify.ts` ↔ 适配器里的
 > 类型，跨仓不 import），改动一边时另一边要同步。
 
 ## 架构
 
 ```
-┌──────────────┐  REST + JWT   ┌──────────────────┐   spawn (bun run projectRunner.ts)   ┌─────────────────────┐
-│ fronted :5173 │ ────────────→ │  backed :8080     │ ──────────────────────────────────→ │ agents-CrewForge     │
-│ 看板/对话/设置 │ ←──────────── │ ProjectRun 进程管理│ ←────────────────────────────────── │ 消息版团队 + 拆分图    │
-└──────────────┘  轮询 sys_task │ sys_* 全部落库     │   回调 java_base_url（缓存清理等）     │ Hub 进程内消息总线     │
-                                └────────┬─────────┘                                     └──────────┬──────────┘
-                                         │                     MySQL crewforge                       │
-                                         └────────────────── sys_* ←────────────────────────────────┘
-                                             sys_task=引擎与看板的桥（任务为原子）
+┌───────────────┐  REST + JWT  ┌───────────────────┐  spawn (bun run projectRunner.ts)  ┌────────────────────┐
+│ frontend :5173│ ───────────→ │  backend :8080    │ ─────────────────────────────────→ │ agent/engine       │
+│ 看板/对话/设置 │ ←─────────── │ ProjectRun 进程管理│ ←───────────────────────────────── │ 消息版团队 + 拆分图   │
+└───────────────┘ 轮询 sys_task │ sys_* 全部落库     │  回调 java_base_url（缓存清理等）    │ Hub 进程内消息总线    │
+                                └─────────┬─────────┘                                    └──────────┬─────────┘
+                                          │                    MySQL crewforge                        │
+                                          └───────────────── sys_* ←───────────────────────────────────┘
+                                              sys_task=引擎与看板的桥（任务为原子）
 ```
+
+> 2026-09-18 目录重构：`backed-CrewForge` → `backend`、`fronted-CrewForge` → `frontend`、
+> `agents-CrewForge` → `agent/engine`、`testAgent` → `agent/testAgent`；
+> 仓库根只留这三层（外加 `deploy/` 与本地知识 `docs/`），跑出来的 `runs/` 改到 `agent/runs/`。
 
 **架构定性**：message-driven hierarchical pipeline multi-agent——workflow 骨架（门控/路由/计数/收敛全用代码），LLM 只在工位上产出内容，无运行时 supervisor。
 
@@ -47,7 +51,7 @@ architect → manager   : phase_request（阶段收尾，runner 代发下一阶�
 > 9/15 换代：后端开发+前端开发+Merger 三工位退役，由 `developerAgent/`（bun+LangGraph 单开发流，
 > 自带编译/契约/验收判据消费）整体替换；装配层 `developerTeamRunner.ts`，团队入口不变（`projectRunner.ts`）。
 
-**数据模型**（MySQL `crewforge`，全表结构基线见 `backed-CrewForge/sql/schema.sql`）：
+**数据模型**（MySQL `crewforge`，全表结构基线见 `backend/sql/schema.sql`）：
 自定义 Agent 池 `sys_agent` + 节点声明 `sys_agent_node` + 连线 `sys_agent_edge` → 加入项目时**整表复制**为 `sys_project_agent` / `sys_project_agent_node`（复制非引用，项目间互不干扰）；产物文件 `sys_project_file`；任务桥 `sys_task`；确认门 `sys_confirm`；运行时配置 `sys_settings`（cc-switch 式：模型名/URL/key/回调基址——DB 连接参数在 `.env`，自举约束）。
 
 ## 快速起环境
@@ -55,19 +59,19 @@ architect → manager   : phase_request（阶段收尾，runner 代发下一阶�
 ```bash
 # 1. 建库导基线（12 表，含默认配置行）
 mysql -u root -p -e "CREATE DATABASE crewforge DEFAULT CHARSET utf8mb4"
-mysql --default-character-set=utf8mb4 -u root -p crewforge < backed-CrewForge/sql/schema.sql
+mysql --default-character-set=utf8mb4 -u root -p crewforge < backend/sql/schema.sql
 
 # 2. 后端（先改 application.yml 的 DB 账号密码 + project-run 的 engine-dir/runs-root 路径）
-cd backed-CrewForge && ./mvnw spring-boot:run        # :8080
+cd backend && ./mvnw spring-boot:run        # :8080
 
 # 3. 引擎（先建 .env：DB_PASSWORD=*** DEEPSEEK_API_KEY=***
-cd agents-CrewForge && bun install
+cd agent/engine && bun install
 #    模型走 sys_settings 设置页（cc-switch 式，Web/API 均可配，引擎 30s 热生效）
 #    手动驱动（Java 未点开工时的调试入口，产物落仓库根 runs/）：
 PROJECT_ID=1 AUTO_CONFIRM=1 RUNS_ROOT=../runs bun run projectRunner.ts 1
 
 # 4. 前端
-cd fronted-CrewForge && npm install && npm run dev    # :5173
+cd frontend && npm install && npm run dev    # :5173
 ```
 
 ## 当前状态（2026-09 修复路线，详见《CrewForge-全链接修复计划》）
@@ -104,7 +108,7 @@ cd fronted-CrewForge && npm install && npm run dev    # :5173
   git checkout 4264873 -- _legacy-agents              # 整体恢复到工作区
   ```
   ⚠️ 同目录下的 `.env` **从未进过 git**（被 `**/.env` 拦住），已随目录一起删除且不可恢复 ——
-  里面有一把 `TAVILY_API_KEY`（DeepSeek 那把与 `agents-CrewForge/.env` 是同一把，副本而已）。
+  里面有一把 `TAVILY_API_KEY`（DeepSeek 那把与 `agent/engine/.env` 是同一把，副本而已）。
   当前引擎代码没有任何一处读该变量，需要时去 Tavily 后台重签即可。
   引擎源码里"移植自 `_legacy-agents/xxx.ts`"那几处注释是**历史出处说明**（描述代码从哪搬来），
   文件删掉后这些说法依然成立，只是要查原文得走上面的 `git show`。

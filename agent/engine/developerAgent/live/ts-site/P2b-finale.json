@@ -1,0 +1,45 @@
+{
+  "type": "architect_task",
+  "projectId": "ts-site",
+  "taskId": "ts-site-P2b-finale",
+  "requirementSnapshot": {
+    "goal": "ts-site P2 收官批：后端 repos/files 已完成（files 六断言架构师亲测全绿；repos 仅差示例仓库第 3 个文件 src/util.ts——当前 fileCount=2 探针判失败）。本期真正欠的活是**前端 /repos /files 两个页面**（一行都还没写）。补齐→构建→实测→done。",
+    "context": "已存在且绿：backend/src/repos.ts、files.ts、db.ts(file_entry)、index.ts 挂载、multer 已装、hello-world/README.md+src/main.ts。缺：backend/data/repos/hello-world/src/util.ts、frontend/src/views/Repos.vue、frontend/src/views/Files.vue、router /repos /files 两条、App.vue 导航两项。禁止重写已有后端代码。"
+  },
+  "stackProfile": {
+    "frontend": "npm run build（已装依赖）；Vue3+router 骨架在，只需加视图与路由",
+    "backend": "npm run build；只补一个示例仓库文本文件，不动逻辑",
+    "database": "无变化"
+  },
+  "domainModel": { "entity": "file_entry + repos 文件树（契约同 P2，均已在实现中）" },
+  "contract": {
+    "version": "1",
+    "base": "/api",
+    "endpoints": [
+      { "method": "GET", "path": "/api/repos", "expectStatus": 200, "desc": "hello-world fileCount 将=3" },
+      { "method": "GET", "path": "/api/repos/hello-world/tree", "expectStatus": 200, "desc": "README.md + src/{main.ts,util.ts}" },
+      { "method": "GET", "path": "/api/repos/hello-world/file?path=src/util.ts", "expectStatus": 200 },
+      { "method": "GET", "path": "/api/files", "expectStatus": 200 }
+    ],
+    "notes": "探针：verify-p1-api(P1回归) + verify-p2-repos + verify-p2-files + verify-p2-frontend，全部先 readFile 看清判据"
+  },
+  "foundationPlan": {
+    "dirs": ["backend", "frontend"],
+    "workItems": [
+      { "id": "w1-seed", "kind": "backend", "title": "补 hello-world/src/util.ts", "paths": ["backend/data/repos/hello-world"] },
+      { "id": "w2-fe-pages", "kind": "frontend", "title": "Repos.vue + Files.vue + 路由 + 导航", "paths": ["frontend/src"] },
+      { "id": "w3-pre-test", "kind": "pre-test", "title": "构建与服务实测", "paths": ["backend", "frontend"] }
+    ]
+  },
+  "allowedRoots": ["backend", "frontend"],
+  "forbiddenPaths": ["scripts"],
+  "acceptanceChecks": [
+    { "id": "backend-build", "command": "npm", "args": ["run", "build"], "cwd": "backend", "timeoutMs": 300000, "category": "COMPILE" },
+    { "id": "api-projects-regression", "command": "node", "args": ["../scripts/verify-p1-api.mjs"], "cwd": "backend", "timeoutMs": 180000, "category": "CONTRACT" },
+    { "id": "api-repos", "command": "node", "args": ["../scripts/verify-p2-repos.mjs"], "cwd": "backend", "timeoutMs": 180000, "category": "CONTRACT" },
+    { "id": "api-files", "command": "node", "args": ["../scripts/verify-p2-files.mjs"], "cwd": "backend", "timeoutMs": 180000, "category": "CONTRACT" },
+    { "id": "frontend-build", "command": "npm", "args": ["run", "build"], "cwd": "frontend", "timeoutMs": 300000, "category": "COMPILE" },
+    { "id": "frontend-pages", "command": "node", "args": ["../scripts/verify-p2-frontend.mjs"], "cwd": "frontend", "timeoutMs": 180000, "category": "RENDER" }
+  ],
+  "developerInstructions": "收官批，预算 14 步，按序，禁止回头重做已完成部分：\n1) writeFile backend/data/repos/hello-world/src/util.ts——导出 1~2 个简单函数（如 add/greet），几行即可（探针要求 hello-world fileCount≥3 且 src 下 main.ts+util.ts 并列，tree 节点 path=src/util.ts）；\n2) readFile frontend/src/router/index.ts 与 frontend/src/App.vue——看清既有结构后 editFile 最小增量：router 加 /repos→views/Repos.vue、/files→views/Files.vue 两条；App.vue 导航加『源码』『文件』两个 router-link；\n3) writeFile src/views/Repos.vue：仓库列表（fetch \"/api/repos\"）→ 点仓库 fetch tree 渲染缩进文件树 → 点文件 fetch `/api/repos/${name}/file?path=${encodeURIComponent(p)}` 把 content 放进 <pre>；非 200 给可读提示；\n4) writeFile src/views/Files.vue：input[type=file]+上传按钮（new FormData + fetch POST /api/files）+列表（name/大小KB/mime/时间+下载 a[href=/api/files/id/download]+删除按钮 fetch DELETE）+上传后刷新；样式沿用现有 CSS 变量；\n5) runCommand {command:\"npm\",args:[\"run\",\"build\"],cwd:\"frontend\"} 红则按报错最小修；\n6) runCommand {command:\"npm\",args:[\"run\",\"build\"],cwd:\"backend\"} 回归；\n7) startProcess {command:\"node\",args:[\"dist/index.js\"],cwd:\"backend\"} → httpRequest 实测 /api/repos（fileCount 应为 3）与 /api/files → stopProcess → {\"kind\":\"done\"}。\n\n【禁止】重写 repos.ts/files.ts/既有页面；碰 scripts/；加依赖；做 P3 功能。六段验收（含 P1 回归）外部终判。"
+}

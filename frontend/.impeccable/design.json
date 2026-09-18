@@ -1,0 +1,32 @@
+{
+  "name": "晒图室 · The Drawing Office",
+  "aka": "THE ROLL",
+  "seed": "89b0257e",
+  "date": "2026-09-17",
+  "world": "AI 软件团队=一间晒图室：经理登记、架构师铺图板、开发画图、测试盖红圈、老板翻台账。界面语言是图纸、图签、图章、格线，不是仪表盘。",
+  "scope": "六个活跃页已重塑（LoginView ProjectsView CreateProjectView ProjectDetailView ArchitectView ExecutionView）；TeamView/AgentRepository/AgentForm 封存待旧皮恢复，EP 仍在 package.json",
+  "palette": {
+    "paper": "#e9eef2",
+    "paperRaised": "#f3f6f8",
+    "paperDeep": "#dde5eb",
+    "ink": "#16222e",
+    "ink2": "#46586a",
+    "ink3": "#5f7280",
+    "line": "#b9c6d1",
+    "line2": "#8fa3b3",
+    "cyan": "#155e93",
+    "cyanPlate": "#0e3a5c",
+    "stamps": { "pass": "#2e8f5b", "void": "#c23a2e", "wait": "#d98f1b", "pencil": "#5f7280", "rust": "#a05a2c" }
+  },
+  "type": {
+    "display": "Oswald",
+    "mono": "JetBrains Mono",
+    "body": "system-ui",
+    "scale": { "sheet": "clamp(34px,5vw,56px)", "h1": "26px", "h2": "17px", "body": "14px", "meta": "12px" },
+    "radii": ["2px", "4px", "8px"]
+  },
+  "components": ["TopBar(图签顶栏)", "sheet-no(图号)", "StampSeal(图章+stamp-press)", "tblock(标题栏条,≤480折2×2)", "lamp(信号灯)", "panel/rows/row", "revision-cloud(错误红圈)", "empty-sheet", "skeleton", "AppModal", "toast/confirm 自研总线"],
+  "motion": { "ease": "cubic-bezier(0.16,1,0.3,1)", "dur": "0.16s", "durSlow": "0.42s", "rules": "sheet-fall 进页；route-enter 只入场；reduced-motion 全停" },
+  "dataDiscipline": ["usePolling 10s 统一且必须 start()", "sys_task 唯一数据源", "localStorage 键名冻结 cf_token/cf_confirm_mode/cf_files_{id}", "mock 台词逐字保留", "状态 label/tone 单源 constants/status.ts"],
+  "pitfalls": ["style.css 旧名别名块禁自引用 var（9/17 青色全灭事故）", "Edge headless 窗口最小宽 510px——窄屏取证须 CDP Emulation.setDeviceMetricsOverride，--window-size 是假的"]
+}

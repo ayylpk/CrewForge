@@ -1,0 +1,59 @@
+{
+  "projectId": "ts-site-v2",
+  "phase": 2,
+  "pmPlan": {
+    "project": "ts-site-v2",
+    "features": [
+      { "name": "前端页面", "description": "Vue3+Vite+TS 登录页/首页/项目管理页，完整 CRUD 表单真实调用 P1-A 后端，温馨治愈奶油风" },
+      { "name": "页面路由", "description": "vue-router 三路由 + 后端 SPA fallback 下 /login、/、/projects 深链 200" }
+    ],
+    "phases": [
+      { "phase": 2, "name": "P1-B 前端", "goal": "前端三页 + 构建绿 + 页面路由与后端回归验收通过", "features": ["前端页面", "页面路由"] }
+    ]
+  },
+  "semantics": {
+    "goal": "P1-B（仅前端）：在 P1-A 已验收的后端之上，做 Vue3+Vite+TS 登录页/首页/项目管理页与路由，前端构建绿，页面路由与后端回归全部通过外部验收。",
+    "features": [
+      { "name": "前端页面", "description": "frontend/：index.html、src/main.ts、src/App.vue、src/router/index.ts、views/{Login,Home,Projects}.vue、src/style.css；登录页提交真实打 POST /api/auth/login 并存 token；项目管理页有完整增删改查表单（新增/编辑/删除+确认）真实调受保护 API；首页渲染 GET /api/projects 卡片列表；全局 CSS 变量 --cream:#fdf6ec/--sun:#f5a623/--accent:#f7b6d0，12px 圆角卡片柔和阴影，三页必须引用；npm run build 产出 dist/index.html 供后端托管" },
+      { "name": "页面路由", "description": "vue-router 注册 / /login /projects 三路由；后端 SPA fallback（P1-A 已预埋）让深链 GET 返回 index.html 200；后端代码不许动——若发现后端问题，在 README 记录并停下，那属于 P1-A 返工不是本任务" }
+    ],
+    "stack": {
+      "frontend": "Vue 3 + Vite + TypeScript + vue-router（纯手写 CSS，禁 UI 组件库）",
+      "backend": "Express 4 + TypeScript（P1-A 已交付，本任务只读不改）",
+      "database": "node:sqlite（已就绪，不动）",
+      "why": "拆分验收：前端独立小预算闭环，后端问题不背锅"
+    },
+    "entities": [
+      { "entity": "Project", "table": "projects", "fields": [
+        { "name": "id", "type": "INTEGER", "remark": "P1-A 已建，前端只消费" }
+      ] }
+    ],
+    "endpoints": [
+      { "method": "GET", "path": "/api/health", "purpose": "后端回归：还活着", "expectedStatus": 200, "expectBodyContains": "ok" },
+      { "method": "GET", "path": "/api/projects", "purpose": "数据回归：P1-A 的持久化标记仍在（同库同目录）", "expectedStatus": 200, "expectBodyContains": "P1A冒烟-阿尔法" },
+      { "method": "POST", "path": "/api/auth/login", "purpose": "鉴权回归：登录 200 出 token", "expectedStatus": 200, "body": { "username": "admin", "password": "123456" }, "expectBodyContains": "token" },
+      { "method": "GET", "path": "/", "purpose": "前端产物已被后端托管（SPA 壳 200）", "expectedStatus": 200 },
+      { "method": "GET", "path": "/login", "purpose": "登录页深链 200（fallback 生效）", "expectedStatus": 200 },
+      { "method": "GET", "path": "/projects", "purpose": "项目管理页深链 200", "expectedStatus": 200 }
+    ],
+    "pages": [
+      { "path": "/login", "purpose": "登录表单：用户名/密码/提交，失败显示错误，成功存 token 跳首页" },
+      { "path": "/", "purpose": "首页：欢迎区 + 项目卡片（GET /api/projects）+ 管理入口" },
+      { "path": "/projects", "purpose": "项目管理：新增/编辑/删除表单真实调用 API（带 token）" }
+    ],
+    "workItems": [
+      { "id": "w1-foundation", "kind": "foundation", "title": "frontend 工程文件补全（package.json/vite.config/tsconfig/index.html/main.ts/App.vue）", "paths": ["frontend"] },
+      { "id": "w4-frontend", "kind": "frontend", "title": "router + 三页视图 + style.css 色板", "paths": ["frontend/src"] },
+      { "id": "w5-pre-test", "kind": "pre-test", "title": "npm install（最多一次）+ npm run build 绿 + 起后端自测三条深链" }
+    ],
+    "instructions": "【范围铁律】只准读写 frontend/；backend/ 一律只读（发现后端问题记 README 停下，别顺手改——改了回归判据就说不清是谁的责任）。P1-A 已把后端跑在 ../backend（node dist/index.js，默认 8182），开发期可用它联调。前端 Vue3+Vite+TS+vue-router，纯手写 CSS，禁 UI 组件库与任何原生依赖；npm install 最多一次，失败如实报 ENV 不重复装。构建 npm run build 必须绿（验收 COMPILE 判据），产出 dist/ 后后端静态托管直接可读——验收器不起 vite，只打后端端口的深链：/、/login、/projects 必须 200（这依赖 P1-A 预埋的 SPA fallback；若 404 说明 fallback 与 dist 路径没对上，改你 frontend 的构建输出路径配置，仍不许动 backend）。全局样式变量 --cream:#fdf6ec/--sun:#f5a623/--accent:#f7b6d0 并被三页真实引用；项目管理页必须有完整增删改查表单且真实带 token 调 API。【修复纪律（最高优先级）】构建/验收报错时：①完整读 stdout/stderr 定位；②只改与错误直接相关文件；③重跑同一条失败命令一次；④同错第三次出现前必须换思路或停下记录，不许原样重复；⑤每轮只输出协议要求的 JSON 决策，禁止长篇解释。验收器只认机器证据，糊弄必然红。",
+    "risks": [
+      "SPA fallback 深链 200 依赖前端构建产物路径与后端静态目录对上（vite outDir=dist 默认即可）",
+      "前端 dev 联调若另起 vite 5173 端口，验收器不看它——以构建产物为准"
+    ]
+  },
+  "budget": { "files": 10, "installSteps": 1, "buildSteps": 1, "selfCheckSteps": 2, "rounds": 3 },
+  "maxStepsPerLoop": 16,
+  "maxLlmCalls": 20,
+  "serve": { "command": "node", "args": ["dist/index.js"], "cwd": "backend", "portEnv": "PORT", "bootWaitMs": 30000, "healthPath": "/api/health" }
+}

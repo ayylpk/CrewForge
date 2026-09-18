@@ -1,0 +1,55 @@
+{
+  "type": "architect_task",
+  "projectId": "mysite",
+  "taskId": "mysite-T7-restore-diary",
+  "requirementSnapshot": {
+    "goal": "恢复手术：diary 后端模块（DiaryEntry/DiaryRepository/DiaryDto/DiaryService/DiaryController 五文件）在 T4 修复轮被误删（当时未进 git，无法回滚，只能照契约重写）。契约与 T3a 完全一致，端到端验收一并跑。",
+    "context": "现存后端：Project 五件套 + FileAsset 四件套均完好；前端 DiaryList.vue 已在调 /api/diaries（不要动前端）。H2 配置 application.yml 保持现状。"
+  },
+  "stackProfile": {
+    "frontend": "Vue3 + Vite + TS（本任务不动）",
+    "backend": "Spring Boot 3.5.5 + Java 17；构建 backend/mvnw.cmd -q package -DskipTests",
+    "database": "H2 file MODE=MySQL + ddl-auto=update"
+  },
+  "domainModel": {
+    "entity": "diary_entry",
+    "table": "diary_entry",
+    "fields": [
+      { "name": "id", "type": "bigint", "pk": true, "auto": true },
+      { "name": "title", "type": "varchar(200)", "nullable": false },
+      { "name": "content", "type": "TEXT", "nullable": false, "note": "columnDefinition=TEXT" },
+      { "name": "mood", "type": "varchar(20)", "nullable": true },
+      { "name": "tags", "type": "varchar(500)", "nullable": true, "note": "库内逗号分隔；API 层字符串数组，service join/split" },
+      { "name": "created_at", "type": "datetime", "nullable": false, "auto": "插入时" },
+      { "name": "updated_at", "type": "datetime", "nullable": false, "auto": "更新时" }
+    ],
+    "namingRule": "表/列照抄；实体类 DiaryEntry，参照现存 Project.java 的注解风格"
+  },
+  "contract": {
+    "version": "1",
+    "base": "/api/diaries",
+    "endpoints": [
+      { "method": "GET", "path": "/api/diaries", "query": "?year=&month= 可选过滤（两个都给才过滤）", "expectStatus": 200, "responseBody": "[DiaryDto] created_at desc" },
+      { "method": "GET", "path": "/api/diaries/{id}", "expectStatus": 200, "notFound": 404 },
+      { "method": "POST", "path": "/api/diaries", "body": "{title必填,content必填,mood?,tags:[]|null}", "expectStatus": 201, "invalidRequest": 400 },
+      { "method": "PUT", "path": "/api/diaries/{id}", "expectStatus": 200, "invalidRequest": 400, "notFound": 404 },
+      { "method": "DELETE", "path": "/api/diaries/{id}", "expectStatus": 204, "notFound": 404 }
+    ],
+    "dtoShape": { "id": "number", "title": "string", "content": "string", "mood": "string|null", "tags": "string[]（空存返回[]）", "createdAt": "ISO", "updatedAt": "ISO" },
+    "notes": "裸资源不套壳，与 ProjectController 同风格"
+  },
+  "foundationPlan": {
+    "dirs": ["backend"],
+    "workItems": [
+      { "id": "w1-restore", "kind": "backend", "title": "照契约重写 diary 五文件", "paths": ["backend/src/main/java/com/kangzong/mysite"] }
+    ]
+  },
+  "allowedRoots": ["backend", "frontend"],
+  "forbiddenPaths": ["backend/mvnw", "backend/mvnw.cmd", "backend/.mvn", "scripts"],
+  "acceptanceChecks": [
+    { "id": "backend-build", "command": "mvnw.cmd", "args": ["-q", "package", "-DskipTests"], "cwd": "backend", "timeoutMs": 600000, "category": "COMPILE" },
+    { "id": "diary-loop", "command": "node", "args": ["../scripts/verify-t3a.mjs"], "cwd": "backend", "timeoutMs": 120000, "category": "BOOT" },
+    { "id": "end-to-end", "command": "node", "args": ["../scripts/verify-t6.mjs"], "cwd": "frontend", "timeoutMs": 180000, "category": "BOOT" }
+  ],
+  "developerInstructions": "外科手术任务，红线先读：\n**本任务禁止删除/回滚任何现存文件**（上轮就是乱删把 diary 删没了）。只允许：新增 Diary* 五文件 + 必要的最小修改。\n1) readFile 看 Project.java/ProjectController.java/ProjectService.java 的现状风格，照抄分层写：entity/DiaryEntry、repository/DiaryRepository、dto/DiaryDto、service/DiaryService、controller/DiaryController（包路径 com.kangzong.mysite.*）。\n2) 年月过滤：Repository 派生 findByCreatedAtBetween(start,end) 或等价；tags 逗号串↔数组在 service 转换。\n3) 写完直接 runBuild backend 一次；绿了 done。前端/后端其他模块/application.yml 全都不动。验收会连跑三条：构建、diary 真启动全链路（verify-t3a）、端到端总闸（verify-t6，含前端代理读写三模块）——diary 缺一个端点都会被逮。"
+}

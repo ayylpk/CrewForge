@@ -1,0 +1,177 @@
+{
+  "type": "architect_task",
+  "projectId": "p0",
+  "taskId": "todo-lite",
+  "requirementSnapshot": {
+    "goal": "做一个本地单用户待办清单 Web 应用，支持新增、查看、标记完成/撤销、删除、按状态筛选并持久化数据。"
+  },
+  "stackProfile": {
+    "frontend": "vue3+vite+typescript",
+    "backend": "node+express+typescript",
+    "database": "sqlite"
+  },
+  "domainModel": {
+    "entity": "Todo(id, title, note, completed, createdAt); id 为 SQLite integer 自增主键；title 必填；note 可选；completed 为布尔值；createdAt 为 ISO 时间字符串；单用户无 User 实体；列表按 createdAt 倒序。"
+  },
+  "contract": {
+    "version": "1",
+    "endpoints": [
+      {
+        "method": "POST",
+        "path": "/api/todos",
+        "purpose": "新增待办；入参 JSON 中 title(string) 必填，note(string) 可选；title 缺失或为空字符串返回 400。",
+        "response": "201 时返回 { data: Todo }，data.completed 为 false，data.createdAt 为创建时间；400 时返回 { error: { message } }。"
+      },
+      {
+        "method": "GET",
+        "path": "/api/todos",
+        "purpose": "查看待办列表；查询参数 status 可选，取值 all/active/completed，默认 all；返回全部或按状态筛选后的结果，并按 createdAt 倒序。",
+        "response": "200 时返回 { data: Todo[] }，每个 Todo 包含 id、title、note、completed、createdAt。"
+      },
+      {
+        "method": "PATCH",
+        "path": "/api/todos/:id",
+        "purpose": "标记完成或撤销完成；入参 JSON 中 completed(boolean) 必填；id 不存在返回 404。",
+        "response": "200 时返回 { data: Todo }，data.completed 为更新后的布尔值；404 时返回 { error: { message } }。"
+      },
+      {
+        "method": "DELETE",
+        "path": "/api/todos/:id",
+        "purpose": "删除指定待办；path 参数 id(integer) 必填；id 不存在返回 404。",
+        "response": "200 时返回 { data: { id } }；404 时返回 { error: { message } }。"
+      }
+    ]
+  },
+  "foundationPlan": {
+    "dirs": [
+      "backend",
+      "frontend"
+    ],
+    "workItems": [
+      {
+        "id": "w1",
+        "kind": "foundation",
+        "title": "搭建 backend 与 frontend 工程骨架，包含 package 配置、入口文件、目录结构和构建配置。",
+        "paths": [
+          "backend",
+          "frontend"
+        ]
+      },
+      {
+        "id": "w2",
+        "kind": "database",
+        "title": "在 backend 中实现 SQLite 存储初始化、todos 表创建与基础数据访问。",
+        "paths": [
+          "backend"
+        ]
+      },
+      {
+        "id": "w3",
+        "kind": "backend",
+        "title": "实现待办 REST 接口：新增、列表查询、按状态筛选、标记完成/撤销、删除。",
+        "paths": [
+          "backend/src"
+        ]
+      },
+      {
+        "id": "w4",
+        "kind": "frontend",
+        "title": "实现待办清单页面：新增表单、列表展示、全部/未完成/已完成筛选、完成/撤销、删除、已完成视觉区分。",
+        "paths": [
+          "frontend/src"
+        ]
+      },
+      {
+        "id": "w5",
+        "kind": "pre-test",
+        "title": "送检前自检：本地构建前后端，启动服务并跑通新增、查看、筛选、完成/撤销、删除主链路。",
+        "paths": [
+          "backend",
+          "frontend"
+        ]
+      }
+    ]
+  },
+  "allowedRoots": [
+    "backend",
+    "frontend"
+  ],
+  "forbiddenPaths": [],
+  "acceptanceChecks": [
+    {
+      "id": "ac-1",
+      "kind": "COMPILE",
+      "target": "backend"
+    },
+    {
+      "id": "ac-2",
+      "kind": "COMPILE",
+      "target": "frontend"
+    },
+    {
+      "id": "ac-3",
+      "kind": "CONTRACT",
+      "method": "GET",
+      "path": "/api/todos",
+      "expectedStatus": 200,
+      "expected": "返回体中的 data 是数组；数组中每个对象包含 id、title、note、completed、createdAt；列表按 createdAt 倒序，空数组通过。"
+    },
+    {
+      "id": "ac-4",
+      "kind": "CONTRACT",
+      "method": "GET",
+      "path": "/api/todos?status=active",
+      "expectedStatus": 200,
+      "expected": "返回体中的 data 是数组；数组中每个对象的 completed 必须为 false；空数组通过。"
+    },
+    {
+      "id": "ac-5",
+      "kind": "CONTRACT",
+      "method": "GET",
+      "path": "/api/todos?status=completed",
+      "expectedStatus": 200,
+      "expected": "返回体中的 data 是数组；数组中每个对象的 completed 必须为 true；空数组通过。"
+    },
+    {
+      "id": "ac-6",
+      "kind": "CONTRACT",
+      "method": "POST",
+      "path": "/api/todos",
+      "expectedStatus": 201,
+      "expected": "测试前清空 SQLite 测试库；使用请求体 title 为 acceptance-create；返回体中的 data 是对象，data.id 为 1，data.title 为 acceptance-create，data.completed 为 false，data.createdAt 是 ISO 时间字符串。"
+    },
+    {
+      "id": "ac-7",
+      "kind": "CONTRACT",
+      "method": "POST",
+      "path": "/api/todos",
+      "expectedStatus": 400,
+      "expected": "使用请求体为空对象；返回体中的 error.message 是非空字符串，表示 title 必填。"
+    },
+    {
+      "id": "ac-8",
+      "kind": "CONTRACT",
+      "method": "PATCH",
+      "path": "/api/todos/1",
+      "expectedStatus": 200,
+      "expected": "在 ac-6 创建成功之后调用；请求体 completed 为 true；返回体中的 data.id 为 1，data.completed 为 true。"
+    },
+    {
+      "id": "ac-9",
+      "kind": "CONTRACT",
+      "method": "PATCH",
+      "path": "/api/todos/1",
+      "expectedStatus": 200,
+      "expected": "在 ac-8 之后调用；请求体 completed 为 false；返回体中的 data.id 为 1，data.completed 为 false。"
+    },
+    {
+      "id": "ac-10",
+      "kind": "CONTRACT",
+      "method": "DELETE",
+      "path": "/api/todos/1",
+      "expectedStatus": 200,
+      "expected": "在 ac-9 之后调用；返回体中的 data.id 为 1。"
+    }
+  ],
+  "developerInstructions": "按 w1 foundation 到 w5 pre-test 的顺序执行；只在 backend 与 frontend 相对目录写盘；单用户本地使用，不做注册登录、提醒、日历、多端同步和富文本；后端统一 /api 前缀并返回 JSON，成功响应外壳使用 data，失败响应外壳使用 error；新增接口 title 必须非空，否则返回 400；列表按 createdAt 倒序；status 查询参数使用 all/active/completed；PATCH 接收 completed 布尔值实现标记完成和撤销；DELETE 按 id 删除，id 不存在返回 404；SQLite 使用 integer 自增主键；验收测试假设按 acceptanceChecks 顺序执行并在测试前清空数据库，因此 POST 创建的第一条待办 id 为 1；前端提供新增表单、列表、全部/未完成/已完成筛选、完成/撤销、删除按钮，已完成项使用划线或置灰样式区分。"
+}

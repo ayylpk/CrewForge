@@ -1,0 +1,461 @@
+{
+  "type": "architect_batch",
+  "projectId": "p7",
+  "taskId": "p7-t1",
+  "itemId": "w9",
+  "detail": "在 backend/src/routes/stats.js 导出 Express Router，由 server.js 挂在 /api 前缀下；本路由不重复做身份校验，完全复用 w3 的 X-User-Id 中间件与统一错误壳（缺失/非法身份由中间件统一 401）。唯一端点：GET /api/projects/{id}/stats。处理步骤：先按 id 查 projects，无记录直接 404 {error:{message}}；若该项目 isPrivate 为真且当前身份不在 memberships(projectId,userId) 中，返回 403；否则用一条 SQL 对 tasks 按任务状态列 GROUP BY 计数，范围为 WHERE projectId = ?（即该项目全部任务，天然含被指派、被打标签的任务，不 join membership/tag，不做任何排除）。组装响应 {data:{projectId,total,todo,doing,done}}，五个数值均为整数（缺某状态补 0，不能留 undefined），total = todo+doing+done，字段名 camelCase，与 contract 里该端点的 response 逐字一致。复用 w2 的 better-sqlite3 连接与建表结果、w6 写入的 tasks 数据。",
+  "checks": [
+    {
+      "id": "ac-59",
+      "kind": "CONTRACT",
+      "method": "GET",
+      "path": "/api/projects/{id}/stats",
+      "expectedStatus": 200,
+      "expected": "项目内 3 条任务（含 1 条已打标签）精确汇总：total=3、todo=3、doing=0、done=0",
+      "headers": {
+        "X-User-Id": "{uid}"
+      },
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "StatsOwner"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "uid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects",
+          "body": {
+            "name": "StatsProj"
+          },
+          "expectedStatus": 201,
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "extract": {
+            "name": "id",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects/{id}/tasks",
+          "body": {
+            "title": "s1"
+          },
+          "expectedStatus": 201,
+          "headers": {
+            "X-User-Id": "{uid}"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects/{id}/tasks",
+          "body": {
+            "title": "s2"
+          },
+          "expectedStatus": 201,
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "extract": {
+            "name": "t2",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects/{id}/tasks",
+          "body": {
+            "title": "s3"
+          },
+          "expectedStatus": 201,
+          "headers": {
+            "X-User-Id": "{uid}"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects/{id}/tags",
+          "body": {
+            "name": "stats-tag"
+          },
+          "expectedStatus": 201,
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "extract": {
+            "name": "tag",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/tasks/{t2}/tags",
+          "body": {
+            "tagId": "{tag}"
+          },
+          "expectedStatus": 201,
+          "headers": {
+            "X-User-Id": "{uid}"
+          }
+        }
+      ],
+      "assertJson": [
+        {
+          "path": "data.projectId",
+          "exists": true
+        },
+        {
+          "path": "data.total",
+          "equals": 3
+        },
+        {
+          "path": "data.todo",
+          "equals": 3
+        },
+        {
+          "path": "data.doing",
+          "equals": 0
+        },
+        {
+          "path": "data.done",
+          "equals": 0
+        }
+      ]
+    },
+    {
+      "id": "ac-60",
+      "kind": "CONTRACT",
+      "method": "GET",
+      "path": "/api/projects/{id}/stats",
+      "expectedStatus": 200,
+      "expected": "汇总范围严格限定该项目：A 项目 2 条任务，B 项目 1 条任务，查 A 只得 total=2",
+      "headers": {
+        "X-User-Id": "{uid}"
+      },
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "ScopeOwner"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "uid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects",
+          "body": {
+            "name": "ScopeA"
+          },
+          "expectedStatus": 201,
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "extract": {
+            "name": "id",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects/{id}/tasks",
+          "body": {
+            "title": "a1"
+          },
+          "expectedStatus": 201,
+          "headers": {
+            "X-User-Id": "{uid}"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects/{id}/tasks",
+          "body": {
+            "title": "a2"
+          },
+          "expectedStatus": 201,
+          "headers": {
+            "X-User-Id": "{uid}"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects",
+          "body": {
+            "name": "ScopeB"
+          },
+          "expectedStatus": 201,
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "extract": {
+            "name": "id2",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects/{id2}/tasks",
+          "body": {
+            "title": "b1"
+          },
+          "expectedStatus": 201,
+          "headers": {
+            "X-User-Id": "{uid}"
+          }
+        }
+      ],
+      "assertJson": [
+        {
+          "path": "data.total",
+          "equals": 2
+        },
+        {
+          "path": "data.todo",
+          "equals": 2
+        },
+        {
+          "path": "data.doing",
+          "equals": 0
+        },
+        {
+          "path": "data.done",
+          "equals": 0
+        }
+      ]
+    },
+    {
+      "id": "ac-61",
+      "kind": "CONTRACT",
+      "method": "GET",
+      "path": "/api/projects/{id}/stats",
+      "expectedStatus": 403,
+      "expected": "私密项目的汇总仅成员可读，已认证但非成员的另一个用户 403",
+      "headers": {
+        "X-User-Id": "{uid2}"
+      },
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "PrivOwner"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "uid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "Outsider"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "uid2",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects",
+          "body": {
+            "name": "PrivProj",
+            "isPrivate": true
+          },
+          "expectedStatus": 201,
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "extract": {
+            "name": "id",
+            "from": "data.id"
+          }
+        }
+      ],
+      "assertJson": [
+        {
+          "path": "data",
+          "exists": false
+        }
+      ]
+    },
+    {
+      "id": "ac-62",
+      "kind": "CONTRACT",
+      "method": "GET",
+      "path": "/api/projects/{id}/stats",
+      "expectedStatus": 404,
+      "expected": "项目已被删除（不存在）时汇总接口 404",
+      "headers": {
+        "X-User-Id": "{uid}"
+      },
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "GoneOwner"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "uid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects",
+          "body": {
+            "name": "GoneProj"
+          },
+          "expectedStatus": 201,
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "extract": {
+            "name": "id",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "DELETE",
+          "path": "/api/projects/{id}",
+          "expectedStatus": 200,
+          "headers": {
+            "X-User-Id": "{uid}"
+          }
+        }
+      ]
+    },
+    {
+      "id": "ac-63",
+      "kind": "CONTRACT",
+      "method": "GET",
+      "path": "/api/projects/{id}/stats",
+      "expectedStatus": 401,
+      "expected": "缺少 X-User-Id 头时汇总接口 401（未认证优先于任何项目判定）",
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "AnonOwner"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "uid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects",
+          "body": {
+            "name": "AnonProj"
+          },
+          "expectedStatus": 201,
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "extract": {
+            "name": "id",
+            "from": "data.id"
+          }
+        }
+      ]
+    },
+    {
+      "id": "ac-64",
+      "kind": "CONTRACT",
+      "method": "GET",
+      "path": "/api/projects/{id}/stats",
+      "expectedStatus": 200,
+      "expected": "公开项目对任意已认证用户（非成员）可读，且计数正确（total=1、todo=1）",
+      "headers": {
+        "X-User-Id": "{uid2}"
+      },
+      "setup": [
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "PubOwner"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "uid",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/users",
+          "body": {
+            "name": "PubReader"
+          },
+          "expectedStatus": 201,
+          "extract": {
+            "name": "uid2",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects",
+          "body": {
+            "name": "PubProj"
+          },
+          "expectedStatus": 201,
+          "headers": {
+            "X-User-Id": "{uid}"
+          },
+          "extract": {
+            "name": "id",
+            "from": "data.id"
+          }
+        },
+        {
+          "method": "POST",
+          "path": "/api/projects/{id}/tasks",
+          "body": {
+            "title": "p1"
+          },
+          "expectedStatus": 201,
+          "headers": {
+            "X-User-Id": "{uid}"
+          }
+        }
+      ],
+      "assertJson": [
+        {
+          "path": "data.total",
+          "equals": 1
+        },
+        {
+          "path": "data.todo",
+          "equals": 1
+        },
+        {
+          "path": "data.done",
+          "equals": 0
+        }
+      ]
+    }
+  ]
+}
