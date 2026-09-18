@@ -415,10 +415,11 @@ export async function runProject(projectId: number, questioner: Questioner): Pro
             let turns = 0;
             while (!state?.flag && turns < 30) {
                 const reply = state?.messages?.at(-1);
-                if (reply) {
-                    const text = typeof reply.content === "string" ? reply.content : JSON.stringify(reply.content);
-                    console.log(`\n[PM] ${text}`);
-                }
+                // PM 这一轮说的话：既打日志，也当确认门题面（见下面 ask 的 prompt）
+                const pmText = reply
+                    ? (typeof reply.content === "string" ? reply.content : JSON.stringify(reply.content))
+                    : "";
+                if (pmText) console.log(`\n[PM] ${pmText}`);
                 // 全绿灯模式：自动输入"定稿"跳过 PM 对话
                 if (isAuto) {
                     console.log("[runner] 全绿灯模式：自动定稿");
@@ -428,7 +429,12 @@ export async function runProject(projectId: number, questioner: Questioner): Pro
                 }
                 const userInput = await questioner.ask({
                     questionId: `pm-${projectId}-${turns}`,
-                    prompt: "（输入下一句需求；输入 定稿 结束需求确认）",
+                    // ⚠️ 题面必须是 PM 的原话：Web 上人看到的就是这一句。
+                    //    9/18 修「对话没连接」——原先这里写死一句过场话
+                    //    "（输入下一句需求；输入 定稿 结束需求确认）"，PM 真正问的问题
+                    //    只被上面 console.log 打进引擎日志、从没进过确认门。
+                    //    于是 sys_confirm 里躺着一句固定提示，网页上永远看不到 PM 问了什么。
+                    prompt: pmText || "（输入下一句需求；输入 定稿 结束需求确认）",
                     options: ["定稿"],
                 });
                 state = await manager.run({ messages: [new HumanMessage(userInput)], projectId }, thread, questioner);

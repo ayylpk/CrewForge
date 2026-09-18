@@ -184,6 +184,38 @@ ${ARCHITECT_BASELINE}
 }
 `;
 
+export const consult_prompt: string = `
+# 角色
+你是 CrewForge 项目的架构师。动手出技术方案**之前**，你先跟用户把会影响选型的关键决策问清楚。
+
+## 为什么要有这一步
+用户的需求原文通常只写"做什么"，不写"跑在哪、要不要登录、单机还是多机"。
+这些不问清，选型就只能靠猜；猜错的话后面拆出来的任务、表结构、接口全白做。
+所以问要比猜便宜得多。
+
+## 任务
+看需求原文与本阶段功能清单，判断有没有"不问清就会选错"的点。有就提出**一个**最关键的追问；没有就输出空 question。
+
+该问的典型：
+- 需求没写、但选型必须知道的部署/环境约束（跑在哪台机器、要不要外网、单机还是多人用）；
+- 有两条都说得通的技术路线、且用户偏好决定取舍的（如 SQLite 单文件 vs MySQL 服务、要不要引入登录体系）；
+- 需求自相矛盾或明显遗漏、会改变数据模型或接口形态的。
+
+## 不能问的（问了就是浪费用户时间）
+- 需求里**已经写明**的——硬约束照做，不要复述确认；
+- 纯实现细节（文件怎么组织、用什么 ORM、命名）——那是你该自己定的；
+- 泛泛的"还有什么要补充的吗"。
+**没有问题就必须输出空 question**，不要为了显得尽责而硬凑一个问题。
+
+## 轮次
+最多问 3 个。输入里的 consultHistory 是你已经问过的与用户已答的，不要重复问；
+用户答过的按答案执行，不要再确认一遍。
+
+## 输出
+只输出合法 JSON，不要 Markdown、解释或额外字段：
+{ "question": "要问用户的那一个问题（没有就空串）", "why": "为什么必须问它（一句话，给用户看背景）" }
+`;
+
 export const base_prompt: string = `
 # 角色
 你是 CrewForge 项目的架构师-基础架构 Agent，负责把当前阶段需要的工程基础动作整理成可执行清单。
@@ -312,6 +344,16 @@ export const stackSchema = z.object({
         fields: z.array(z.object({ name: z.string(), type: z.string(), required: z.boolean(), remark: z.string() })),
     })),
     moduleTech: z.array(z.object({ module: z.string(), backend: z.string(), frontend: z.string() })),
+    why: z.string(),
+});
+
+/**
+ * 架构师澄清（9/18）：出方案前先问清关键决策。
+ * question 空串 = 没有要问的（**必须允许空串**：模型不该为了显得尽责而硬凑问题，
+ * 所以这里不用 min(1)，"没问题"是一个合法且应当被鼓励的输出）。
+ */
+export const consultSchema = z.object({
+    question: z.string(),
     why: z.string(),
 });
 
@@ -674,6 +716,112 @@ const bootstrapNode: StateNodeFn = async (state, node) => {
     }
 };
 
+/**
+ * 架构师澄清节点（9/18）—— 出方案前先让 LLM 就关键决策追问用户。
+ *
+ * 为什么要自己调 LLM，而不是用 nodeType:"llm" 声明一个节点：
+ *   这个节点要做的第一件事是**归一历史** —— 把上一轮的 `consult.question` 与
+ *   `state.humanAnswer` 合成一条 consultHistory。而 llm 节点只会把整个 state
+ *   原样 JSON 化喂给模型（GraphFactory:165），做不到"先整理再问"。
+ *   历史归一必须发生在提问之前，否则模型看不到自己刚问过什么，会重复追问。
+ *
+ * 为什么放在图的最前面（__start__ → 本节点 → architectPlan）：
+ *   `runWithInteraction` 每答一轮就重新 invoke 一次图，而图是从 __start__ 重跑的。
+ *   本节点排在 architectPlan/architectStack 之前，重跑一轮的代价就只有这一次提问调用；
+ *   若排在 stack 之后，每轮都要连带重跑 plan+stack 两个大 LLM 调用（白烧钱）。
+ */
+function makeConsultNode(): StateNodeFn {
+    return async (state: any) => {
+        // ① 归一历史：上一轮"问了什么 + 用户答了什么" → consultHistory
+        const history: { question: string; answer: string }[] = Array.isArray(state?.consultHistory)
+            ? [...state.consultHistory]
+            : [];
+        const lastQuestion = String(state?.consult?.question ?? "").trim();
+        if (state?.humanAnswer != null && lastQuestion) {
+            history.push({ question: lastQuestion, answer: String(state.humanAnswer) });
+        }
+
+        // ② 阶段 2+：架构已定（bootstrapDone）→ 技术决策不重复追问，直接放行
+        if (state?.bootstrapDone === true) {
+            return { consultHistory: history, consult: { question: "", why: "" }, human: null, humanAnswer: null };
+        }
+
+        // ②b 确认模式分流（与网页上三个模式的承诺对齐）：
+        //   全绿灯(0) = "AI 自动推进，只在交付时展示结果" → 不许打扰用户，直接出方案；
+        //   混合(1)   = "在需求/技术栈/计划/团队 4 个节点确认" → **技术栈这个节点就是这里**；
+        //   手动(2)   = 每阶段都要人过 → 更要问。
+        //   ⚠️ 这一条补上之前，"混合模式在技术栈节点确认"是句空话：架构师的 y/n 确认门
+        //   在 mode 0/1 都自动放行（见 confirmNode），人在技术栈这一步根本没有发言机会。
+        const mode = state?.confirmMode ?? 0;
+        if (mode === 0) {
+            return { consultHistory: history, consult: { question: "", why: "" }, human: null, humanAnswer: null };
+        }
+
+        // ③ 需求原文优先读库（与 stack 校验器同口径：state.plan 是 PM 消化过的，可能洗掉原话）
+        let requirement = "";
+        try {
+            const pid = currentProjectId();
+            if (pid != null) requirement = await getProjectRequirement(pid);
+        } catch { /* 读不到就退到 plan */ }
+        if (!requirement) {
+            requirement = typeof state?.plan === "object" && state.plan !== null
+                ? JSON.stringify(state.plan)
+                : String(state?.plan ?? "");
+        }
+        const input = { requirement, plan: state?.plan ?? null, consultHistory: history };
+
+        // ④ 问 LLM：还有要跟用户确认的吗（question 为空 = 没有）
+        const parsed = await retryStructured<{ question: string; why: string }>(
+            "架构师澄清提问",
+            async (feedback, sig) => {
+                const model = initModels(ARCHITECT_MODEL_JSON, "architect");
+                const out = await model
+                    .withStructuredOutput(consultSchema, { method: "jsonMode", name: "extract_architect_consult" })
+                    .invoke([new SystemMessage(`${consult_prompt}\n\n## 输入\n${JSON.stringify(input, null, 2)}${feedback}`)], { signal: sig });
+                return out as { question: string; why: string };
+            },
+        );
+        const question = String(parsed?.question ?? "").trim();
+        if (question) {
+            console.log(`[architect] 澄清第 ${history.length + 1} 问：${question}`);
+        } else if (history.length > 0) {
+            console.log(`[architect] 澄清结束（用户答了 ${history.length} 轮，不再追问）`);
+        }
+        // human: null 显式清掉上一轮的挂起标记：否则图会停在旧问题上（humanGate 语义）
+        return {
+            consultHistory: history,
+            consult: { question, why: String(parsed?.why ?? "") },
+            human: null,
+            humanAnswer: null,
+            llmCalls: 1,
+        };
+    };
+}
+
+/**
+ * 澄清门：LLM 有问题就交给用户答（经确认门落 sys_confirm），没有就放行去出方案。
+ * 与 confirmNode 的区别：这里是**开放式问答**（options 为空 = 自由文本），
+ * 不是 y/n；且可连续问，直到 LLM 自己说没有要问的了。
+ */
+const consultGateNode: StateNodeFn = async (state) => {
+    const question = String(state?.consult?.question ?? "").trim();
+    if (!question) {
+        return { human: null };   // 没有问题 → 条件边放行到 architectPlan
+    }
+    // questionId 带轮次：HttpQuestioner 建题幂等，同轮重跑不会给用户重复塞单子
+    const turn = Array.isArray(state?.consultHistory) ? state.consultHistory.length : 0;
+    return {
+        human: {
+            questionId: `architect-consult-${turn}`,
+            prompt: state?.consult?.why ? `${question}\n\n（为什么要问：${state.consult.why}）` : question,
+            options: [],
+        },
+    };
+};
+
+/** 澄清门：human != null = 有问题挂着，图收在 __end__ 等人答 */
+const consultPending: CondFn = (state) => state?.human != null;
+
 /** 确认门：human 交互（y/n），把答案保留进 confirmAnswer 供条件边判断（humanGate 会清掉 humanAnswer）
  *  确认模式控制：0-全绿灯(自动) / 1-混合(自动) / 2-手动(弹出确认) */
 const confirmNode: StateNodeFn = async (state, node) => {
@@ -878,6 +1026,33 @@ const confirmYes: CondFn = (state) => String(state.confirmAnswer ?? "").trim().t
 
 export const DEFAULT_NODES: Node[] = [
     {
+        // ⚠️ 节点名不能叫 `consult` —— state 里已有 `consult` 通道，LangGraph 的 addNode 会直接抛
+        //    "consult is already being used as a state attribute, cannot also be used as a node name"
+        //    （9/18 实测：这一抛发生在 createCoreTeam，等于任何项目一开工就崩，代价为零但必须记住）
+        nodeName: "architectConsult",
+        nodeType: "code",
+        description: "澄清：出方案前就关键决策追问用户（LLM 生成，最多 3 问）",
+        systemPrompt: consult_prompt,
+        temperature: 0.3,
+        tools: "",
+        model: ARCHITECT_MODEL_JSON,
+        schemaKey: "",
+        codeKey: "architect_consult",
+        output: "",
+    },
+    {
+        nodeName: "consultGate",
+        nodeType: "code",
+        description: "澄清门：有问题就挂起等人答，没有就放行",
+        systemPrompt: "",
+        temperature: 0.3,
+        tools: "",
+        model: ARCHITECT_MODEL_JSON,
+        schemaKey: "",
+        codeKey: "architect_consult_gate",
+        output: "",
+    },
+    {
         nodeName: "architectPlan",
         nodeType: "llm",
         description: "业务分解：功能 → 业务模块蓝图",
@@ -952,7 +1127,13 @@ export const DEFAULT_NODES: Node[] = [
 ];
 
 export const DEFAULT_EDGES: Edge[] = [
-    { fromNode: "__start__", type: "direct", toNodes: "architectPlan" },
+    // 9/18：图最前面插澄清环（先问清关键决策再出方案）。
+    // 为什么在最前面而不是 stack 之后：runWithInteraction 每答一轮都会从 __start__ 重跑图，
+    // 放最前面时重跑代价 = 一次提问调用；放 stack 后面则每轮白烧 plan+stack 两个大调用。
+    { fromNode: "__start__", type: "direct", toNodes: "architectConsult" },
+    { fromNode: "architectConsult", type: "direct", toNodes: "consultGate" },
+    // 有问题 → 收在图末（human 已置位，runWithInteraction 负责问人）；没问题 → 出方案
+    { fromNode: "consultGate", type: "conditional", toNodes: JSON.stringify({ cond: "architect_consult_pending", true: "__end__", false: "architectPlan" }) },
     // 地基已就绪（阶段 2+）：跳过 architectStack/confirmGate/base/bootstrap，直接拆任务
     //（stack/basePlan 由 runPhaseSplit 从 .architect-state.json 读回注入；bootstrapDone 置 true 走此短路）
     { fromNode: "architectPlan", type: "conditional", toNodes: JSON.stringify({ cond: "architect_bootstrap_done", true: "dispatch", false: "architectStack" }) },
@@ -1221,10 +1402,14 @@ export class Architect extends BaseAgent {
         schemaRegistry.register("architect_base", baseSchema);
         schemaRegistry.register("architect_bootstrap", bootstrapSchema);
         schemaRegistry.register("architect_resolution", resolutionSchema);
+        schemaRegistry.register("architect_consult", consultSchema);
         codeRegistry.register("architect_confirm", confirmNode);
+        codeRegistry.register("architect_consult", makeConsultNode());
+        codeRegistry.register("architect_consult_gate", consultGateNode);
         codeRegistry.register("architect_bootstrap", bootstrapNode);
         codeRegistry.register("architect_dispatch", makeDispatchNode(this.station));
         condRegistry.register("architect_confirm_yes", confirmYes);
+        condRegistry.register("architect_consult_pending", consultPending);
         condRegistry.register("architect_bootstrap_done", (s: any) => s.bootstrapDone === true);
 
         console.log(`[architect] 拼接编译拆分图：${nodes.map(n => n.nodeName).join(" → ")}`);
@@ -1232,6 +1417,9 @@ export class Architect extends BaseAgent {
             stateExtra: {
                 plan: Annotation<any>({ default: () => null, reducer: (_: any, u: any) => u }),
                 confirmAnswer: Annotation<any>({ default: () => null, reducer: (_: any, u: any) => u }),
+                // 9/18 澄清环：本轮的提问（question 空串=没问题）+ 已问已回答的历史
+                consult: Annotation<any>({ default: () => ({ question: "", why: "" }), reducer: (_: any, u: any) => u }),
+                consultHistory: Annotation<any[]>({ default: () => [], reducer: (_: any[], u: any[]) => u }),
                 exeTasks: Annotation<any[]>({ default: () => [], reducer: (_: any[], u: any[]) => u }),
                 confirmMode: Annotation<number>({ default: () => 0, reducer: (_: number, u: number) => u }),
                 bootstrapDone: Annotation<boolean>({ default: () => false, reducer: (_: boolean, u: boolean) => u }),

@@ -273,6 +273,14 @@ export function stitch(rows: Node[], edges: Edge[], opts?: StitchOptions): any {
 
 // 带交互的执行循环：图跑完 → 有 pending 问题 → 问用户 → 带答案续跑（上限防死循环）
 // 阻塞发生在图外（questioner.ask），不在图节点内——图每轮 invoke 都正常返回
+//
+// ⚠️ 9/18：这个上限原来是写死的 3，而它同时管着**两种**交互：
+//   ① 架构师确认门的 y/n（一次就完，用不到几轮）；
+//   ② 新增的架构师澄清追问（LLM 逐轮提问，最多 3 问 + 1 轮收口 = 需要 4 轮）。
+//   写死 3 会把第 3 问之后的重跑直接掐掉，模型永远等不到"问答结束"那一轮，
+//   表现为"问了三句就卡住不再出方案"。所以改成可配常量，默认 6（比 3 问留足收口余量）。
+const MAX_INTERACTION_TURNS = Number(process.env.CF_MAX_INTERACTION_TURNS ?? 6);
+
 export async function runWithInteraction(
     graph: any,
     input: Record<string, any>,
@@ -281,11 +289,15 @@ export async function runWithInteraction(
 ): Promise<any> {
     let state = await graph.invoke(input, { configurable: { thread_id: threadId } });
     let turns = 0;
-    while (state?.human && turns < 3) {
+    while (state?.human && turns < MAX_INTERACTION_TURNS) {
         console.log(`\n[交互] ${state.human.prompt}`);
         const answer = await questioner.ask(state.human);
         state = await graph.invoke({ humanAnswer: answer }, { configurable: { thread_id: threadId } });
         turns += 1;
+    }
+    if (state?.human) {
+        // 撞上限还没结束：必须显式说出来。静默截断会让"模型忘了收口"看着像引擎卡死。
+        console.warn(`[交互] 已达轮次上限（${MAX_INTERACTION_TURNS}），仍有未答问题未消化，直接放行：${state.human.prompt}`);
     }
     return state;
 }
