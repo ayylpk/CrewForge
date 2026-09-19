@@ -329,13 +329,12 @@ export async function runVerify(raw: unknown, opts: VerifyOptions = {}): Promise
     result.mechanicalVerdict = result.verdict;
     if (result.verdict === "pass") log(`✅ 全部 ${evidence.length} 项真实执行且 exit=0，skipped=0 → 机械 pass`);
 
-    // error / blocked_unverified 不进审查：前者输入就没合法，后者根本没有可审查的执行结果。
-    // （机械失败 fail **要**进审查——两边的问题一起给 Developer。）
-    if (result.verdict === "error" || result.verdict === "blocked_unverified") {
+    // blocked_unverified 不进审查：根本没有可审查的执行结果。
+    // 输入非法走 emptyResult()，verdict="error" 在进函数前就已返回；机械失败 fail **要**进审查
+    // ——两边的问题一起给 Developer。
+    if (result.verdict === "blocked_unverified") {
         result.outcome = result.verdict;
-        result.outcomeReason = result.verdict === "error"
-            ? "输入非法——结论不可信，审查不改变这一点"
-            : "有判据没被执行——未验证不等于通过";
+        result.outcomeReason = "有判据没被执行——未验证不等于通过";
         return result;
     }
 

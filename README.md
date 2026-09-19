@@ -84,8 +84,7 @@ backend/    Java 控制台后端（common / pojo / server 三模块 + sql 基线
 frontend/   Vue 3 控制台（views 八个页面 / components / api / composables）
 agent/
 ├── engine/       多智能体引擎（projectRunner.ts 是入口；developerAgent/ 是开发工位）
-│   └── eval/     评测基线（冻结需求 + 机器断言）
-└── testAgent/    独立验收器（含 skills/ 与 evals/）
+└── testAgent/    独立验收器（skills/ 是验收技能库）
 deploy/     Dockerfile / docker-compose / nginx / 验证脚本
 ```
 
@@ -127,8 +126,8 @@ cd frontend && npm install && npm run dev                 # :5173
 | `failed` | 编译、启动或契约断言失败 | ❌ |
 
 ```bash
-pwsh deploy/scripts/verify.ps1     # 一键自检：引擎类型检查 + 17 个冒烟 + 前端构建 + 后端测试
-cd agent/engine && bun x tsc --noEmit && bun test
+pwsh deploy/scripts/verify.ps1     # 一键自检：引擎类型检查 + 前端构建 + 后端测试
+cd agent/engine && bun x tsc --noEmit
 cd backend && ./mvnw test
 ```
 

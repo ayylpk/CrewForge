@@ -1,9 +1,0 @@
-{
-  "name": "f3-green",
-  "module": "src/calc.ts",
-  "type": "module",
-  "private": true,
-  "scripts": {
-    "test": "bun test"
-  }
-}

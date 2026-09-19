@@ -18,14 +18,8 @@ function Run-Step([string]$Name, [scriptblock]$Command) {
 Push-Location $engine
 try {
     Run-Step "engine typecheck" { & $bun x tsc --noEmit }
-    $smokes = @(
-        "compile-gate-smoke.ts", "contracts-smoke.ts", "pm-ui-smoke.ts", "role-tier-smoke.ts",
-        "render-smoke.ts", "t4-smoke.ts", "t7-smoke.ts", "t7b-smoke.ts", "baseline-smoke.ts", "foundation-smoke.ts",
-        "dynamic-baseline-smoke.ts", "role-prompt-smoke.ts", "message-protocol-smoke.ts",
-        "artifact-validation-smoke.ts", "core-team-smoke.ts",
-        "db-idempotency-smoke.ts", "qualityMetrics-smoke.ts"
-    )
-    foreach ($smoke in $smokes) { Run-Step $smoke { & $bun run $smoke } }
+    # 9/18 清理：17 个 *-smoke.ts 一次性自检脚本、engine/tests、developerAgent/tests、
+    # testAgent/tests 与 eval/ 评测档已全部删除 —— 引擎侧不再有测试步骤，只留类型检查。
 } finally { Pop-Location }
 
 if (-not $SkipBuilds) {

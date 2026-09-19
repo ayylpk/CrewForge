@@ -1,5 +1,0 @@
-{
-  "name": "ts-site-v2-backend-fixture",
-  "private": true,
-  "scripts": { "build": "node -e \"console.log('backend build ok')\"" }
-}

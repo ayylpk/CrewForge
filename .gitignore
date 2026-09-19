@@ -22,64 +22,42 @@ Thumbs.db
 # ===== 日志/临时 =====
 *.log
 *.tmp
+*.pid
+smoke-input*
+# 前端无测试框架：check-json-merge 靠 tsc 现编 utils/json.ts 到这里的临时产物
+.tmp-jsoncheck/
 
 # ===== 敏感配置（本地开发用，不提交；部署时参照 application.example.yml）=====
 **/application.yml
 **/.env
-agents-CrewForge/projects/
-
-# ===== 误拷贝的桌面构建副本（343MB dist，勿提交）=====
-DeskTop-CrewForge/
 
 # ===== 引擎运行产物 =====
-agents-CrewForge/runs/
-# 9/18 目录重构后引擎产物改到 agent/runs/（同一件事的新位置）
+# RUNS_ROOT 产物树（pN / _archive / logs 都不入库）
 agent/runs/
+runs/
+# Developer 本机 soft 冒烟的隔离工作区（生成的临时项目 / Ledger / 运行报告都不入库）
+.runs/
+output/
+tmp/
 
-# ===== tsc / vue-tsc 就地 emit 的编译产物（9/18 逮到）=====
+# ===== tsc / vue-tsc 就地 emit 的编译产物 =====
 # frontend 的 tsconfig 没关 emit，`vue-tsc -b` 会在源文件旁边生成同名 .js。
-# 这不是"会不会发生"的问题：每次类型检查都会生成。9/18 我用 `git add -A` 时被扫进仓库 42 个
-# （每个都有对应的 .ts/.vue，0 个孤儿 —— 确认全是产物）。这里封死，防止再被 add -A 带进去。
+# 这不是"会不会发生"：每次类型检查都会生成，`git add -A` 会把它们扫进仓库。
 # 用通配而不是写死 frontend/：将来别处同样配置的目录也一并覆盖。
 frontend/src/**/*.js
 frontend/src/*.js
 
-# ===== 引擎编译产物/测试临时文件 =====
-# 9/17 由 `agents-CrewForge/dist-node/` 改成通配：写死单条路径时，别的目录的同类产物
-# 就漏在规则外（_legacy-agents/dist-node 只能靠它自己子项目的 .gitignore 兜）。
+# ===== 引擎编译产物 =====
 **/dist-node/
-*.pid
-smoke-input*
-# 前端无测试框架：scripts/check-json-merge.cjs 靠 tsc 现编 utils/json.ts 到这里的临时产物
-.tmp-jsoncheck/
-# 阶段2起 RUNS_ROOT 统一指仓库根 runs/（产物树 pN/_archive/logs 不入库）
-runs/
-# Developer 本机 soft 冒烟的隔离工作区（生成的临时项目 / Ledger / 运行报告都不入库）
-.runs/
 
-# Local cleanup archive
+# ===== developerAgent 实弹实验产物 =====
+# 任务包 / 生成出来的实验项目都不入库，整目录挡掉（live/*.ts 因此也一直未入库，
+# 这是既有口径，9/19 清理时保持原样，不对它做任何改动）。
+agent/engine/developerAgent/live/
+
+# ===== 本地归档（清理时的临时中转，不入库）=====
 _archive/
-
-# ===== developerAgent 实弹实验产物（任务包/生成项目不入库，源码除外）=====
-agents-CrewForge/developerAgent/live/p0-*
-agents-CrewForge/developerAgent/live/mysite/
-agents-CrewForge/developerAgent/live/ts-site/
-agents-CrewForge/developerAgent/live/ts-site-v2/
-
-
-# ===== WorkBuddy 本地笔记（不提交）=====
 .workbuddy/
 
-# ===== eval 机器产物（基线/运行留档 800MB+，不进库）=====
-agents-CrewForge/eval/baseline/
-fronted-CrewForge/.impeccable/
-todo-ui-preview.png
-
-# ===== 只放源码：测试夹具/运行留档/文档不入库（文件保留在磁盘）=====
-# ★ 9/17 收窄：原来排除整个 eval/，连"尺子"的实现（harness/*.ts）一起被挡在版本管理之外——
-#   而尺子是源码（决定了 pass/fail 怎么判），按"只放源码"的原则它必须进库。
-#   所以只排除**数据与产物**：baseline/（机器产物 800MB+）与 scenarios/（冻结夹具数据）。
-agents-CrewForge/eval/baseline/
-agents-CrewForge/eval/scenarios/
-agents-CrewForge/developerAgent/live/p7/
+# ===== 文档只在本地保留（已入库的 docs/resume、docs/superpowers 不受影响）=====
 docs/
