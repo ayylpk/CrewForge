@@ -61,6 +61,6 @@ bun install            # 依赖 bun.lock
 bun x tsc --noEmit     # 类型检查（应保持零输出）
 ```
 
-仓库根目录执行 `powershell -ExecutionPolicy Bypass -File scripts/verify.ps1` 可一次完成全部零 LLM smoke、前端构建、后端测试和 Git diff 检查；快速回归可加 `-SkipBuilds`。
+零 LLM smoke 脚本分布在本目录（`*smoke.ts`），按需逐个 `bun run <name>`；全量回归需要时自己串一条命令即可。
 
 `.env`（bun 自动加载）：`DB_PASSWORD`（库=crewforge，连接参数见 Node.ts/task.ts 池）、`DEEPSEEK_API_KEY`。

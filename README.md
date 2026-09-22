@@ -85,7 +85,6 @@ frontend/   Vue 3 控制台（views 八个页面 / components / api / composable
 agent/
 ├── engine/       多智能体引擎（projectRunner.ts 是入口；developerAgent/ 是开发工位）
 └── testAgent/    独立验收器（skills/ 是验收技能库）
-deploy/     Dockerfile / docker-compose / nginx / 验证脚本
 ```
 
 不入库（`.gitignore`）：`**/application.yml`、`**/.env`、`agent/runs/`、`node_modules/`、`target/`、`dist/`。
@@ -126,27 +125,13 @@ cd frontend && npm install && npm run dev                 # :5173
 | `failed` | 编译、启动或契约断言失败 | ❌ |
 
 ```bash
-pwsh deploy/scripts/verify.ps1     # 一键自检：引擎类型检查 + 前端构建 + 后端测试
-cd agent/engine && bun x tsc --noEmit
-cd backend && ./mvnw test
+cd agent/engine && bun x tsc --noEmit && bun test   # 引擎：类型检查 + 单测
+cd frontend     && npm run build                    # 前端：类型检查 + 构建
+cd backend      && ./mvnw test                      # 后端：接口与守卫测试
 ```
-
-## 容器化部署
-
-`deploy/docker-compose.yml` 起 `web(nginx:80) → app(Java + bun + 生成项目工具链) → mysql / redis`：
-
-```bash
-cd deploy && cp .env.example .env && docker compose up -d --build
-```
-
-默认 `CREWFORGE_ALLOW_DOCKER=0`，生成项目只做静态校验、交付报告为"未验证"（刻意的诚实降级）。
-开启真实验收需把宿主 `docker.sock` 挂进容器——**那约等于把宿主机 root 交给容器**，只适合自用或可信场景。
-另：`APP_MEM_LIMIT / APP_CPU_LIMIT` 别省（要跑 Maven/npm 构建）。
-⚠️ 该目录配置**尚未在真机上跑过一次部署**，首次请按 `deploy/README.md` 的检查清单逐项确认。
 
 ## 已知限制
 
-- 容器化部署未真机验证；
 - 前端是**轮询**（对话 4s、工作台 10s），没有 WebSocket/SSE；
 - 验收器本地跑时用自己的终端问答，与后端审批通道尚未打通（规则真相仍只有一份）；
 - "整棵产物树能构建"缺端到端物理证据；渲染检查依赖本机浏览器（起不起来会跳过并写理由）；
@@ -157,5 +142,4 @@ cd deploy && cp .env.example .env && docker compose up -d --build
 
 [`agent/engine/README.md`](agent/engine/README.md)（引擎内部地图）·
 [`agent/testAgent/README.md`](agent/testAgent/README.md)（验收器）·
-[`deploy/README.md`](deploy/README.md)（部署）·
 [`frontend/DESIGN.md`](frontend/DESIGN.md)（界面设计语言）

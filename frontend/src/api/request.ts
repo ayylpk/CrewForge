@@ -10,7 +10,7 @@ import { toast } from '../utils/toast'
 /**
  * 基址口径（C10 + 9/17 修部署洞）：
  *   · 已显式配置 VITE_API_BASE（含**空串**）→ 用配置值；
- *   · 空串 = 同源相对路径，生产走 nginx 的 /api 反代（见 deploy/nginx.conf）；
+ *   · 空串 = 同源相对路径，生产由前置反向代理（nginx 等）把 /api 转到后端；
  *   · 完全没配（undefined）→ 回退本地后端，纯 `npm run dev` 不开 .env 也能跑。
  * 注意必须用 ?? 而不是 ||：空串是"有意的配置"，被 || 当 falsy 吞掉就会回落成
  * http://localhost:8080 —— 那正是 Docker 里前端去访问访客自己电脑的经典事故。

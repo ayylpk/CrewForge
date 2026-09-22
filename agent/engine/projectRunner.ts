@@ -5,7 +5,7 @@
 //   → 按角色分派构造（图版读项目节点拼图；消息版读节点 prompt）
 //   → 启动消息版团队 → Manager 对话确认需求 → 桥接 phase_plan 逐阶段下发架构师
 //
-//   角色（中文 label）→ 类（9/15 名册换代）：
+//   角色（中文 label）
 //     项目经理 → Manager（图版：项目节点 + 池边 → stitch → runWithInteraction）
 //     架构师   → Architect（消息版 + 拆分图，收 phase_plan；hub 模式两阶段派发
 //                architect_task 蓝图 + 逐批 architect_batch 直派 developer）
@@ -51,14 +51,6 @@ export interface TeamBundle {
     managers: Manager[];
 }
 
-/**
- * 固定核心团队；数据库成员只提供配置，不再决定核心角色是否存在或复制实例。
- * ★ 9/15 名册换代：后端开发+前端开发+Merger 三个工位被 developerAgent **整体替换**
- *   （单开发流分批消费蓝图，见 developerTeamRunner.ts 头注释）。
- *   projectId 用于 test-core 的验收依赖注入（判据从 _tasks 落盘读回）；
- *   不传 = 纯装配测试场景（无注入，test-core 收到 test_request 会大声缺配置）。
- *   developer 座位不在 messageAgents 里（它不是 BaseAgent），由 startDeveloperLine 占。
- */
 export function createCoreTeam(
     station: TransferStation = new TransferStation({}, {}),
     projectId?: number,
@@ -104,8 +96,6 @@ export async function buildTeam(
                 break;
             case "后端开发":
             case "前端开发":
-                // 9/15 换代：这两个工位由 developerAgent（"developer"）整体替换，
-                // 成员的 DB 节点配置不再有人消费（看板数据留着无妨，等 DB 侧一并定夺）
                 console.log(`[runner] ${m.role} ${m.name}：已由 developerAgent 取代，本进程不构造`);
                 break;
             case "测试":
@@ -356,25 +346,19 @@ async function drivePhases(
 
 /** 项目级主流程：建团队 → 有 plan 直接开工（续跑），没有才 PM 对话 → 逐阶段下发 → 终态落库 */
 export async function runProject(projectId: number, questioner: Questioner): Promise<void> {
-    // 9/15：engine2（确定性流水线实验线）已拔除——其 36 个文件从未进 git、真库 6 个项目全是 legacy，
-    //   原 feature-flag 入口只制造了"已 push 代码 import 未提交模块"的 clone 即崩，故整段删除。
-
     // 按阶段起进程模式（Java spawn 注入；手工跑默认关=旧行为单进程跑完全部阶段）
     const exitAtBoundary = process.env.EXIT_AT_PHASE_BOUNDARY === "1";
     const { station, messageAgents, managers } = await buildTeam(projectId);
 
     // 1. 消息版团队常驻：start() 内含 while(true) 消息循环**永不 resolve**，必须 fire-and-forget
-    //    （9/2 阶段1验收逮到的真 bug：await 会把主流程卡死在 PM 对话之前，零 LLM 请求）
     for (const a of messageAgents) {
         void a.start().catch((e) => console.error("[runner] agent 消息循环异常退出:", e));
     }
 
-    // ★ developerAgent 装配线（9/15 替换前后端开发）：占 "developer" 座位 + 永动消费
     //   architect_task/批（消息全走 Hub 原语，见 developerTeamRunner.ts 头注释）
     startDeveloperLine(station, projectId);
 
     // ★ fail-fast：必需角色缺席=消息投进 Hub 惰性空箱、无人消费，waitForMessage 死等
-    //   （9/2 阶段1验收血泪：项目1 没配架构师成员，流水线静默挂死零日志）
     const need: { label: string; ok: () => boolean }[] = [
         { label: "架构师", ok: () => !!station.status["architect"] },
         { label: "测试", ok: () => Object.values(station.status).some((s) => s.role === roles.testEngineer) },
@@ -384,7 +368,7 @@ export async function runProject(projectId: number, questioner: Questioner): Pro
     ];
     const missing = need.filter((n) => !n.ok()).map((n) => n.label);
     if (missing.length > 0) {
-        console.error(`[runner] ⚠️ 团队缺席「${missing.join("、")}」——请先到团队视图配齐成员再开工（本轮中止，不空烧 LLM）`);
+        console.error(`[runner]  团队缺席「${missing.join("、")}」——请先到团队视图配齐成员再开工（本轮中止，不空烧 LLM）`);
         // 配置错重拉也没用，直接终态，不留给对账器空转（阶段 2 孤儿回收配套）
         await updateProjectField(projectId, { status: "failed" }).catch(() => {});
         process.exit(2);
@@ -406,7 +390,7 @@ export async function runProject(projectId: number, questioner: Questioner): Pro
             const seed = requirement ? [new HumanMessage(`【项目需求】\n${requirement}`)] : [];
             let state: any = await manager.run({ messages: seed, projectId }, thread, questioner);
             // 读取项目确认模式：全绿灯(0) 或 Java spawn（AUTO_CONFIRM=1，无终端）→ 自动定稿
-            // ⚠️ 只看 confirmMode 的话混合(1)模式在子进程里会拿 "y" 当对话输入空转 30 轮（A9 根治）
+            // 只看 confirmMode 的话混合(1)模式在子进程里会拿 "y" 当对话输入空转 30 轮（A9 根治）
             let confirmMode = 0;
             try { confirmMode = await getProjectConfirmMode(projectId); } catch { /* 默认 0 */ }
             const isAuto = confirmMode === 0 || process.env.AUTO_CONFIRM === "1";
@@ -430,7 +414,6 @@ export async function runProject(projectId: number, questioner: Questioner): Pro
                 const userInput = await questioner.ask({
                     questionId: `pm-${projectId}-${turns}`,
                     // ⚠️ 题面必须是 PM 的原话：Web 上人看到的就是这一句。
-                    //    9/18 修「对话没连接」——原先这里写死一句过场话
                     //    "（输入下一句需求；输入 定稿 结束需求确认）"，PM 真正问的问题
                     //    只被上面 console.log 打进引擎日志、从没进过确认门。
                     //    于是 sys_confirm 里躺着一句固定提示，网页上永远看不到 PM 问了什么。
@@ -475,18 +458,15 @@ export async function runProject(projectId: number, questioner: Questioner): Pro
     // 4. 逐阶段下发（边界行为见 drivePhases）
     const outcome = await drivePhases(station, projectId, plan, phases, startIdx, exitAtBoundary);
     if (outcome === "done") {
-        // ★ 交付关（9/10）+ 终态判据（阶段 1 提交 1）：项目"完成"必须等于"验证通过"，
         //   且 done 还要求任务数>0、产物数>0、无 failed 任务（阶段 0 的 s3 就是 6/8 failed 仍落 done）。
         const gate = await runFinalGate(projectId, plan);
         await settleProject(projectId, gate);
     }
-    // ★ 9/18：开发线已判终态（blocked/failed）——本项目到此为止，**必须显式收口**。
     //   原先这里没有分支：status 停在 executing，Java 对账器按"executing + 无活进程"一轮轮
     //   重拉进程（每轮第一件事就是读回 ledger 的终态、立刻再终结），既刷日志也不产生任何东西。
     //   收口走 settleOnFailure：finalGateStatus=failed + verified=false + 写失败报告，
     //   与"进程异常退出"同一口径——**未验证就不许当通过**。
     if (outcome === "terminal") {
-        // ★ 9/18：收口前先给"在途的终态消息"一个有界的消费机会。
         //   终态消息是发给架构师 + 抄送 maintainer 的，而**记账（sys_task 失败行）在
         //   maintainer 那条异步消息循环里**。这里立刻 return → 外层 process.exit(0)，
         //   就可能把还没被调度的记账腰斩（实测：任务行停在 todo、error_msg 为空）。
@@ -498,21 +478,12 @@ export async function runProject(projectId: number, questioner: Questioner): Pro
         console.log("[runner] 流程结束（开发线终态，已按未验证收口）");
         return;
     }
-    // ★ paused（刹车检查点等不到人）：**不动项目终态、不落 blocked/failed**。
     //   任务信息留在 developer 账本里（waiting_human + brake_paused），题号不变；
     //   sys_project.status 保持 executing，Java 对账器"executing + 无活进程"就会重新拉进程续跑。
     //   这正是老板要的"没确认就终止进程、任务信息保留、下次接着拉起来"。
     console.log(`[runner] 流程结束（${outcome === "paused" ? "刹车暂停，等对账器续拉" : outcome}）`);
 }
 
-/**
- * 等这些工位把**在途消息**消费完（有界）。
- *
- *   为什么需要它（9/18 实测）：开发线判终态后，收口路径会立刻走到 `process.exit(0)`，
- *   而"终态 → sys_task 记账"是 maintainer 那条**异步消息循环**里干的活——
- *   进程先退出就把写腰斩了（现场：任务行停在 todo、error_msg 为空，项目状态却是 failed）。
- *   这里只等"队列排空"，不改判定、不阻塞业务；到点就走（上限几百毫秒的正常情况）。
- */
 async function waitQueuesDrained(
     station: TransferStation, names: readonly string[], budgetMs: number,
 ): Promise<void> {
@@ -635,7 +606,7 @@ if (import.meta.main) {
     console.error("用法: bun run projectRunner.ts {projectId}（或设置环境变量 PROJECT_ID）");
     process.exit(1);
   }
-  // p3 翻车修（9/9）：argv 选了项目但 runEnv 全家（writeWorkspace/projectDir/currentProjectId）只认
+
   // env PROJECT_ID——Java spawn 会注入，手工跑漏注入=地基 18 文件全部"缺少 PROJECT_ID"写盘失败。
   // currentProjectId 是调用时现读，这里回填即全链生效（RUNS_ROOT 是模块期定格，仍需命令行前给）
   process.env.PROJECT_ID ??= String(projectId);
@@ -649,7 +620,7 @@ if (import.meta.main) {
     .then(async () => {
       console.log("[runner] 流程结束，冲刷 sys_task 桥后退出");
       await closeTaskBridge();   // 等在途写落完（3s 上限兜底），再 exit
-      await closeRenderGates();  // T6：整树杀渲染审 vite 进程链，没起过则空操作
+      await closeRenderGates(); 
       process.exit(0);
     })
     .catch(async (e) => {

@@ -1,29 +1,13 @@
 // ============================================================
 // renderGate.ts —— T6 渲染审（9/8）：headless Edge 真渲染，测试工位的"眼睛"
 //
-//   治什么病（F7）：纸审只读代码不看运行结果——白屏/运行时炸全盲。
-//   F6 已实测 headless Edge 可用（--dump-dom 能执行 JS 抓到渲染后 DOM），零新依赖。
 //
 //   组成：
 //     ensureServer   runs/pN/frontend 起 vite dev（惰性/复用/每进程一次），缺 node_modules 先 bun install
 //     dumpDom        msedge --headless --virtual-time-budget=8000 --dump-dom → 渲染后 HTML
 //     screenshot     同引擎 --screenshot 存 runs/pN/_shots/（看板回显素材，阶段 6 消费）
-//     judgeDom       纯函数判白屏——**规则搬去了 visibleText.ts**（9/18 修正，见下），
+//     judgeDom       纯函数判白屏——**规则搬去了 visibleText.ts**
 //                    这里只做适配：老调用方（render-smoke.ts）继续用同一个出口，签名不变。
-//   旁路原则：装不上依赖/起不了服/找不到 Edge/任何异常 → {status:"skip", reason}——
-//   渲染审是证据层不是控制层；skip 也要出现在测试报告里（不静默降级）。
-//   清理：closeRenderGates() 挂 runner 出口（同 closeTdesignMcp/closeTaskBridge 姿势），
-//   Windows 下 vite→esbuild 孙进程链用 taskkill /T 整树杀，防孤儿占端口。
-//
-//   ★ 9/18 修正的缺陷（"眼睛"刻度错了）：老 judgeDom 的可见文本是"去掉标签剩下的字"，
-//     于是 **<head> 里的 <title> 也被算成了可见文本**——白屏页只要标题够长就能蒙混过关。
-//     实测（真 headless Edge 跑出来的白屏页：壳 + <title> 32 字 + 空 <div id="app"></div> + bundle 已执行）：
-//         旧口径 textLen=54 / elCount=15 / blank=false（判成"有内容"）
-//         新口径 textLen=0  / elCount=13 / blank=true
-//     eval 侧早就在这份文件上留了路标（eval/harness/checks.ts:477 明说"不重复那个错"），
-//     所以判定规则收敛到 visibleText.ts 一处实现：body 优先取文本、排除 head/title/script/
-//     style/noscript/template/注释、认「SPA 挂载点为空」，并保留老的最小文本/元素数阈值。
-//     证据形状（elCount/textLen/title/url/shot/reason）保持原样，下游与冒烟脚本不受影响。
 // ============================================================
 
 import fs from "node:fs";
